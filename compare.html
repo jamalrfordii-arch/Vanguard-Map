@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Vanguard1 — 3D Satellite Comparison</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#010a14; font-family:monospace; overflow:hidden; }
+
+  #map { position:absolute; inset:0; }
+
+  /* ── Top bar ── */
+  #topbar {
+    position:absolute; top:0; left:0; right:0; z-index:100;
+    display:flex; align-items:center; gap:0;
+    background:rgba(1,10,20,0.82); border-bottom:1px solid rgba(64,196,255,0.2);
+    backdrop-filter:blur(8px);
+  }
+  #topbar h1 {
+    font-size:11px; letter-spacing:3px; color:#fff;
+    padding:12px 20px; border-right:1px solid rgba(64,196,255,0.15);
+  }
+  .loc-btn {
+    background:none; border:none; border-right:1px solid rgba(64,196,255,0.12);
+    color:#4a6b84; font-family:monospace; font-size:10px; letter-spacing:1.5px;
+    padding:12px 18px; cursor:pointer; transition:all 0.15s;
+  }
+  .loc-btn:hover { color:#40c4ff; background:rgba(64,196,255,0.06); }
+  .loc-btn.active { color:#fff; background:rgba(64,196,255,0.12); border-bottom:2px solid #40c4ff; }
+  #topbar-right {
+    margin-left:auto; padding:10px 20px;
+    font-size:9px; letter-spacing:1px; color:#2a4a5e;
+    border-left:1px solid rgba(64,196,255,0.12);
+  }
+
+  /* ── Bottom instruction strip ── */
+  #hint {
+    position:absolute; bottom:0; left:0; right:0; z-index:100;
+    background:rgba(1,10,20,0.8); border-top:1px solid rgba(64,196,255,0.15);
+    padding:8px 20px; display:flex; gap:32px; align-items:center;
+    font-size:9px; letter-spacing:1px; color:#2a4a5e;
+  }
+  #hint b { color:#40c4ff; font-weight:normal; }
+
+  /* ── Exaggeration slider ── */
+  #exag-panel {
+    position:absolute; bottom:40px; right:20px; z-index:100;
+    background:rgba(1,10,20,0.85); border:1px solid rgba(64,196,255,0.25);
+    border-left:3px solid #40c4ff; padding:12px 16px; min-width:180px;
+  }
+  #exag-panel label {
+    display:block; font-size:9px; letter-spacing:1.5px; color:#8aabc4;
+    margin-bottom:8px;
+  }
+  #exag-panel .val {
+    color:#40c4ff; font-size:12px; letter-spacing:1px;
+  }
+  #exag { width:100%; accent-color:#40c4ff; margin-top:6px; }
+
+  /* ── Style toggle ── */
+  #style-panel {
+    position:absolute; top:55px; right:20px; z-index:100;
+    display:flex; flex-direction:column; gap:6px;
+  }
+  .style-btn {
+    background:rgba(1,10,20,0.85); border:1px solid rgba(64,196,255,0.2);
+    color:#4a6b84; font-family:monospace; font-size:9px; letter-spacing:1.5px;
+    padding:7px 12px; cursor:pointer; text-align:left; transition:all 0.15s;
+    white-space:nowrap;
+  }
+  .style-btn:hover { color:#40c4ff; border-color:rgba(64,196,255,0.5); }
+  .style-btn.active { color:#fff; border-color:#40c4ff; background:rgba(64,196,255,0.1); }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>3D TERRAIN COMPARISON</h1>
+  <button class="loc-btn active" data-loc="alps">SWISS ALPS</button>
+  <button class="loc-btn" data-loc="himalaya">HIMALAYA</button>
+  <button class="loc-btn" data-loc="canyon">GRAND CANYON</button>
+  <button class="loc-btn" data-loc="fuji">MT FUJI</button>
+  <button class="loc-btn" data-loc="andes">ANDES</button>
+  <button class="loc-btn" data-loc="lagos">LAGOS (FLAT)</button>
+  <div id="topbar-right">DRAG · SCROLL ZOOM · RIGHT-DRAG PITCH/ROTATE</div>
+</div>
+
+<div id="map"></div>
+
+<div id="style-panel">
+  <button class="style-btn active" data-style="sat">● SATELLITE</button>
+  <button class="style-btn" data-style="dark">◦ DARK VECTOR</button>
+  <button class="style-btn" data-style="topo">◦ TOPO</button>
+</div>
+
+<div id="exag-panel">
+  <label>TERRAIN EXAGGERATION  <span class="val" id="exag-val">2.5×</span></label>
+  <input type="range" id="exag" min="1" max="8" step="0.5" value="2.5">
+</div>
+
+<div id="hint">
+  <b>Real satellite imagery</b> <span>draped over</span> <b>real elevation data</b>
+  <span>·</span>
+  <span>Tiles: ESRI World Imagery + AWS Terrain RGB (same DEM source as Vanguard1)</span>
+  <span>·</span>
+  <span>No API key required</span>
+</div>
+
+<script>
+// ── Tile sources ──────────────────────────────────────────────────────────────
+const ESRI_SAT   = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const ESRI_REF   = 'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+const CARTO_DARK = 'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+const TOPO       = 'https://tile.opentopomap.org/{z}/{x}/{y}.png';
+const TERRAIN    = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+
+// ── Locations ─────────────────────────────────────────────────────────────────
+const LOCATIONS = {
+  alps:     { center:[8.0,  46.5],  zoom:11, pitch:62, bearing:-20  },
+  himalaya: { center:[86.9, 27.99], zoom:11, pitch:65, bearing:-10  },
+  canyon:   { center:[-112.1, 36.1],zoom:11, pitch:60, bearing:30   },
+  fuji:     { center:[138.73,35.36],zoom:11, pitch:58, bearing:45   },
+  andes:    { center:[-72.5,-13.2], zoom:10, pitch:60, bearing:15   },
+  lagos:    { center:[3.38,  6.52], zoom:10, pitch:45, bearing:0    },
+};
+
+// ── Style definitions ─────────────────────────────────────────────────────────
+function makeStyle(tileUrl, showRef=false) {
+  const layers = [{
+    id: 'base', type: 'raster', source: 'base-tiles',
+    paint: { 'raster-opacity': 1.0 }
+  }];
+  if (showRef) layers.push({
+    id: 'ref', type: 'raster', source: 'ref-tiles',
+    paint: { 'raster-opacity': 0.65 }
+  });
+
+  return {
+    version: 8,
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+    sources: {
+      'base-tiles': { type:'raster', tiles:[tileUrl], tileSize:256, maxzoom:18 },
+      'ref-tiles':  { type:'raster', tiles:[ESRI_REF], tileSize:256, maxzoom:18 },
+      terrain: {
+        type: 'raster-dem',
+        tiles: [TERRAIN],
+        tileSize: 256,
+        maxzoom: 14,
+        encoding: 'terrarium'
+      }
+    },
+    layers,
+    terrain: { source:'terrain', exaggeration: parseFloat(document.getElementById('exag')?.value ?? 2.5) },
+    sky: {
+      'sky-color': '#0a1f3a',
+      'sky-horizon-blend': 0.5,
+      'horizon-color': '#1a4060',
+      'horizon-fog-blend': 0.3,
+      'fog-color': '#0a1828',
+      'fog-ground-blend': 0.9,
+      'atmosphere-blend': ['interpolate',['linear'],['zoom'],0,1,10,0.3]
+    }
+  };
+}
+
+const STYLES = {
+  sat:  () => makeStyle(ESRI_SAT, true),
+  dark: () => makeStyle(CARTO_DARK, false),
+  topo: () => makeStyle(TOPO, false),
+};
+
+// ── Init map ──────────────────────────────────────────────────────────────────
+let currentStyle = 'sat';
+const loc0 = LOCATIONS.alps;
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: STYLES.sat(),
+  center:  loc0.center,
+  zoom:    loc0.zoom,
+  pitch:   loc0.pitch,
+  bearing: loc0.bearing,
+  maxPitch: 80,
+  antialias: true,
+});
+
+map.addControl(new maplibregl.NavigationControl({ visualizePitch:true }), 'bottom-left');
+
+// ── Location buttons ──────────────────────────────────────────────────────────
+document.querySelectorAll('.loc-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.loc-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const l = LOCATIONS[btn.dataset.loc];
+    map.flyTo({ center:l.center, zoom:l.zoom, pitch:l.pitch, bearing:l.bearing,
+                duration:2200, essential:true });
+  });
+});
+
+// ── Style buttons ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.style-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.style-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentStyle = btn.dataset.style;
+    // Preserve camera
+    const cen = map.getCenter();
+    const z   = map.getZoom();
+    const p   = map.getPitch();
+    const b   = map.getBearing();
+    map.setStyle(STYLES[currentStyle]());
+    map.once('styledata', () => {
+      map.setCenter(cen);
+      map.setZoom(z);
+      map.setPitch(p);
+      map.setBearing(b);
+      applyExag();
+    });
+  });
+});
+
+// ── Terrain exaggeration slider ───────────────────────────────────────────────
+function applyExag() {
+  const v = parseFloat(document.getElementById('exag').value);
+  document.getElementById('exag-val').textContent = v.toFixed(1) + '×';
+  if (map.getTerrain()) {
+    map.setTerrain({ source:'terrain', exaggeration: v });
+  }
+}
+
+document.getElementById('exag').addEventListener('input', applyExag);
+</script>
+</body>
+</html>

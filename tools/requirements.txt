@@ -1,0 +1,6 @@
+# Install with:  python3 -m pip install -r requirements.txt
+# (macOS: use pip3 install ... if python3 -m pip is unavailable)
+# (missing python3: brew install python)
+numpy>=1.24
+Pillow>=10.0
+scipy>=1.10

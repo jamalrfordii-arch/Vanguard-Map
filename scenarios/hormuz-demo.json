@@ -1,0 +1,58 @@
+{
+  "name": "Strait of Hormuz demo",
+  "entities": [
+    {
+      "mmsi": "999000001",
+      "name": "SYN TANKER ALPHA",
+      "shipType": 80,
+      "speedKts": 14,
+      "loop": true,
+      "waypoints": [
+        { "lon": 57.6, "lat": 25.4 },
+        { "lon": 56.9, "lat": 26.1 },
+        { "lon": 56.5, "lat": 26.5 },
+        { "lon": 55.9, "lat": 26.5 },
+        { "lon": 55.0, "lat": 26.2 }
+      ]
+    },
+    {
+      "mmsi": "999000002",
+      "name": "SYN CARGO BRAVO",
+      "shipType": 70,
+      "speedKts": 17,
+      "loop": true,
+      "waypoints": [
+        { "lon": 55.0, "lat": 26.3 },
+        { "lon": 55.9, "lat": 26.6 },
+        { "lon": 56.5, "lat": 26.6 },
+        { "lon": 56.9, "lat": 26.2 },
+        { "lon": 57.6, "lat": 25.5 }
+      ]
+    },
+    {
+      "mmsi": "999000003",
+      "name": "SYN GHOST CHARLIE",
+      "shipType": 80,
+      "speedKts": 12,
+      "loop": false,
+      "dark": [{ "from": 420, "to": 1500 }],
+      "waypoints": [
+        { "lon": 57.2, "lat": 25.8 },
+        { "lon": 56.7, "lat": 26.3 },
+        { "lon": 56.2, "lat": 26.6 },
+        { "lon": 55.5, "lat": 26.4 }
+      ]
+    },
+    {
+      "mmsi": "999000004",
+      "name": "SYN LOITER DELTA",
+      "shipType": 80,
+      "speedKts": 0,
+      "loop": false,
+      "waypoints": [
+        { "lon": 56.6, "lat": 26.45, "t": 0 },
+        { "lon": 56.62, "lat": 26.46, "t": 86400 }
+      ]
+    }
+  ]
+}

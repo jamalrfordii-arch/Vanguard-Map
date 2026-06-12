@@ -1,0 +1,25 @@
+# Ocean Current Flow Field — Research Notes
+
+**Generated:** 2026-06-05
+**Category:** surface
+**Manager:** OceanCurrentManager.js
+
+## Strategic Value
+Ocean surface currents are the invisible infrastructure of maritime operations — they dictate fuel-efficient routing, predict drift trajectories for SAR and oil spills, and explain anomalous vessel behavior. Overlaying animated current flow with live AIS positions instantly reveals which vessels are fighting currents on suspicious detours versus exploiting them for efficiency. This transforms the water surface from a static blue plane into a living operational environment, giving analysts intuitive understanding of the hydrodynamic context behind every vessel track.
+
+## Data Source
+NASA OSCAR 0.25° global surface currents via PO.DAAC Harmony API: https://harmony.earthdata.nasa.gov/C2102959417-POCLOUD/ogc-api-coverages/1.0.0/collections/all/coverage/rangeset?granuleId=G2753490775-POCLOUD&subset=lat(min:max)&subset=lon(min:max) — returns NetCDF with u/v velocity components updated every 5 days. Fallback: NOAA Global RTOFS GRIB2 at https://nomads.ncep.noaa.gov/pub/data/nccf/com/rtofs/prod/ for 72-hour forecast currents updated daily. Supplementary SST from Copernicus Marine Service CMEMS API at https://data.marine.copernicus.eu/ for particle coloring.
+
+## Visual Concept
+Tens of thousands of luminous particles streaming across the ocean surface, tracing the paths of real currents in real time. Gulf Stream appears as a bright fast-moving river of cyan particles; equatorial currents as broad amber bands; gyres as visible spiraling vortices. Particle brightness and length encode speed — fast boundary currents glow intensely with long tails, sluggish mid-ocean drift shows as dim short dots. Particles fade in at random positions and fade out after a configurable lifespan, creating the organic flowing-smoke aesthetic of earth.nullschool.net but in full 3D with perspective. When vessels are visible, current arrows subtly appear beneath them showing the local flow vector. The layer sits just above the Gerstner wave surface at Y≈0.05, compositing naturally under fog and TAA.
+
+## Implementation Approach
+GPGPU ping-pong particle advection using two WebGLRenderTargets as Frame Buffer Objects. Parse OSCAR NetCDF u/v grids into a pair of DataTextures (1440×720 for 0.25° global, RGBA Float32, R=u G=v). Advection shader samples the velocity texture at each particle's XZ position (mapped to UV), applies dt-scaled displacement, writes new position to output FBO. Particles that exit bounds or exceed max age get respawned at random ocean positions using a blue-noise seed texture. Render pass reads the position FBO as a texture attribute on a Points mesh with custom ShaderMaterial — vertex shader reads particle XZ from FBO texel, maps through lonLatToScene(), fragment shader draws soft billboard sprites with alpha falloff. Trail effect via a third FBO that accumulates previous positions with exponential decay, rendered as GL_LINES between current and previous position. Particle color sampled from an optional SST DataTexture mapped to a thermal ramp uniform. Layer registered with layerManager under 'surface' group. Dispatch 'vg1:ocean-current:loaded' on data parse complete. Config constants: OCEAN_CURRENT_PARTICLE_COUNT (65536), OCEAN_CURRENT_SPEED_SCALE (0.0003), OCEAN_CURRENT_PARTICLE_LIFETIME (200 frames), OCEAN_CURRENT_FADE_OPACITY (0.92), OCEAN_CURRENT_TEXTURE_SIZE (256 — the sqrt of particle count for square FBO).
+
+## Research Notes
+OSCAR provides 0.25° near-global coverage (80°N-80°S) of ocean surface velocity derived from satellite altimetry, scatterometry, and SST. Data is freely available via NASA Earthdata with no API key for public collections — Harmony API supports spatial/temporal subsetting and format conversion. NetCDF-js (https://github.com/cheminfo/netcdfjs) parses NetCDF in browser without server dependencies. The GPGPU particle technique is well-proven in Three.js — the canonical approach uses FBOs where each pixel stores one particle's XYZ as RGB channels, enabling massively parallel advection on GPU. earth.nullschool.net demonstrates the visual power of this approach in 2D; MapboxGL's globe view has implemented similar 3D particle flows. Key implementation reference: Three.js GPGPU birds example (three/examples/webgl_gpgpu_birds) demonstrates the ping-pong FBO pattern. For production, particle count of 65536 (256×256 FBO) provides dense visual coverage while staying within mobile GPU budgets. RTOFS provides forecast data enabling a '72-hour prediction' scrubber. Copernicus Marine CMEMS requires free registration and provides higher-resolution regional products if needed.
+
+## Next Steps
+1. Open OceanCurrentManager.js and fill in `_fetchData()`
+2. Register an API key for the data source above
+3. Copy manager to project root and wire into main.js

@@ -1,0 +1,9 @@
+
+  !! Tile (4,0,0) failed after 3 tries: <urlopen error Tunnel connection failed: 403 Forbidden>
+Vanguard1 — Terrain Normal Map Generator
+  Zoom       : 4  (16×16 tiles)
+  Resolution : 4096×4096 px
+  Elev scale : 5.0
+  Output     : /sessions/funny-clever-mayer/mnt/Vanguard1/terrain_normals.png
+
+  [░░░░░░░░░░░░░░░░░░░░░░░░░]   1/256     0%  ETA 1160s   

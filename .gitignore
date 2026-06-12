@@ -1,0 +1,38 @@
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Large modeling artifacts & raw source data (not used at runtime) ──────────
+Map.obj
+Map.ply
+Vanguard1.mlp
+*.blend
+*.blend1
+gebco_2026_geotiff.zip
+*.zip
+*.tif
+*.geotiff
+
+# ── Python environments (tools/) ──────────────────────────────────────────────
+venv/
+__pycache__/
+*.pyc
+
+# ── OS / editor junk ──────────────────────────────────────────────────────────
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# ── Local-only config & secrets ───────────────────────────────────────────────
+.env
+.env.*
+*.local.js
+.claude/settings.local.json
+
+# ── Recordings / captures (can be large; share deliberately, not by default) ──
+captures/
+*.ndjson
+
+# ── Backups ───────────────────────────────────────────────────────────────────
+*.backup.js
+agents/reports/

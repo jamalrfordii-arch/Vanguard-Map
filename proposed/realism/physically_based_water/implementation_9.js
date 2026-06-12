@@ -1,0 +1,1 @@
+**Note on H0 recompute**: Changing `fftOceanParams` values modifies the cascade parameters but does **not** automatically regenerate the initial spectrum texture (`H0`). To see the effect of wind speed changes, you need to call the internal recompute. For live demo purposes, add this to the console:

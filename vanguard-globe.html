@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vanguard — Globe v0.1</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #000;
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      overflow: hidden;
+      color: #7ecfcf;
+    }
+
+    canvas { display: block; }
+
+    /* ── Top bar ─────────────────────────────────────────────────────── */
+    #topbar {
+      position: fixed; top: 0; left: 0; right: 0; height: 48px;
+      display: flex; align-items: center;
+      padding: 0 20px; gap: 14px;
+      background: rgba(0, 8, 20, 0.88);
+      border-bottom: 1px solid rgba(0, 200, 200, 0.14);
+      backdrop-filter: blur(10px);
+      z-index: 100;
+    }
+    #topbar .wordmark {
+      font-size: 16px; font-weight: 700;
+      letter-spacing: 5px; color: #00c8c8;
+      text-transform: uppercase;
+    }
+    #topbar .version {
+      font-size: 9px; letter-spacing: 2px;
+      color: rgba(0, 200, 200, 0.35);
+    }
+    #topbar .dot { width: 5px; height: 5px; border-radius: 50%; background: #00c8c8; opacity: 0.5; }
+
+    /* ── Layer panel ─────────────────────────────────────────────────── */
+    #layer-panel {
+      position: fixed; top: 68px; left: 20px; width: 224px;
+      background: rgba(0, 8, 20, 0.90);
+      border: 1px solid rgba(0, 200, 200, 0.16);
+      border-radius: 6px;
+      backdrop-filter: blur(14px);
+      z-index: 100; overflow: hidden;
+    }
+    .panel-header {
+      padding: 9px 14px;
+      font-size: 8px; letter-spacing: 2.5px;
+      color: rgba(0, 200, 200, 0.38);
+      text-transform: uppercase;
+      border-bottom: 1px solid rgba(0, 200, 200, 0.09);
+    }
+    .layer-group { border-bottom: 1px solid rgba(0, 200, 200, 0.06); }
+    .layer-group-label {
+      padding: 7px 14px 3px;
+      font-size: 7px; letter-spacing: 2.5px;
+      color: rgba(0, 200, 200, 0.28);
+      text-transform: uppercase;
+    }
+    .layer-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 5px 14px;
+      cursor: pointer;
+      transition: background 0.15s;
+      user-select: none;
+    }
+    .layer-item:hover { background: rgba(0, 200, 200, 0.055); }
+    .layer-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      flex-shrink: 0; opacity: 0.38;
+      transition: opacity 0.2s, box-shadow 0.2s;
+    }
+    .layer-item.active .layer-dot { opacity: 1; box-shadow: 0 0 5px currentColor; }
+    .layer-name {
+      font-size: 10.5px; flex: 1;
+      color: rgba(126, 207, 207, 0.55);
+      transition: color 0.2s;
+    }
+    .layer-item.active .layer-name { color: #7ecfcf; }
+    .layer-toggle {
+      width: 26px; height: 14px; border-radius: 7px; flex-shrink: 0;
+      border: 1px solid rgba(0, 200, 200, 0.28);
+      background: transparent; position: relative;
+      transition: all 0.2s;
+    }
+    .layer-toggle::after {
+      content: ''; position: absolute;
+      top: 2px; left: 2px;
+      width: 8px; height: 8px; border-radius: 50%;
+      background: rgba(0, 200, 200, 0.3);
+      transition: all 0.2s;
+    }
+    .layer-item.active .layer-toggle { border-color: #00c8c8; background: rgba(0, 200, 200, 0.14); }
+    .layer-item.active .layer-toggle::after { left: 14px; background: #00c8c8; }
+
+    /* Bathymetry slider */
+    .bathy-control { padding: 9px 14px 11px; border-top: 1px solid rgba(0, 200, 200, 0.09); }
+    .bathy-label { font-size: 7px; letter-spacing: 2px; color: rgba(0, 200, 200, 0.32); text-transform: uppercase; margin-bottom: 7px; }
+    input[type=range] {
+      width: 100%; height: 2px; -webkit-appearance: none;
+      background: rgba(0, 200, 200, 0.18); border-radius: 1px; outline: none; cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 11px; height: 11px; border-radius: 50%;
+      background: #00c8c8; cursor: pointer;
+      box-shadow: 0 0 6px rgba(0, 200, 200, 0.6);
+    }
+
+    /* ── Preset panel ────────────────────────────────────────────────── */
+    #preset-panel {
+      position: fixed; top: 68px; right: 20px; width: 198px;
+      background: rgba(0, 8, 20, 0.90);
+      border: 1px solid rgba(0, 200, 200, 0.16);
+      border-radius: 6px; backdrop-filter: blur(14px);
+      z-index: 100; overflow: hidden;
+    }
+    .preset-item {
+      padding: 9px 14px;
+      font-size: 11px; color: rgba(126, 207, 207, 0.55);
+      cursor: pointer; border-bottom: 1px solid rgba(0, 200, 200, 0.06);
+      transition: all 0.15s; letter-spacing: 0.3px;
+    }
+    .preset-item:hover { background: rgba(0, 200, 200, 0.075); color: #7ecfcf; }
+    .preset-item:last-child { border-bottom: none; }
+    .preset-tag {
+      font-size: 7px; letter-spacing: 2px;
+      color: rgba(0, 200, 200, 0.25); text-transform: uppercase; margin-bottom: 2px;
+    }
+
+    /* ── Status bar ──────────────────────────────────────────────────── */
+    #statusbar {
+      position: fixed; bottom: 0; left: 0; right: 0; height: 27px;
+      display: flex; align-items: center; padding: 0 20px; gap: 24px;
+      background: rgba(0, 8, 20, 0.80);
+      border-top: 1px solid rgba(0, 200, 200, 0.09);
+      font-size: 8.5px; letter-spacing: 1.5px;
+      color: rgba(0, 200, 200, 0.30);
+      z-index: 100;
+    }
+    #coords { color: rgba(0, 200, 200, 0.48); }
+    #layer-count-display { margin-left: auto; }
+
+    /* ── Loading overlay ─────────────────────────────────────────────── */
+    #loading {
+      position: fixed; inset: 0;
+      background: #000;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 16px; z-index: 200;
+      transition: opacity 0.6s;
+    }
+    #loading .load-word { font-size: 14px; letter-spacing: 5px; color: #00c8c8; }
+    #loading .load-sub { font-size: 9px; letter-spacing: 2px; color: rgba(0, 200, 200, 0.3); }
+    #loading-bar-wrap { width: 180px; height: 1px; background: rgba(0,200,200,0.15); border-radius: 1px; }
+    #loading-bar { height: 100%; width: 0%; background: #00c8c8; border-radius: 1px; transition: width 0.3s; }
+  </style>
+</head>
+<body>
+
+<canvas id="globe-canvas"></canvas>
+
+<!-- Loading -->
+<div id="loading">
+  <div class="load-word">VANGUARD</div>
+  <div class="load-sub">INITIALIZING GLOBE ENGINE</div>
+  <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+</div>
+
+<!-- Top bar -->
+<div id="topbar">
+  <span class="wordmark">Vanguard</span>
+  <div class="dot"></div>
+  <span class="version">GLOBE PROTOTYPE — v0.1</span>
+</div>
+
+<!-- Layer panel -->
+<div id="layer-panel">
+  <div class="panel-header">Layer Control</div>
+
+  <div class="layer-group">
+    <div class="layer-group-label">Surface</div>
+    <div class="layer-item active" data-layer="terrain">
+      <div class="layer-dot" style="background:#8b9d77; color:#8b9d77"></div>
+      <span class="layer-name">Terrain &amp; Borders</span>
+      <div class="layer-toggle"></div>
+    </div>
+    <div class="layer-item" data-layer="bathymetry">
+      <div class="layer-dot" style="background:#1a7ab5; color:#1a7ab5"></div>
+      <span class="layer-name">Bathymetry</span>
+      <div class="layer-toggle"></div>
+    </div>
+  </div>
+
+  <div class="layer-group">
+    <div class="layer-group-label">Atmosphere</div>
+    <div class="layer-item" data-layer="clouds">
+      <div class="layer-dot" style="background:#d4e8f0; color:#d4e8f0"></div>
+      <span class="layer-name">Cloud Cover</span>
+      <div class="layer-toggle"></div>
+    </div>
+    <div class="layer-item" data-layer="lightning">
+      <div class="layer-dot" style="background:#fff080; color:#fff080"></div>
+      <span class="layer-name">Lightning</span>
+      <div class="layer-toggle"></div>
+    </div>
+    <div class="layer-item" data-layer="gec">
+      <div class="layer-dot" style="background:#a0d8ef; color:#a0d8ef"></div>
+      <span class="layer-name">Global Electric Circuit</span>
+      <div class="layer-toggle"></div>
+    </div>
+  </div>
+
+  <div class="layer-group">
+    <div class="layer-group-label">Geomagnetic</div>
+    <div class="layer-item" data-layer="magfield">
+      <div class="layer-dot" style="background:#00c8c8; color:#00c8c8"></div>
+      <span class="layer-name">Magnetic Field Lines</span>
+      <div class="layer-toggle"></div>
+    </div>
+    <div class="layer-item" data-layer="telluric">
+      <div class="layer-dot" style="background:#f5a623; color:#f5a623"></div>
+      <span class="layer-name">Telluric Currents</span>
+      <div class="layer-toggle"></div>
+    </div>
+    <div class="layer-item" data-layer="schumann">
+      <div class="layer-dot" style="background:#c840c8; color:#c840c8"></div>
+      <span class="layer-name">Schumann / Ionosphere</span>
+      <div class="layer-toggle"></div>
+    </div>
+  </div>
+
+  <div class="layer-group">
+    <div class="layer-group-label">Space</div>
+    <div class="layer-item" data-layer="satellites">
+      <div class="layer-dot" style="background:#b0b8c0; color:#b0b8c0"></div>
+      <span class="layer-name">Satellite Tracks</span>
+      <div class="layer-toggle"></div>
+    </div>
+    <div class="layer-item" data-layer="magnetosphere">
+      <div class="layer-dot" style="background:#0a7ff5; color:#0a7ff5"></div>
+      <span class="layer-name">Magnetosphere</span>
+      <div class="layer-toggle"></div>
+    </div>
+  </div>
+
+  <div class="layer-group">
+    <div class="layer-group-label">Human / Operational</div>
+    <div class="layer-item" data-layer="gpsjam">
+      <div class="layer-dot" style="background:#ff3333; color:#ff3333"></div>
+      <span class="layer-name">GPS Jamming Zones</span>
+      <div class="layer-toggle"></div>
+    </div>
+    <div class="layer-item" data-layer="emwarfare">
+      <div class="layer-dot" style="background:#ff6633; color:#ff6633"></div>
+      <span class="layer-name">EM Warfare Overlay</span>
+      <div class="layer-toggle"></div>
+    </div>
+  </div>
+
+  <div class="bathy-control">
+    <div class="bathy-label">Bathymetry Intensity</div>
+    <input type="range" id="bathy-slider" min="0" max="100" value="85">
+  </div>
+</div>
+
+<!-- Preset panel -->
+<div id="preset-panel">
+  <div class="panel-header">Story Presets</div>
+  <div class="preset-item" data-preset="quiet">
+    <div class="preset-tag">Preset 01</div>Quiet Sky
+  </div>
+  <div class="preset-item" data-preset="severe">
+    <div class="preset-tag">Preset 02</div>Severe Weather
+  </div>
+  <div class="preset-item" data-preset="solar">
+    <div class="preset-tag">Preset 03</div>Solar Storm
+  </div>
+  <div class="preset-item" data-preset="conflict">
+    <div class="preset-tag">Preset 04</div>Active Conflict / GPS Denial
+  </div>
+  <div class="preset-item" data-preset="grid">
+    <div class="preset-tag">Preset 05</div>Grid Vulnerability
+  </div>
+</div>
+
+<!-- Status bar -->
+<div id="statusbar">
+  <span>VANGUARD INTELLIGENCE PLATFORM</span>
+  <span id="coords">LAT — LON —</span>
+  <span id="layer-count-display">LAYERS: <span id="layer-count">1</span> ACTIVE</span>
+</div>
+
+<!-- ── Three.js module imports ─────────────────────────────────────────────── -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHADERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Globe vertex shader — passes UV, world-space normal, world position
+const globeVert = /* glsl */`
+  varying vec2  vUv;
+  varying vec3  vNormal;
+  varying vec3  vWorldPos;
+
+  void main() {
+    vUv       = uv;
+    vNormal   = normalize( normalMatrix * normal );
+    vec4 wp   = modelMatrix * vec4( position, 1.0 );
+    vWorldPos = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+
+// Globe fragment shader — terrain + bathymetry + day/night
+// Note: Three.js injects cameraPosition automatically in ShaderMaterial.
+const globeFrag = /* glsl */`
+  uniform sampler2D dayMap;    // earth_atmos_2048  — terrain + ocean
+  uniform sampler2D specMap;   // earth_specular_2048 — white = ocean, black = land
+  uniform sampler2D nightMap;  // earth_lights_512   — city lights
+  uniform vec3      sunDir;
+  uniform float     bathyIntensity; // 0..1
+
+  varying vec2  vUv;
+  varying vec3  vNormal;
+  varying vec3  vWorldPos;
+
+  // ── GEBCO-inspired bathymetry color ramp ────────────────────────────────
+  // t = 0 → coastal shelf (~200 m), t = 1 → hadal plain (> 6000 m)
+  vec3 bathyColor( float t ) {
+    vec3 shelf   = vec3( 0.149, 0.431, 0.576 ); // coastal
+    vec3 outer   = vec3( 0.071, 0.271, 0.494 ); // outer shelf
+    vec3 mid     = vec3( 0.027, 0.145, 0.357 ); // mid-ocean
+    vec3 deep    = vec3( 0.012, 0.059, 0.208 ); // deep ocean
+    vec3 hadal   = vec3( 0.004, 0.014, 0.098 ); // hadal / abyssal
+
+    if ( t < 0.20 ) return mix( shelf,  outer, t / 0.20 );
+    if ( t < 0.40 ) return mix( outer,  mid,   ( t - 0.20 ) / 0.20 );
+    if ( t < 0.65 ) return mix( mid,    deep,  ( t - 0.40 ) / 0.25 );
+    return               mix( deep,   hadal,  ( t - 0.65 ) / 0.35 );
+  }
+
+  void main() {
+    vec4  day   = texture2D( dayMap,   vUv );
+    float ocean = texture2D( specMap,  vUv ).r;   // 1 = ocean, 0 = land
+    vec4  night = texture2D( nightMap, vUv );
+
+    // Derive depth proxy from texture luminance — darker ocean ≈ deeper
+    float lum   = dot( day.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+    float depth = clamp( 1.0 - lum * 2.6, 0.0, 1.0 );
+
+    // Blend bathymetry palette over ocean regions
+    vec3 bathy = bathyColor( depth );
+    vec3 base  = mix( day.rgb, bathy, ocean * bathyIntensity );
+
+    // ── Lighting ────────────────────────────────────────────────────────
+    float NdotL = dot( vNormal, sunDir );
+    float diff  = max( NdotL, 0.0 );
+
+    // Ocean Phong specular
+    vec3  viewDir = normalize( cameraPosition - vWorldPos );
+    vec3  halfVec = normalize( sunDir + viewDir );
+    float spec    = pow( max( dot( vNormal, halfVec ), 0.0 ), 52.0 )
+                    * ocean * 0.32;
+
+    vec3 lit = base * ( 0.04 + diff * 0.96 ) + vec3( spec );
+
+    // ── Day / night terminator ──────────────────────────────────────────
+    float nightMix  = 1.0 - smoothstep( -0.06, 0.14, NdotL );
+    vec3  cityGlow  = night.rgb * night.rgb * 3.8; // gamma-boost city lights
+    vec3  finalCol  = mix( lit, cityGlow * 0.90, nightMix );
+
+    gl_FragColor = vec4( finalCol, 1.0 );
+  }
+`;
+
+// Atmosphere vertex (passes world normal + position for Fresnel)
+const atmVert = /* glsl */`
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vNormal   = normalize( normalMatrix * normal );
+    vec4 wp   = modelMatrix * vec4( position, 1.0 );
+    vWorldPos = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+
+// Atmosphere fragment — Fresnel glow
+const atmFrag = /* glsl */`
+  uniform vec3  sunDir;
+  uniform vec3  atmColor;
+  uniform float atmStrength;
+
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec3  viewDir = normalize( cameraPosition - vWorldPos );
+    float rim     = 1.0 - max( dot( vNormal, viewDir ), 0.0 );
+    rim           = pow( rim, 2.8 );
+    float sunFac  = max( dot( vNormal, sunDir ), 0.0 ) * 0.55 + 0.45;
+    float alpha   = rim * sunFac * atmStrength;
+    gl_FragColor  = vec4( atmColor, alpha );
+  }
+`;
+
+// Cloud layer vertex (same as globe vert)
+const cloudVert = globeVert;
+
+// Cloud fragment — white shell with edge fade
+const cloudFrag = /* glsl */`
+  uniform sampler2D cloudMap;
+  uniform float     opacity;
+  uniform vec3      sunDir;
+
+  varying vec2  vUv;
+  varying vec3  vNormal;
+  varying vec3  vWorldPos;
+
+  void main() {
+    vec4  c     = texture2D( cloudMap, vUv );
+    float cloud = c.r;                            // cloud density 0..1
+    float diff  = max( dot( vNormal, sunDir ), 0.0 );
+    float lit   = 0.35 + diff * 0.65;
+    float alpha = cloud * opacity;
+    gl_FragColor = vec4( vec3( lit ), alpha );
+  }
+`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RENDERER + SCENE + CAMERA
+// ─────────────────────────────────────────────────────────────────────────────
+
+const canvas   = document.getElementById( 'globe-canvas' );
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio( Math.min( window.devicePixelRatio, 2 ) );
+renderer.setSize( window.innerWidth, window.innerHeight );
+renderer.toneMapping         = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 0.1, 120 );
+camera.position.set( 0, 0.6, 2.9 );
+
+const controls = new OrbitControls( camera, renderer.domElement );
+controls.enableDamping   = true;
+controls.dampingFactor   = 0.055;
+controls.minDistance     = 1.25;
+controls.maxDistance     = 6.5;
+controls.autoRotate      = true;
+controls.autoRotateSpeed = 0.20;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STARFIELD
+// ─────────────────────────────────────────────────────────────────────────────
+
+( function buildStars() {
+  const N   = 7000;
+  const pos = new Float32Array( N * 3 );
+  const col = new Float32Array( N * 3 );
+  for ( let i = 0; i < N; i++ ) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos( 2 * Math.random() - 1 );
+    const r     = 50 + Math.random() * 15;
+    pos[ i*3   ] = r * Math.sin(phi) * Math.cos(theta);
+    pos[ i*3+1 ] = r * Math.sin(phi) * Math.sin(theta);
+    pos[ i*3+2 ] = r * Math.cos(phi);
+    // Subtle colour variation: white, warm, cool
+    const tint = Math.random();
+    col[ i*3   ] = tint < 0.33 ? 0.95 : tint < 0.66 ? 1.0  : 0.78;
+    col[ i*3+1 ] = tint < 0.33 ? 0.90 : tint < 0.66 ? 0.88 : 0.88;
+    col[ i*3+2 ] = tint < 0.33 ? 1.0  : tint < 0.66 ? 0.75 : 1.0;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute( 'position', new THREE.BufferAttribute( pos, 3 ) );
+  geo.setAttribute( 'color',    new THREE.BufferAttribute( col, 3 ) );
+  const mat = new THREE.PointsMaterial({
+    size: 0.055, sizeAttenuation: true, vertexColors: true,
+  });
+  scene.add( new THREE.Points( geo, mat ) );
+} )();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEXTURE LOADING  (with loading-bar progress)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const loadBar = document.getElementById( 'loading-bar' );
+const loader  = new THREE.TextureLoader();
+const texRoot = 'https://threejs.org/examples/textures/planets';
+
+function loadTex( url, progress ) {
+  return loader.loadAsync( url ).then( t => {
+    t.colorSpace  = THREE.SRGBColorSpace;
+    t.anisotropy  = renderer.capabilities.getMaxAnisotropy();
+    loadBar.style.width = progress + '%';
+    return t;
+  });
+}
+
+loadBar.style.width = '10%';
+
+const [ dayTex, specTex, nightTex, cloudTex ] = await Promise.all([
+  loadTex( `${texRoot}/earth_atmos_2048.jpg`,    40  ),
+  loadTex( `${texRoot}/earth_specular_2048.jpg`, 65  ),
+  loadTex( `${texRoot}/earth_lights_512.jpg`,    82  ),
+  // Clouds: reuse specular with inversion trick or use dedicated cloud map
+  // Using earth_normal as placeholder — swap for real cloud texture when available
+  loader.loadAsync( `${texRoot}/earth_normal_2048.jpg` ).then( t => {
+    t.colorSpace = THREE.SRGBColorSpace; loadBar.style.width = '95%'; return t;
+  }),
+]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUN DIRECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+const sunDir = new THREE.Vector3( 1.0, 0.25, 0.6 ).normalize();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GLOBE MESH
+// ─────────────────────────────────────────────────────────────────────────────
+
+const globeGeo = new THREE.SphereGeometry( 1, 128, 64 );
+const globeMat = new THREE.ShaderMaterial({
+  vertexShader:   globeVert,
+  fragmentShader: globeFrag,
+  uniforms: {
+    dayMap:        { value: dayTex   },
+    specMap:       { value: specTex  },
+    nightMap:      { value: nightTex },
+    sunDir:        { value: sunDir   },
+    bathyIntensity:{ value: 0.85     },
+  },
+});
+const globe = new THREE.Mesh( globeGeo, globeMat );
+scene.add( globe );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATMOSPHERE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeAtmosphere( radius, color, strength, side = THREE.FrontSide ) {
+  const geo = new THREE.SphereGeometry( radius, 64, 32 );
+  const mat = new THREE.ShaderMaterial({
+    vertexShader:   atmVert,
+    fragmentShader: atmFrag,
+    uniforms: {
+      sunDir:      { value: sunDir },
+      atmColor:    { value: new THREE.Color(...color) },
+      atmStrength: { value: strength },
+    },
+    side, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const mesh = new THREE.Mesh( geo, mat );
+  scene.add( mesh );
+  return mesh;
+}
+
+makeAtmosphere( 1.024, [0.28, 0.60, 1.00], 0.52 );        // inner blue limb
+makeAtmosphere( 1.075, [0.08, 0.22, 0.55], 0.30, THREE.BackSide ); // outer glow
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOUD LAYER  (placeholder — swap cloudTex for a real cloud texture)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const cloudGeo = new THREE.SphereGeometry( 1.012, 96, 48 );
+const cloudMat = new THREE.ShaderMaterial({
+  vertexShader:   cloudVert,
+  fragmentShader: cloudFrag,
+  uniforms: {
+    cloudMap: { value: cloudTex },  // placeholder normal map used for shape
+    opacity:  { value: 0.55      },
+    sunDir:   { value: sunDir    },
+  },
+  transparent: true, depthWrite: false,
+  blending: THREE.NormalBlending,
+});
+const cloudMesh = new THREE.Mesh( cloudGeo, cloudMat );
+cloudMesh.visible = false;
+scene.add( cloudMesh );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAGNETIC FIELD LINES  (placeholder geometry — build v2 with IGRF data)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildMagFieldPlaceholder() {
+  const group = new THREE.Group();
+  const mat   = new THREE.LineBasicMaterial({
+    color: 0x00c8c8, transparent: true, opacity: 0.55,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+
+  // Simplified dipole field lines: sample from pole to pole
+  for ( let phi = -80; phi <= 80; phi += 20 ) {
+    const phiRad = phi * Math.PI / 180;
+    const pts    = [];
+    const steps  = 60;
+    for ( let i = 0; i <= steps; i++ ) {
+      // Dipole field-line equation: r = r0 * cos²(λ) where λ is geomagnetic lat
+      const lambda = phiRad + ( Math.PI / 2 ) * ( i / steps - 0.5 );
+      const r0     = 1.1 + Math.abs( Math.sin( phiRad ) ) * 1.8;
+      const r      = r0 * Math.cos( lambda ) ** 2;
+      const theta  = 0; // rotate as a set around Y below
+      pts.push( new THREE.Vector3(
+        r * Math.cos( lambda ) * Math.sin( theta ),
+        r * Math.sin( lambda ),
+        r * Math.cos( lambda ) * Math.cos( theta ),
+      ));
+    }
+    const geo  = new THREE.BufferGeometry().setFromPoints( pts );
+    const line = new THREE.Line( geo, mat );
+    // Spread 8 meridians
+    for ( let m = 0; m < 8; m++ ) {
+      const copy = line.clone();
+      copy.rotation.y = ( m / 8 ) * Math.PI * 2;
+      group.add( copy );
+    }
+  }
+  group.visible = false;
+  scene.add( group );
+  return group;
+}
+
+const magFieldGroup = buildMagFieldPlaceholder();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPS JAMMING PLACEHOLDER  (real data: fetch from gpsjam.org in v5)
+// Red shaded zones over known chronic jamming regions
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeJamZone( lat, lon, radiusDeg, intensity = 0.6 ) {
+  // Approximate a jam zone as a circle on the globe surface
+  const pts  = [];
+  const R    = 1.002; // just above surface
+  const latR = lat * Math.PI / 180;
+  const lonR = lon * Math.PI / 180;
+  const radR = radiusDeg * Math.PI / 180;
+
+  for ( let i = 0; i <= 64; i++ ) {
+    const angle = ( i / 64 ) * Math.PI * 2;
+    // Offset point on sphere
+    const dlat  = radR * Math.cos( angle );
+    const dlon  = radR * Math.sin( angle ) / Math.cos( latR );
+    const la    = latR + dlat;
+    const lo    = lonR + dlon;
+    pts.push( new THREE.Vector3(
+      R * Math.cos(la) * Math.sin(lo),
+      R * Math.sin(la),
+      R * Math.cos(la) * Math.cos(lo),
+    ));
+  }
+  const geo  = new THREE.BufferGeometry().setFromPoints( pts );
+  const mat  = new THREE.LineBasicMaterial({
+    color: 0xff2222, transparent: true, opacity: intensity * 0.8,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  return new THREE.Line( geo, mat );
+}
+
+const jamGroup = new THREE.Group();
+// Ukraine/Russia corridor
+jamGroup.add( makeJamZone(  50.0,  34.0, 5.5 ) );
+jamGroup.add( makeJamZone(  48.0,  25.0, 4.0 ) );
+// Black Sea / Kaliningrad
+jamGroup.add( makeJamZone(  43.0,  34.0, 3.5 ) );
+jamGroup.add( makeJamZone(  54.7,  20.5, 2.8 ) );
+// Eastern Mediterranean / Israel-Lebanon corridor
+jamGroup.add( makeJamZone(  32.5,  35.5, 3.5 ) );
+// Strait of Hormuz
+jamGroup.add( makeJamZone(  26.5,  56.5, 3.0 ) );
+// Syria
+jamGroup.add( makeJamZone(  35.0,  38.5, 3.0 ) );
+
+jamGroup.visible = false;
+scene.add( jamGroup );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYER REGISTRY
+// ─────────────────────────────────────────────────────────────────────────────
+
+const layers = {
+  terrain: {
+    active:   true,
+    toggle:   () => {},  // always on; click does nothing
+  },
+  bathymetry: {
+    active:   false,
+    toggle:   ( on ) => {
+      const v = parseFloat( document.getElementById('bathy-slider').value ) / 100;
+      globeMat.uniforms.bathyIntensity.value = on ? v : 0.0;
+    },
+  },
+  clouds: {
+    active:   false,
+    toggle:   ( on ) => { cloudMesh.visible = on; },
+  },
+  lightning: {
+    active:   false,
+    toggle:   () => {},   // placeholder — particle system in v2
+  },
+  gec: {
+    active:   false,
+    toggle:   () => {},   // placeholder
+  },
+  magfield: {
+    active:   false,
+    toggle:   ( on ) => { magFieldGroup.visible = on; },
+  },
+  telluric: {
+    active:   false,
+    toggle:   () => {},   // placeholder — subsurface current mesh in v4
+  },
+  schumann: {
+    active:   false,
+    toggle:   () => {},   // placeholder — ionosphere shell in v4
+  },
+  satellites: {
+    active:   false,
+    toggle:   () => {},   // placeholder — CelesTrak TLE in v6
+  },
+  magnetosphere: {
+    active:   false,
+    toggle:   () => {},   // placeholder
+  },
+  gpsjam: {
+    active:   false,
+    toggle:   ( on ) => { jamGroup.visible = on; },
+  },
+  emwarfare: {
+    active:   false,
+    toggle:   () => {},   // placeholder
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRESETS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const presets = {
+  quiet:    { terrain:true, bathymetry:true,  clouds:false, lightning:false, gec:false, magfield:false, telluric:false, schumann:false, satellites:false, magnetosphere:false, gpsjam:false, emwarfare:false },
+  severe:   { terrain:true, bathymetry:false, clouds:true,  lightning:true,  gec:true,  magfield:false, telluric:false, schumann:false, satellites:false, magnetosphere:false, gpsjam:false, emwarfare:false },
+  solar:    { terrain:true, bathymetry:true,  clouds:false, lightning:false, gec:true,  magfield:true,  telluric:true,  schumann:true,  satellites:false, magnetosphere:true,  gpsjam:false, emwarfare:false },
+  conflict: { terrain:true, bathymetry:false, clouds:true,  lightning:false, gec:false, magfield:false, telluric:false, schumann:false, satellites:true,  magnetosphere:false, gpsjam:true,  emwarfare:true  },
+  grid:     { terrain:true, bathymetry:true,  clouds:false, lightning:false, gec:true,  magfield:true,  telluric:true,  schumann:false, satellites:false, magnetosphere:false, gpsjam:false, emwarfare:false },
+};
+
+function applyPreset( name ) {
+  const p = presets[ name ];
+  if ( !p ) return;
+  Object.entries( p ).forEach( ([ key, on ]) => setLayer( key, on ) );
+}
+
+function setLayer( key, on ) {
+  const def = layers[ key ];
+  if ( !def ) return;
+  def.active = on;
+  def.toggle( on );
+  const el = document.querySelector( `[data-layer="${key}"]` );
+  if ( el ) el.classList.toggle( 'active', on );
+  updateLayerCount();
+}
+
+function updateLayerCount() {
+  const n = Object.values( layers ).filter( l => l.active ).length;
+  document.getElementById( 'layer-count' ).textContent = n;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UI EVENT BINDINGS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Layer item clicks
+document.querySelectorAll( '.layer-item' ).forEach( el => {
+  el.addEventListener( 'click', () => {
+    const key = el.dataset.layer;
+    if ( key === 'terrain' ) return;   // always on
+    const def = layers[ key ];
+    if ( !def ) return;
+    setLayer( key, !def.active );
+  });
+});
+
+// Bathymetry slider
+document.getElementById( 'bathy-slider' ).addEventListener( 'input', e => {
+  if ( layers.bathymetry.active )
+    globeMat.uniforms.bathyIntensity.value = parseFloat( e.target.value ) / 100;
+});
+
+// Preset buttons
+document.querySelectorAll( '.preset-item' ).forEach( el => {
+  el.addEventListener( 'click', () => applyPreset( el.dataset.preset ) );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MOUSE → GLOBE COORDINATES
+// ─────────────────────────────────────────────────────────────────────────────
+
+const raycaster = new THREE.Raycaster();
+const mouse     = new THREE.Vector2();
+const coordsEl  = document.getElementById( 'coords' );
+
+window.addEventListener( 'mousemove', e => {
+  mouse.x =  ( e.clientX / window.innerWidth  ) * 2 - 1;
+  mouse.y = -( e.clientY / window.innerHeight ) * 2 + 1;
+  raycaster.setFromCamera( mouse, camera );
+  const hits = raycaster.intersectObject( globe );
+  if ( hits.length ) {
+    const p   = hits[0].point.clone().normalize();
+    const lat = ( Math.asin(  p.y ) * 180 / Math.PI ).toFixed(2);
+    const lon = ( Math.atan2( p.x, p.z ) * 180 / Math.PI ).toFixed(2);
+    coordsEl.textContent = `LAT ${lat}° LON ${lon}°`;
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ANIMATION LOOP
+// ─────────────────────────────────────────────────────────────────────────────
+
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame( animate );
+  const t = clock.getElapsedTime();
+
+  // Slow cloud rotation (independent of globe)
+  if ( cloudMesh.visible ) cloudMesh.rotation.y = t * 0.008;
+
+  // Gently animate magnetic field lines
+  if ( magFieldGroup.visible ) magFieldGroup.rotation.y = t * 0.012;
+
+  controls.update();
+  renderer.render( scene, camera );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Apply quiet preset as default
+applyPreset( 'quiet' );
+
+// Dismiss loading screen
+loadBar.style.width = '100%';
+await new Promise( r => setTimeout( r, 300 ) );
+const loadEl = document.getElementById( 'loading' );
+loadEl.style.opacity = '0';
+setTimeout( () => loadEl.remove(), 650 );
+
+animate();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESIZE
+// ─────────────────────────────────────────────────────────────────────────────
+
+window.addEventListener( 'resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize( window.innerWidth, window.innerHeight );
+});
+
+</script>
+</body>
+</html>

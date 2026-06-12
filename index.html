@@ -1,0 +1,3629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VANGUARD - High Fidelity Tactical Theatre</title>
+    <style>
+        :root {
+            --cyan: #40c4ff;
+            --orange: #ff5e00;
+            --red: #ff1744;
+            --dark-bg: #010409;
+            --ui-panel: rgba(1, 10, 20, 0.85);
+            --text-main: #8aabc4;
+        }
+
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            overflow: hidden; background-color: var(--dark-bg);
+            font-family: 'Courier New', Courier, monospace;
+            color: var(--text-main);
+        }
+
+        #ui-layer {
+            position: fixed; top: 20px; left: 20px; z-index: 10;
+            pointer-events: none;
+            display: flex; flex-direction: column; gap: 15px;
+            user-select: none;
+        }
+
+        /* Drag handle bar at the top of the panel */
+        #ui-drag-handle {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 5px 8px 5px 12px;
+            margin: -15px -15px 10px -15px;
+            background: rgba(64,196,255,0.08);
+            border-bottom: 1px solid rgba(64,196,255,0.15);
+            cursor: grab; pointer-events: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 8px; letter-spacing: 2px; color: rgba(64,196,255,0.5);
+        }
+        #ui-drag-handle:active { cursor: grabbing; }
+        #ui-collapse-btn {
+            background: none; border: none; color: rgba(64,196,255,0.6);
+            cursor: pointer; font-size: 11px; padding: 0 4px; line-height: 1;
+            pointer-events: auto;
+        }
+        #ui-collapse-btn:hover { color: #40c4ff; }
+
+        .hud-panel {
+            background: var(--ui-panel);
+            border: 1px solid rgba(64, 196, 255, 0.2);
+            border-left: 3px solid var(--cyan);
+            padding: 15px; pointer-events: auto;
+            backdrop-filter: blur(12px);
+            min-width: 300px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+
+        h1 { margin: 0; font-size: 14px; letter-spacing: 2px; color: #fff; font-weight: 800; text-transform: uppercase; }
+        .status { font-size: 10px; color: var(--cyan); margin-bottom: 12px; opacity: 0.8; }
+
+        .sys-stat {
+            display: flex; justify-content: space-between;
+            font-size: 10px; color: #fff; margin-bottom: 5px;
+            border-bottom: 1px dotted rgba(255,255,255,0.1);
+            padding-bottom: 3px;
+        }
+
+        /* ── Status readout zone — read-only telemetry ───────────────────────── */
+        /* Scoped to .status-readout so it never affects the vessel detail panel  */
+        /* which reuses .sys-stat for its own data rows.                          */
+        .status-readout {
+            padding-bottom: 8px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid rgba(64, 196, 255, 0.14);
+        }
+
+        /* Field labels: very dim — the user learns them once, then ignores them  */
+        .status-readout .sys-stat > span:first-child {
+            color: #3a5566;
+        }
+
+        /* Base row text for values without an explicit inline color             */
+        /* (e.g. node-count, dark-vessel-count) — readable but clearly passive  */
+        .status-readout .sys-stat {
+            color: #6a8a9a;
+            border-bottom-color: rgba(64, 196, 255, 0.05); /* recede the dividers */
+        }
+
+        /* Inline-colored values (cyan/orange/green) have higher specificity and  */
+        /* show through at full saturation — live counts must stay legible.       */
+
+        /* Tiny label that names each zone — tells the user what kind of UI it is */
+        .zone-label {
+            font-size: 8px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: #253545;
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            user-select: none;
+        }
+        .zone-label::before {
+            content: '';
+            display: inline-block;
+            width: 8px; height: 1px;
+            background: rgba(64,196,255,0.25);
+            flex-shrink: 0;
+        }
+
+        /* Controls zone label sits just above the first toggle group */
+        .zone-label--controls {
+            color: #3a6070;
+            margin-top: 2px;
+            margin-bottom: 6px;
+        }
+        .zone-label--controls::before {
+            background: rgba(64,196,255,0.45);
+        }
+
+        .layer-control {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-top: 10px; margin-bottom: 8px; font-size: 11px; color: #eee;
+        }
+
+        .switch { position: relative; display: inline-block; width: 34px; height: 18px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #1a2a35; transition: .4s; border-radius: 34px; border: 1px solid #2a4050;
+        }
+        .slider:before {
+            position: absolute; content: ""; height: 12px; width: 12px;
+            left: 2px; bottom: 2px; background-color: #4a7080; transition: .4s; border-radius: 50%;
+        }
+        /* Checked state — muted teal, not full-chroma cyan.
+           High-chroma cyan is reserved for live data and alerts. */
+        input:checked + .slider { background-color: #1e5565; border-color: #2e7080; }
+        input:checked + .slider:before { transform: translateX(16px); background-color: #6ab8c8; }
+
+        .toggle-btn {
+            /* Muted steel — UI controls should not compete with data colours.
+               High-chroma cyan is reserved for live telemetry and alert states. */
+            background: rgba(15, 35, 48, 0.7); border: 1px solid #253d50; color: #4a7080;
+            padding: 8px 10px; cursor: pointer; font-size: 10px; margin-top: 15px;
+            width: 100%; transition: 0.2s; text-transform: uppercase; letter-spacing: 1px; font-family: inherit;
+        }
+        .toggle-btn.active {
+            background: rgba(25, 65, 85, 0.85); color: #6ab8c8;
+            border-color: #2e6070; font-weight: bold;
+        }
+        .toggle-btn:hover { background: rgba(30, 60, 80, 0.8); color: #5a9aaa; border-color: #2a5060; }
+
+        /* ── Unified right-side toolbar — compact 3-column grid panel ───────
+           All icon buttons live in a single frosted square in the top-right.
+           3 columns × 4 rows = 12 cells; dividers removed (groups implied
+           by button style alone).                                            */
+        #right-toolbar {
+            position: absolute; top: 20px; right: 20px; z-index: 10;
+            display: grid;
+            grid-template-columns: repeat(3, 36px);
+            gap: 4px;
+            padding: 8px;
+            background: rgba(4, 12, 22, 0.78);
+            border: 1px solid rgba(37, 61, 80, 0.9);
+            border-radius: 4px;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 0 18px rgba(0,0,0,0.55), inset 0 1px 0 rgba(64,196,255,0.06);
+        }
+        .zoom-btn {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50; color: #3a6070;
+            width: 36px; height: 36px; font-size: 20px; cursor: pointer;
+            display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(12px); transition: 0.2s; font-family: monospace;
+        }
+        .zoom-btn:hover { background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a; }
+
+        /* FOV mode toggle — same footprint as zoom-btn, smaller text for the key label */
+        #btn-fov {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50; color: #3a6070;
+            width: 36px; height: 36px; font-size: 7px; letter-spacing: 1px;
+            cursor: pointer; display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(12px); transition: 0.2s; font-family: monospace;
+            text-transform: uppercase;
+        }
+        #btn-fov:hover  { background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a; }
+        #btn-fov.active { background: rgba(25, 65, 85, 0.85); color: #6ab8c8; border-color: #2e6070; }
+
+        /* ── Right-column section separators ─────────────────────────────────
+           .col-divider        : thin within-group hairline (minimal extra space)
+           .col-divider--group : between-group gap — adds 5px top+bottom margin
+                                 so total visual gap = 10px flex + 5+5+1 = 21px  */
+        .col-divider {
+            width: 36px; height: 1px;
+            background: linear-gradient(90deg, transparent, #253d50, transparent);
+            margin: 2px 0; flex-shrink: 0;
+        }
+        .col-divider--group {
+            margin: 5px 0;
+        }
+
+        /* ── Sector jump buttons (in the zoom column) ─────────────────────────
+           Same 36 × 36 footprint as zoom-btn; text shrunk to fit.
+           Active state uses a warm amber to visually brand "you are here"
+           without competing with the cyan data layer.                         */
+        .sector-btn {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50; color: #3a5060;
+            width: 36px; height: 36px; font-size: 9px; letter-spacing: 0.5px;
+            cursor: pointer; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; line-height: 1.2;
+            backdrop-filter: blur(12px); transition: 0.2s;
+            font-family: inherit; text-transform: uppercase;
+        }
+        .sector-btn:hover { background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a; }
+        .sector-btn.active {
+            background: rgba(60, 35, 12, 0.85); color: #e8900a;
+            border-color: #8a5010; font-weight: bold;
+        }
+        .sector-btn .sb-icon { font-size: 11px; line-height: 1; }
+
+        /* .legend-header full definition lives below in the collapsible-panel block */
+        .legend-item { display: flex; align-items: center; gap: 10px; font-size: 10px; margin-bottom: 6px; }
+        .legend-color { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(255,255,255,0.3); }
+        .legend-shape { color: #8aabc4; font-size: 9px; margin-left: auto; }
+
+        #tactical-tooltip {
+            position: absolute; background: rgba(1, 10, 20, 0.9);
+            border: 1px solid var(--orange); color: #fff;
+            padding: 10px; font-size: 10px; pointer-events: none;
+            display: none; z-index: 50; box-shadow: 0 0 15px rgba(255, 94, 0, 0.3);
+            text-transform: uppercase;
+        }
+        .tt-header { color: var(--orange); font-weight: bold; margin-bottom: 5px; border-bottom: 1px solid rgba(255,94,0,0.5); padding-bottom: 2px;}
+
+        #live-coords {
+            position: absolute; bottom: 20px; left: 20px; color: var(--cyan);
+            font-size: 10px; font-family: monospace; pointer-events: none; z-index: 10;
+            background: var(--ui-panel); padding: 10px 15px;
+            border: 1px solid rgba(64,196,255,0.2); backdrop-filter: blur(12px);
+            text-transform: uppercase; line-height: 1.5;
+        }
+
+        /* #sector-bookmarks removed — sector buttons now live inside #zoom-controls */
+
+        #loading-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: var(--dark-bg); z-index: 100;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        }
+
+        /* Dark vessel badge in ship list */
+        .sl-dark-badge {
+            font-size: 8px; color: var(--orange);
+            border: 1px solid var(--orange); padding: 1px 5px;
+            letter-spacing: 1px; flex-shrink: 0; border-radius: 1px;
+            animation: dark-badge-pulse 1.0s ease-in-out infinite alternate;
+        }
+        @keyframes dark-badge-pulse {
+            from { opacity: 0.45; }
+            to   { opacity: 1.0;  }
+        }
+        .sl-vessel-row.sl-dark { background: rgba(255, 94, 0, 0.04); }
+        .sl-vessel-row.sl-dark:hover { background: rgba(255, 94, 0, 0.10); }
+
+        /* ── City list toggle ───────────────────────────────────────────────────*/
+        #city-list-toggle {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50;
+            color: #3a6070; width: 36px; height: 36px; cursor: pointer;
+            display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(12px); font-size: 14px;
+            transition: 0.2s; font-family: monospace; line-height: 1;
+            letter-spacing: 0; flex-shrink: 0;
+        }
+        #city-list-toggle:hover { background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a; }
+        #city-list-toggle.active { background: rgba(25, 65, 85, 0.85); color: #6ab8c8; border-color: #2e6070; }
+
+        /* ── Sector search toggle ───────────────────────────────────────────────*/
+        #sector-search-toggle {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50;
+            color: #3a6070; width: 36px; height: 36px; cursor: pointer;
+            display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(12px); font-size: 15px;
+            transition: 0.2s; font-family: monospace; line-height: 1; flex-shrink: 0;
+        }
+        #sector-search-toggle:hover { background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a; }
+        #sector-search-toggle.active { background: rgba(25, 65, 85, 0.85); color: #6ab8c8; border-color: #2e6070; }
+
+        /* ── Shared style for all right-toolbar icon buttons without explicit CSS ─
+           Covers: layers, camera, vanguard, system-status.
+           Active state uses a consistent cyan tint.                            */
+        #layers-toggle, #camera-toggle,
+        #vanguard-toggle, #system-status-toggle,
+        #central-system-toggle {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50;
+            color: #3a6070; width: 36px; height: 36px; cursor: pointer;
+            display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(12px); font-size: 15px;
+            transition: 0.2s; font-family: monospace; line-height: 1;
+            flex-shrink: 0;
+        }
+        #layers-toggle:hover, #camera-toggle:hover,
+        #vanguard-toggle:hover, #system-status-toggle:hover,
+        #central-system-toggle:hover {
+            background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a;
+        }
+        #layers-toggle.active, #camera-toggle.active,
+        #vanguard-toggle.active, #system-status-toggle.active,
+        #central-system-toggle.active {
+            background: rgba(25, 65, 85, 0.85); color: #6ab8c8; border-color: #2e6070;
+        }
+
+        /* ── Central System toggle — text label, same footprint as btn-fov ─── */
+        #central-system-toggle {
+            font-size: 7px; letter-spacing: 1px; text-transform: uppercase;
+        }
+
+        /* ── Weather button — pending API key, visually dormant ─────────────── */
+        #weather-toggle {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #1a2a36;
+            color: #253d50; width: 36px; height: 36px;
+            display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(12px); font-size: 15px;
+            font-family: monospace; line-height: 1; flex-shrink: 0;
+            cursor: not-allowed; opacity: 0.45;
+        }
+
+        /* ── Layers panel ────────────────────────────────────────────────────── */
+        #layers-panel {
+            position: absolute; top: 20px; right: 70px;
+            width: 240px;
+            background: var(--ui-panel); border: 1px solid rgba(64,196,255,0.2);
+            border-left: 3px solid var(--cyan); backdrop-filter: blur(14px);
+            z-index: 10; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            display: none;
+        }
+        #layers-panel.open { display: block; }
+        .lp-header {
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(64,196,255,0.14);
+            background: rgba(1,10,20,0.97);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .lp-title { font-size: 9px; letter-spacing: 2px; color: #fff; font-weight: 800; text-transform: uppercase; }
+        .lp-close { background: none; border: none; color: #4a6b84; cursor: pointer; font-size: 16px; padding: 0; line-height: 1; }
+        .lp-close:hover { color: var(--cyan); }
+        .lp-section { padding: 8px 14px; border-bottom: 1px solid rgba(64,196,255,0.07); }
+        .lp-section-label {
+            font-size: 8px; letter-spacing: 1.5px; color: #4a6b84;
+            text-transform: uppercase; margin-bottom: 6px;
+        }
+        .lp-row {
+            display: flex; justify-content: space-between; align-items: center;
+            font-size: 9px; color: #8aabc4; padding: 4px 0;
+            text-transform: uppercase; letter-spacing: 0.5px;
+            cursor: pointer; user-select: none;
+        }
+        .lp-row:hover { color: var(--cyan); }
+        .lp-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+            border: 1px solid #253d50; background: #253d50;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .lp-dot.on { background: var(--cyan); border-color: var(--cyan); }
+
+        /* ── Camera controls panel ───────────────────────────────────────────── */
+        #camera-panel {
+            position: absolute; top: 20px; right: 70px;
+            width: 220px;
+            background: var(--ui-panel); border: 1px solid rgba(64,196,255,0.2);
+            border-left: 3px solid var(--cyan); backdrop-filter: blur(14px);
+            z-index: 10; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            display: none; flex-direction: column;
+        }
+        #camera-panel.open { display: flex; }
+        #camera-panel.cam-collapsed #cam-body { display: none; }
+
+        #cam-header {
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(64,196,255,0.14);
+            background: rgba(1,10,20,0.97);
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: move; user-select: none; flex-shrink: 0;
+        }
+        .cam-title { font-size: 9px; letter-spacing: 2px; color: #fff; font-weight: 800; text-transform: uppercase; }
+        .cam-win-ctrl { display: flex; gap: 3px; }
+        .cam-win-ctrl button {
+            background: none; border: none; color: #4a6b84; cursor: pointer;
+            font-size: 12px; width: 20px; height: 20px;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 2px; transition: color 0.15s, background 0.12s;
+            font-family: monospace;
+        }
+        .cam-win-ctrl button:hover { color: var(--cyan); background: rgba(64,196,255,0.1); }
+
+        #cam-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+
+        .cam-btn {
+            width: 100%;
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50;
+            color: #3a6070; cursor: pointer;
+            padding: 10px 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 8px; letter-spacing: 1.5px; text-transform: uppercase;
+            font-weight: 800;
+            display: flex; align-items: center; justify-content: space-between;
+            transition: 0.18s; text-align: left;
+        }
+        .cam-btn:hover  { background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a; }
+        .cam-btn.active {
+            background: rgba(25, 65, 85, 0.85); color: var(--cyan);
+            border-color: rgba(64,196,255,0.5);
+            box-shadow: inset 0 0 12px rgba(64,196,255,0.06);
+        }
+        .cam-btn-icon { font-size: 14px; margin-left: 8px; }
+        .cam-btn-sub  { font-size: 7px; color: #4a6b84; letter-spacing: 0.5px; margin-top: 3px; font-weight: normal; text-transform: none; }
+        .cam-btn-inner { display: flex; flex-direction: column; }
+
+        /* ── Sector search command palette ──────────────────────────────────────*/
+        #sector-search-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,6,14,0.72); z-index: 2000;
+            align-items: flex-start; justify-content: center;
+            padding-top: 14vh; backdrop-filter: blur(4px);
+        }
+        #sector-search-overlay.open { display: flex; }
+        #sector-search-modal {
+            width: 520px; max-width: 92vw;
+            background: rgba(1,10,20,0.97);
+            border: 1px solid rgba(64,196,255,0.30);
+            border-left: 3px solid var(--cyan);
+            box-shadow: 0 24px 60px rgba(0,0,0,0.9), 0 0 0 1px rgba(64,196,255,0.08);
+        }
+        #sector-search-input-row {
+            display: flex; align-items: center; gap: 10px;
+            padding: 14px 16px; border-bottom: 1px solid rgba(64,196,255,0.12);
+        }
+        #sector-search-icon { color: var(--cyan); font-size: 16px; flex-shrink: 0; }
+        #sector-search-input {
+            flex: 1; background: none; border: none; outline: none;
+            color: #fff; font-family: monospace; font-size: 13px; letter-spacing: 1px;
+        }
+        #sector-search-input::placeholder { color: rgba(138,171,196,0.5); }
+        #sector-search-hint { font-size: 10px; color: #2a4a5e; letter-spacing: 1px; flex-shrink: 0; }
+        #sector-search-results { max-height: 340px; overflow-y: auto; }
+        #sector-search-results::-webkit-scrollbar { width: 3px; }
+        #sector-search-results::-webkit-scrollbar-thumb { background: rgba(64,196,255,0.2); }
+        .ss-result {
+            display: flex; align-items: center; gap: 12px;
+            padding: 10px 16px; cursor: pointer;
+            border-bottom: 1px solid rgba(64,196,255,0.06);
+            transition: background 0.1s;
+        }
+        .ss-result:hover, .ss-result.active { background: rgba(64,196,255,0.08); }
+        .ss-result-icon { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; }
+        .ss-result-name { color: #e0eaf4; font-size: 12px; font-family: monospace; letter-spacing: 1px; flex: 1; }
+        .ss-result-sub { font-size: 10px; color: #4a6b84; letter-spacing: 0.5px; }
+        .ss-result-tag {
+            font-size: 9px; letter-spacing: 1px; padding: 2px 6px;
+            border: 1px solid; opacity: 0.7;
+        }
+        .ss-tag-city    { color: var(--cyan); border-color: var(--cyan); }
+        .ss-tag-region  { color: #ffa040; border-color: #ffa040; }
+        .ss-tag-coord   { color: #40ffaa; border-color: #40ffaa; }
+        #sector-search-filter-row {
+            display: flex; align-items: center; gap: 6px;
+            padding: 8px 16px 0; border-bottom: 1px solid rgba(64,196,255,0.10);
+            padding-bottom: 8px;
+        }
+        .ss-filter {
+            background: none; border: 1px solid rgba(64,196,255,0.2);
+            color: #4a6b84; font-family: monospace; font-size: 9px;
+            letter-spacing: 1.5px; padding: 3px 8px; cursor: pointer;
+            transition: all 0.15s;
+        }
+        .ss-filter:hover { border-color: var(--cyan); color: var(--cyan); }
+        .ss-filter.active { background: rgba(64,196,255,0.12); border-color: var(--cyan); color: var(--cyan); }
+        .ss-filter[data-filter="city"].active    { border-color: var(--cyan); color: var(--cyan); }
+        .ss-filter[data-filter="region"].active  { border-color: #ffa040; color: #ffa040; background: rgba(255,160,64,0.10); }
+        .ss-filter[data-filter="port"].active    { border-color: #40ffcc; color: #40ffcc; background: rgba(64,255,204,0.10); }
+        .ss-filter[data-filter="coord"].active   { border-color: #40ffaa; color: #40ffaa; background: rgba(64,255,170,0.10); }
+        #sector-search-count {
+            margin-left: auto; font-family: monospace; font-size: 9px;
+            color: #2a4a5e; letter-spacing: 1px;
+        }
+        #sector-search-empty {
+            padding: 24px; text-align: center;
+            color: #2a4a5e; font-size: 11px; letter-spacing: 2px; font-family: monospace;
+        }
+        /* ── GPU status banner ──────────────────────────────────────────────── */
+        #gpu-status {
+            position: absolute; bottom: 14px; left: 20px; z-index: 10;
+            font-family: monospace; font-size: 9px; letter-spacing: 2px;
+            color: #4a6b84; opacity: 0.6; pointer-events: none;
+            transition: opacity 1.0s;
+        }
+        /* ── Building load status ───────────────────────────────────────────── */
+        #buildings-status {
+            position: absolute; bottom: 28px; left: 20px; z-index: 10;
+            font-family: monospace; font-size: 9px; letter-spacing: 1.5px;
+            color: var(--cyan); opacity: 0; pointer-events: none;
+            transition: opacity 0.3s;
+        }
+
+        /* ── Settings Panel ──────────────────────────────────────────────────── */
+        #settings-toggle {
+            background: rgba(8, 22, 32, 0.82); border: 1px solid #253d50;
+            color: #3a6070; width: 36px; height: 36px; cursor: pointer;
+            display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(12px); font-size: 15px;
+            transition: 0.2s; font-family: monospace; line-height: 1; flex-shrink: 0;
+        }
+        #settings-toggle:hover { background: rgba(25, 55, 75, 0.9); color: #5a9aaa; border-color: #2e5a6a; }
+        #settings-toggle.active { background: rgba(25, 65, 85, 0.85); color: #6ab8c8; border-color: #2e6070; }
+
+        #settings-panel {
+            position: absolute; top: 20px; right: 375px;
+            width: 300px;
+            background: var(--ui-panel); border: 1px solid rgba(64,196,255,0.2);
+            border-left: 3px solid var(--cyan); backdrop-filter: blur(12px);
+            z-index: 10; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            display: none; flex-direction: column;
+        }
+        #settings-panel.open { display: flex; }
+
+        #settings-header {
+            padding: 12px 15px; border-bottom: 1px solid rgba(64,196,255,0.15);
+            display: flex; justify-content: space-between; align-items: center;
+            background: rgba(1,10,20,0.97); flex-shrink: 0;
+        }
+        .cfg-title { font-size: 11px; letter-spacing: 2px; color: #fff; font-weight: 800; text-transform: uppercase; }
+        .cfg-close { background: none; border: none; color: #8aabc4; cursor: pointer; font-size: 18px; padding: 0; line-height: 1; }
+        .cfg-close:hover { color: #fff; }
+
+        .cfg-section { padding: 14px 15px; border-bottom: 1px solid rgba(64,196,255,0.08); }
+        .cfg-section-label {
+            font-size: 9px; letter-spacing: 2px; color: var(--cyan);
+            text-transform: uppercase; margin-bottom: 12px; opacity: 0.7;
+        }
+        .cfg-row {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 10px; font-size: 10px;
+        }
+        .cfg-source-name { color: #fff; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
+        .cfg-status { display: flex; align-items: center; gap: 5px; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; }
+        .cfg-dot { width: 6px; height: 6px; border-radius: 50%; background: #4a6b84; transition: background 0.3s, box-shadow 0.3s; }
+        .cfg-dot.live  { background: #40ffaa; box-shadow: 0 0 5px #40ffaa; }
+        .cfg-dot.error { background: var(--orange); box-shadow: 0 0 5px var(--orange); }
+
+        .cfg-input {
+            width: 100%; box-sizing: border-box;
+            background: rgba(64,196,255,0.06); border: 1px solid rgba(64,196,255,0.25);
+            border-radius: 3px; color: #c8e8ff;
+            font-family: 'Courier New', monospace; font-size: 11px;
+            padding: 6px 10px; outline: none; margin-bottom: 8px; transition: border-color 0.2s;
+        }
+        .cfg-input:focus { border-color: var(--cyan); }
+        .cfg-input::placeholder { color: #3a5a6a; }
+
+        .cfg-btn {
+            width: 100%; padding: 6px 0; font-size: 10px; letter-spacing: 2px;
+            text-transform: uppercase; font-family: inherit; cursor: pointer;
+            background: rgba(64,196,255,0.1); border: 1px solid var(--cyan);
+            color: var(--cyan); border-radius: 3px; transition: 0.2s;
+        }
+        .cfg-btn:hover { background: var(--cyan); color: #000; font-weight: bold; }
+        .cfg-btn-disconnect { background: rgba(255,94,0,0.08) !important; border-color: var(--orange) !important; color: var(--orange) !important; }
+        .cfg-btn-disconnect:hover { background: var(--orange) !important; color: #000 !important; }
+        .cfg-feedback { font-size: 9px; margin-top: 6px; letter-spacing: 1px; text-transform: uppercase; min-height: 14px; text-align: center; }
+
+        /* ── Toggle group accordions ─────────────────────────────────────────── */
+        /* Collapsible groups — click the header to reveal / hide the controls.
+           Default: Intelligence open, Geography + Rendering collapsed.
+           The max-height trick allows CSS transitions on an unknown content
+           height; 260px is well above the tallest group's actual height.    */
+        .toggle-group {
+            margin-top: 4px;
+        }
+        .toggle-group + .toggle-group {
+            margin-top: 2px;
+            padding-top: 8px;
+            border-top: 1px solid rgba(64, 196, 255, 0.08);
+        }
+
+        /* Header row — now interactive */
+        .toggle-group-hdr {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 8px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: #3a6070;
+            margin-bottom: 2px;
+            margin-top: 6px;
+            cursor: pointer;
+            user-select: none;
+            padding: 3px 0;
+            border-radius: 2px;
+            transition: color 0.18s;
+        }
+        .toggle-group-hdr:hover { color: #5a9aaa; }
+
+        /* Tick mark before the label */
+        .toggle-group-hdr::before {
+            content: '';
+            display: inline-block;
+            width: 12px; height: 1px;
+            background: var(--cyan);
+            opacity: 0.4;
+            flex-shrink: 0;
+        }
+
+        /* Chevron pushed to the far right; rotates when group is open */
+        .grp-chevron {
+            margin-left: auto;
+            font-size: 7px;
+            color: #2a4a5a;
+            line-height: 1;
+            transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1),
+                        color 0.18s;
+            transform: rotate(-90deg);   /* ▶ collapsed */
+            flex-shrink: 0;
+        }
+        .toggle-group.open .grp-chevron {
+            transform: rotate(0deg);     /* ▼ expanded */
+            color: #3a6070;
+        }
+        .toggle-group-hdr:hover .grp-chevron { color: #5a9aaa; }
+
+        /* Collapsible body */
+        .toggle-group-body {
+            max-height: 0;
+            opacity: 0;
+            overflow: hidden;
+            transition:
+                max-height 0.30s cubic-bezier(0.4, 0, 0.2, 1),
+                opacity    0.22s ease;
+        }
+        .toggle-group.open .toggle-group-body {
+            max-height: 340px;   /* default for most groups */
+            opacity: 1;
+        }
+        /* Geomagnetic / ionospheric layers — UI hidden, files preserved for future rebuild */
+
+        /* Tighten internal spacing */
+        .toggle-group .layer-control {
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        /* ── Collapsible panel headers ───────────────────────────────────────── */
+        .ot-header-row {
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: pointer; user-select: none; margin-bottom: 2px;
+        }
+        .ot-header-row h1 { transition: color 0.15s; }
+        .ot-header-row:hover h1 { color: var(--cyan); }
+
+        .panel-chevron {
+            font-size: 9px; color: var(--cyan); opacity: 0.7;
+            transition: transform 0.22s ease, opacity 0.15s;
+            flex-shrink: 0; margin-left: 8px;
+        }
+        .panel-chevron.collapsed { transform: rotate(-90deg); opacity: 0.45; }
+
+        #ot-body { overflow: hidden; transition: opacity 0.2s ease; }
+        #ot-body.collapsed { display: none; }
+
+        /* ── Legend trigger button ───────────────────────────────────────────── */
+        /* Styled as an explicit button so the user immediately understands     */
+        /* "I need to click this to see the key" rather than treating it as    */
+        /* another section header.  Matches the existing toggle-btn aesthetic. */
+        .legend-header {
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+            margin-top: 12px;
+            padding: 7px 9px;
+            border: 1px solid rgba(64, 196, 255, 0.22);
+            border-radius: 2px;
+            font-size: 10px;
+            font-weight: normal;
+            letter-spacing: 1.5px;
+            color: #7a9aaa;          /* muted — reference, not critical action  */
+            text-transform: uppercase;
+            transition: background 0.15s, color 0.15s, border-color 0.15s,
+                        border-bottom-color 0.15s;
+        }
+        .legend-header:hover {
+            background: rgba(64, 196, 255, 0.07);
+            color: var(--cyan);
+            border-color: rgba(64, 196, 255, 0.45);
+        }
+        /* When open: bottom border dissolves so the header visually connects   */
+        /* to the body below — they read as one open drawer.                   */
+        .legend-header.open {
+            color: var(--cyan);
+            border-color: rgba(64, 196, 255, 0.45);
+            border-bottom-color: transparent;
+            border-radius: 2px 2px 0 0;
+        }
+        .legend-header .panel-chevron { font-size: 8px; }
+
+        /* ── Legend body — progressive disclosure ────────────────────────────
+           Starts at max-height:0 (closed by default) so it doesn't occupy
+           space until the user explicitly asks for it.  max-height transition
+           provides a smooth drawer-open feel without JS height measurement.  */
+        #legend-body {
+            overflow: hidden;
+            max-height: 0;
+            opacity: 0;
+            border: 1px solid rgba(64, 196, 255, 0.45);
+            border-top: none;
+            border-radius: 0 0 2px 2px;
+            padding: 0 8px;
+            transition: max-height 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+                        opacity    0.22s ease,
+                        padding    0.22s ease;
+        }
+        #legend-body.open {
+            max-height: 660px;   /* generous ceiling — actual content ~580px   */
+            opacity: 1;
+            padding: 10px 8px 8px;
+        }
+
+        /* AIS live status dot */
+        .ais-dot {
+            display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+            background: #4a6b84; margin-right: 5px; vertical-align: middle;
+            transition: background 0.5s;
+        }
+        .ais-dot.live { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+
+        /* Vessel detail panel */
+        #vessel-detail {
+            position: absolute; bottom: 70px; right: 70px; z-index: 10;
+            min-width: 270px; max-width: 300px; display: none;
+            background: var(--ui-panel); border: 1px solid rgba(64,196,255,0.2);
+            user-select: none; -webkit-user-select: none;
+            border-left: 3px solid var(--orange); padding: 15px;
+            backdrop-filter: blur(12px); box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            font-family: 'Courier New', monospace;
+            transition: border-color 800ms ease, border-left-color 800ms ease, box-shadow 800ms ease;
+        }
+        /* Drag handle header */
+        #vd-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 10px; padding-bottom: 8px;
+            border-bottom: 1px solid rgba(64,196,255,0.12);
+            cursor: grab;
+        }
+        #vd-header:active { cursor: grabbing; }
+        #vessel-detail.vd-dragging #vd-header { cursor: grabbing; }
+        #vd-win-btns { display: flex; gap: 4px; flex-shrink: 0; margin-left: 8px; }
+        #vd-minimize, #vd-close {
+            background: none; border: 1px solid rgba(64,196,255,0.2);
+            color: #8aabc4; cursor: pointer; font-size: 14px;
+            width: 20px; height: 20px; line-height: 18px; text-align: center;
+            padding: 0; border-radius: 2px; transition: all 0.15s;
+            font-family: inherit;
+        }
+        #vd-minimize:hover { background: rgba(64,196,255,0.1); color: #fff; border-color: rgba(64,196,255,0.5); }
+        #vd-close:hover    { background: rgba(255,50,50,0.15); color: #ff5050; border-color: rgba(255,50,50,0.5); }
+        /* Minimized state — body hidden, card collapses to header only */
+        #vessel-detail.vd-minimized #vd-body { display: none; }
+        #vessel-detail.vd-minimized { min-width: 200px; }
+        #vessel-detail.vd-minimized #vd-header { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+        #vd-body { padding-top: 4px; }
+        #vd-name {
+            font-size: 13px; color: #fff; font-weight: 800;
+            letter-spacing: 1px; text-transform: uppercase;
+            flex: 1; min-width: 0;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            transition: color 800ms ease;
+        }
+
+        /* ── Plan 04: Panel state shifts ─────────────────────────────────────── */
+        #vessel-detail[data-panel-state="elevated"] {
+            border-color: rgba(255,140,0,0.40);
+            border-left-color: #ff8c00;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8),
+                        inset 0 0 30px rgba(255,140,0,0.025);
+        }
+        #vessel-detail[data-panel-state="critical"] {
+            border-color: rgba(255,34,68,0.50);
+            border-left-color: #ff2244;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8),
+                        0 0 30px rgba(255,34,68,0.08),
+                        inset 0 0 20px rgba(255,34,68,0.04);
+        }
+
+        /* ── Plan 04: Behavioral profile tag ─────────────────────────────────── */
+        #vd-behavior-section {
+            margin-top: 10px; padding-top: 8px;
+            border-top: 1px solid rgba(64,196,255,0.08);
+        }
+        #vd-behavior-glyph {
+            font-size: 9px; letter-spacing: 2px; font-weight: bold;
+            margin-bottom: 6px;
+        }
+        #vd-behavior-tag {
+            font-size: 9px; line-height: 1.75; color: #5a7a8e;
+        }
+        #vd-behavior-tag div { padding: 1px 0; }
+
+        /* ── Plan 04: Comparative context ────────────────────────────────────── */
+        #vd-context {
+            margin-top: 8px; padding-top: 6px; font-size: 9px;
+            color: #3a5566; letter-spacing: 0.4px;
+            border-top: 1px solid rgba(64,196,255,0.05);
+        }
+
+        /* ── Plan 04: 24-hour timeline strip ─────────────────────────────────── */
+        #vd-timeline-wrap {
+            margin-top: 10px; padding-top: 8px;
+            border-top: 1px solid rgba(64,196,255,0.10);
+        }
+        .vd-tl-label {
+            font-size: 8px; letter-spacing: 2px;
+            color: #253545; margin-bottom: 4px;
+            text-transform: uppercase;
+        }
+        #vd-timeline {
+            background: rgba(0,0,0,0.30);
+            border: 1px solid rgba(64,196,255,0.06);
+            border-radius: 2px; overflow: hidden;
+        }
+
+        /* ── Vessel detail: watchlist additions ──────────────────────────────── */
+        #vd-watchlist-add-row { margin-top: 10px; }
+        #vd-watchlist-add {
+            margin-top: 0; width: 100%;
+            color: #3a8a6a; border-color: #1d4a38;
+            background: rgba(8, 25, 18, 0.75);
+        }
+        #vd-watchlist-add:hover {
+            color: #4aaa88; border-color: #2a6a50;
+            background: rgba(12, 38, 28, 0.88);
+        }
+        /* Watchlist active section */
+        #vd-watchlist-section {
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid rgba(58, 138, 106, 0.2);
+        }
+        .vd-wl-header {
+            font-size: 8px; letter-spacing: 2.5px; color: #3a8a6a;
+            margin-bottom: 9px; font-weight: bold; text-transform: uppercase;
+        }
+        #vd-notes {
+            width: 100%; box-sizing: border-box;
+            background: rgba(0, 0, 0, 0.4); border: 1px solid #1d3d50;
+            color: #6a9aaa; font-family: 'Courier New', monospace;
+            font-size: 9px; padding: 6px 8px; resize: none;
+            margin-bottom: 9px; letter-spacing: 0.3px; outline: none;
+            display: block;
+        }
+        #vd-notes::placeholder { color: #253d4a; }
+        #vd-notes:focus { border-color: #2a6070; color: #7ab5c8; }
+        .vd-alert-toggles { margin-bottom: 9px; }
+        .vd-alert-divider {
+            font-size: 8px; letter-spacing: 1.5px; color: #253545;
+            margin-bottom: 5px; text-transform: uppercase;
+        }
+        .vd-alert-row {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 9px; color: #4a6a7a; letter-spacing: 0.8px;
+            padding: 3px 0; cursor: pointer; user-select: none;
+        }
+        .vd-alert-row input[type="checkbox"] {
+            accent-color: #3a8a6a; cursor: pointer;
+            width: 11px; height: 11px; flex-shrink: 0; margin: 0;
+        }
+        .vd-alert-row:hover { color: #5a8aaa; }
+        #vd-watchlist-remove {
+            margin-top: 0; width: 100%;
+            color: #7a3030; border-color: #3d1515;
+            background: rgba(18, 5, 5, 0.75);
+        }
+        #vd-watchlist-remove:hover {
+            color: #aa4545; border-color: #5a2222;
+            background: rgba(30, 8, 8, 0.88);
+        }
+
+        /* ── Watchlist tab rows (inside Vanguard Panel) ──────────────────────── */
+        .wl-vessel-row {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 10px; cursor: pointer;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+            font-size: 10px; transition: background 0.1s;
+        }
+        .wl-vessel-row:hover { background: rgba(64,196,255,0.06); }
+        .wl-vessel-row.wl-selected { background: rgba(64,196,255,0.09); border-left: 2px solid rgba(64,196,255,0.3); }
+        .wl-flag { font-size: 16px; flex-shrink: 0; line-height: 1; }
+        .wl-info { flex: 1; min-width: 0; }
+        .wl-name {
+            font-size: 10px; color: #ccdde6; font-weight: bold;
+            letter-spacing: 0.5px; text-transform: uppercase;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .wl-meta { font-size: 9px; color: #3a5566; margin-top: 2px; letter-spacing: 0.3px; }
+        .wl-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+        .wl-alert-dots { display: flex; gap: 4px; align-items: center; }
+        .wl-remove-btn {
+            background: none; border: 1px solid rgba(255,60,60,0.25); color: rgba(255,80,80,0.45);
+            font-size: 9px; line-height: 1; padding: 2px 5px; cursor: pointer;
+            border-radius: 2px; letter-spacing: 0.5px; transition: all 0.15s;
+            font-family: inherit; flex-shrink: 0;
+        }
+        .wl-remove-btn:hover {
+            background: rgba(255,40,40,0.12); border-color: rgba(255,80,80,0.7);
+            color: #ff5050;
+        }
+        .wl-dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: #12252e; border: 1px solid #1d3a48;
+        }
+        .wl-dot.wl-dot-on {
+            background: #2a7055; border-color: #3a9a75;
+            box-shadow: 0 0 4px rgba(58,154,117,0.45);
+        }
+
+        /* ── Watchlist alert flash states ────────────────────────────────────── */
+        /* Persistent colored border — stays until user clicks the row */
+        .wl-vessel-row.wl-alerted-critical {
+            border-left: 2px solid rgba(255,23,68,0.6) !important;
+            background: rgba(255,23,68,0.04);
+        }
+        .wl-vessel-row.wl-alerted-warning {
+            border-left: 2px solid rgba(255,140,0,0.6) !important;
+            background: rgba(255,140,0,0.04);
+        }
+        /* Pulse animation — added by JS after re-render, runs 3 times then stops */
+        @keyframes wl-pulse-critical {
+            0%   { background: rgba(255,23,68,0.04); box-shadow: none; }
+            40%  { background: rgba(255,23,68,0.18); box-shadow: inset 0 0 12px rgba(255,23,68,0.15); }
+            100% { background: rgba(255,23,68,0.04); box-shadow: none; }
+        }
+        @keyframes wl-pulse-warning {
+            0%   { background: rgba(255,140,0,0.04); box-shadow: none; }
+            40%  { background: rgba(255,140,0,0.16); box-shadow: inset 0 0 12px rgba(255,140,0,0.12); }
+            100% { background: rgba(255,140,0,0.04); box-shadow: none; }
+        }
+        .wl-vessel-row.wl-alerted-critical.wl-pulse {
+            animation: wl-pulse-critical 0.75s ease-in-out 3;
+        }
+        .wl-vessel-row.wl-alerted-warning.wl-pulse {
+            animation: wl-pulse-warning 0.75s ease-in-out 3;
+        }
+
+        /* ── ALERTS tab ───────────────────────────────────────────────────────── */
+        .al-toolbar {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 10px; border-bottom: 1px solid rgba(64,196,255,0.08);
+            position: sticky; top: 0; background: var(--ui-panel); z-index: 1;
+        }
+        .al-toolbar-left { display: flex; align-items: center; gap: 6px; }
+        .al-toolbar-right { display: flex; align-items: center; gap: 4px; }
+        .al-count { font-size: 9px; color: #4a6b84; letter-spacing: 0.5px; text-transform: uppercase; display: flex; align-items: center; gap: 4px; }
+        .al-unread-dot { width: 6px; height: 6px; border-radius: 50%; background: #ff1744; box-shadow: 0 0 5px rgba(255,23,68,0.6); flex-shrink: 0; }
+        .al-view-btn {
+            background: none; border: 1px solid rgba(64,196,255,0.2); color: #4a6b84;
+            font-size: 8px; padding: 2px 7px; cursor: pointer; letter-spacing: 0.8px;
+            font-family: inherit; text-transform: uppercase; border-radius: 2px;
+            transition: all 0.15s;
+        }
+        .al-view-btn[data-active], .al-view-btn:hover { color: var(--cyan); border-color: rgba(64,196,255,0.5); background: rgba(64,196,255,0.07); }
+        .al-clear-btn {
+            background: none; border: 1px solid rgba(255,60,60,0.25); color: rgba(255,80,80,0.5);
+            font-size: 8px; padding: 2px 7px; cursor: pointer; letter-spacing: 0.8px;
+            font-family: inherit; text-transform: uppercase; border-radius: 2px;
+            transition: all 0.15s;
+        }
+        .al-clear-btn:hover { border-color: rgba(255,80,80,0.7); color: #ff5050; background: rgba(255,40,40,0.1); }
+
+        /* Alert log entries */
+        .al-log { display: flex; flex-direction: column; }
+        .al-entry {
+            display: flex; justify-content: space-between; align-items: flex-start;
+            padding: 9px 10px; border-bottom: 1px solid rgba(255,255,255,0.04);
+            gap: 6px; transition: background 0.1s;
+        }
+        .al-entry.al-new { background: rgba(64,196,255,0.04); border-left: 2px solid rgba(64,196,255,0.3); }
+        .al-entry.al-clickable { cursor: pointer; }
+        .al-entry.al-clickable:hover { background: rgba(64,196,255,0.06); }
+        .al-entry-left { display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; }
+        .al-icon { font-size: 13px; flex-shrink: 0; line-height: 1.4; }
+        .al-entry-body { flex: 1; min-width: 0; }
+        .al-entry-header { display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
+        .al-type { font-size: 9px; font-weight: bold; letter-spacing: 0.8px; text-transform: uppercase; }
+        .al-sev {
+            font-size: 7px; padding: 1px 4px; border-radius: 2px; letter-spacing: 0.5px;
+            text-transform: uppercase; font-weight: bold; flex-shrink: 0;
+        }
+        .al-sev-critical { background: rgba(255,23,68,0.15);  color: #ff1744; border: 1px solid rgba(255,23,68,0.3); }
+        .al-sev-warning  { background: rgba(255,140,0,0.12);  color: #ff8c00; border: 1px solid rgba(255,140,0,0.3); }
+        .al-sev-info     { background: rgba(64,196,255,0.10); color: #40c4ff; border: 1px solid rgba(64,196,255,0.3); }
+        .al-vessel { font-size: 10px; color: #ccdde6; font-weight: bold; letter-spacing: 0.3px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .al-msg { font-size: 9px; color: #4a6b84; margin-top: 2px; }
+        .al-entry-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+        .al-time { font-size: 8px; color: #2a4a5a; white-space: nowrap; }
+        .al-dismiss {
+            background: none; border: none; color: #3a6070; cursor: pointer;
+            font-size: 16px; padding: 0 2px; line-height: 1; transition: color 0.1s;
+            font-family: inherit;
+        }
+        .al-dismiss:hover { color: #ff5050; }
+
+        /* Alerts search row */
+        .al-search-row {
+            display: flex; align-items: center; gap: 8px;
+            padding: 6px 10px; border-bottom: 1px solid rgba(64,196,255,0.06);
+        }
+        .al-search {
+            flex: 1; background: rgba(4,14,26,0.7); border: 1px solid rgba(64,196,255,0.12);
+            color: #8aabc4; font-family: 'Courier New', monospace; font-size: 9px;
+            letter-spacing: 1px; padding: 5px 8px; outline: none;
+            text-transform: uppercase;
+        }
+        .al-search::placeholder { color: #2a4a5a; }
+        .al-search:focus { border-color: rgba(64,196,255,0.35); }
+        .al-search-count { font-size: 8px; color: #3a6070; white-space: nowrap; letter-spacing: 0.5px; }
+
+        /* Rules view */
+        .al-rules-list { display: flex; flex-direction: column; }
+        .al-rule {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 9px 10px; border-bottom: 1px solid rgba(255,255,255,0.04);
+            gap: 8px;
+        }
+        .al-rule-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+        .al-rule-info { flex: 1; min-width: 0; }
+        .al-rule-name { font-size: 10px; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; transition: color 0.2s; }
+        .al-rule-desc { font-size: 8px; color: #3a5566; margin-top: 2px; letter-spacing: 0.2px; }
+        /* Toggle switch */
+        .al-toggle-wrap { display: flex; align-items: center; cursor: pointer; flex-shrink: 0; }
+        .al-toggle-wrap input { display: none; }
+        .al-toggle-track {
+            width: 28px; height: 14px; border-radius: 7px;
+            background: #0d1e28; border: 1px solid #1d3a48;
+            position: relative; transition: all 0.2s; flex-shrink: 0;
+        }
+        .al-toggle-thumb {
+            position: absolute; top: 2px; left: 2px;
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #2a4a5a; transition: all 0.2s;
+        }
+        .al-toggle-wrap input:checked ~ .al-toggle-track { background: rgba(64,196,255,0.15); border-color: rgba(64,196,255,0.5); }
+        .al-toggle-wrap input:checked ~ .al-toggle-track .al-toggle-thumb { left: 16px; background: var(--cyan); box-shadow: 0 0 5px rgba(64,196,255,0.5); }
+        /* Custom param input */
+        .al-rule-param { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+        .al-param-label { font-size: 8px; color: #4a6b84; letter-spacing: 0.3px; }
+        .al-param-input {
+            width: 36px; background: rgba(0,0,0,0.3); border: 1px solid rgba(64,196,255,0.2);
+            color: var(--cyan); font-family: inherit; font-size: 9px; padding: 2px 4px;
+            text-align: center; outline: none;
+        }
+        .al-param-input:focus { border-color: rgba(64,196,255,0.5); }
+        .al-rules-note {
+            font-size: 8px; color: #2a4a5a; text-align: center; line-height: 1.6;
+            padding: 12px 14px; letter-spacing: 0.3px;
+        }
+
+        /* Ship list panel */
+
+        .sl-list-header {
+            padding: 12px 15px; border-bottom: 1px solid rgba(64,196,255,0.2);
+            display: flex; justify-content: space-between; align-items: center;
+            position: sticky; top: 0; background: rgba(1,10,20,0.95);
+            backdrop-filter: blur(12px); z-index: 1;
+        }
+        .sl-region-header {
+            padding: 8px 15px; font-size: 10px; color: #fff; font-weight: bold;
+            cursor: pointer; background: rgba(64,196,255,0.05);
+            letter-spacing: 1px; text-transform: uppercase;
+            border-bottom: 1px solid rgba(64,196,255,0.1);
+            display: flex; align-items: center; gap: 6px;
+        }
+        .sl-region-header:hover { background: rgba(64,196,255,0.1); }
+        .sl-region-name { flex: 1; }
+        .sl-count {
+            background: rgba(64,196,255,0.15); color: var(--cyan);
+            padding: 1px 6px; font-size: 9px; border-radius: 2px;
+        }
+        .sl-arrow { color: var(--cyan); font-size: 8px; width: 10px; }
+        .sl-vessel-row {
+            padding: 7px 15px 7px 25px; display: flex; align-items: center;
+            gap: 8px; cursor: pointer; font-size: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+            transition: background 0.1s;
+        }
+        .sl-vessel-row:hover { background: rgba(64,196,255,0.08); }
+        .sl-vessel-row.sl-locked { background: rgba(255,94,0,0.08); }
+        .sl-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .sl-name {
+            flex: 1; color: #ddd; text-transform: uppercase;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            letter-spacing: 0.5px;
+        }
+        .sl-speed { color: var(--cyan); font-size: 9px; flex-shrink: 0; }
+        .sl-country {
+            color: #4a6b84; font-size: 9px; letter-spacing: 1px;
+            flex-shrink: 0; text-transform: uppercase;
+        }
+
+
+        /* ── Search bar (inline within legend section) ───────────────────────── */
+        #search-panel {
+            margin: 8px 0 10px 0;
+        }
+        #search-label {
+            font-size: 9px; letter-spacing: 2px; color: #8aabc4;
+            text-transform: uppercase; margin-bottom: 5px; display: block;
+        }
+        #search-input {
+            width: 100%; box-sizing: border-box;
+            background: rgba(0,0,0,0.4); border: 1px solid rgba(64,196,255,0.3);
+            color: #fff; padding: 6px 8px;
+            font-family: 'Courier New', monospace; font-size: 11px;
+            outline: none; letter-spacing: 1px;
+        }
+        #search-input:focus { border-color: var(--cyan); }
+        #search-input::placeholder { color: #2a4a5e; }
+        #search-match-count {
+            display: none; margin-top: 5px;
+            font-size: 9px; color: var(--cyan); letter-spacing: 1px; text-transform: uppercase;
+        }
+
+        /* ── Alert zone badge ────────────────────────────────────────────────── */
+        #alert-zone-badge {
+            display: none;
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 20; background: rgba(1,10,20,0.92);
+            border: 1px solid rgba(255,23,68,0.5); border-left: 3px solid var(--red);
+            color: #8aabc4; padding: 8px 20px;
+            font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+            backdrop-filter: blur(12px); white-space: nowrap;
+            font-family: 'Courier New', monospace;
+        }
+        #alert-zone-badge.alert-zone-hot {
+            color: var(--red);
+            animation: zone-flash 0.6s ease-in-out infinite alternate;
+            border-color: var(--red);
+            box-shadow: 0 0 20px rgba(255,23,68,0.3);
+        }
+        @keyframes zone-flash {
+            from { background: rgba(1,10,20,0.92); }
+            to   { background: rgba(255,23,68,0.12); }
+        }
+
+        /* ── Context card — first-encounter plain-language explainer ───────────
+           Floats at bottom-centre, clear of all existing panels.
+           --ctx-accent is set per-card type by ContextCardManager.            */
+        #context-card {
+            display: none;   /* shown by JS — flex when visible */
+            position: fixed;
+            bottom: 48px;
+            left: 50%;
+            transform: translateX(-50%) translateY(18px);
+            z-index: 500;
+            width: 380px;
+            flex-direction: column;
+            gap: 0;
+            background: rgba(2, 10, 18, 0.96);
+            border: 1px solid var(--ctx-accent, #555);
+            border-left: 3px solid var(--ctx-accent, #555);
+            backdrop-filter: blur(16px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.7),
+                        0 0 24px rgba(0,0,0,0.4);
+            opacity: 0;
+            transition: opacity 0.28s ease, transform 0.28s cubic-bezier(0.4,0,0.2,1);
+            pointer-events: none;
+        }
+        #context-card.ctx-card--visible {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+            pointer-events: auto;
+        }
+        .ctx-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .ctx-icon {
+            font-size: 16px;
+            color: var(--ctx-accent, #888);
+            flex-shrink: 0;
+            line-height: 1;
+        }
+        .ctx-title {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--ctx-accent, #aaa);
+            flex: 1;
+        }
+        .ctx-dismiss {
+            background: none;
+            border: none;
+            color: #3a5566;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+            padding: 0 2px;
+            transition: color 0.15s;
+            font-family: monospace;
+            flex-shrink: 0;
+        }
+        .ctx-dismiss:hover { color: #8aabc4; }
+        .ctx-body-wrap {
+            padding: 10px 12px 12px;
+        }
+        .ctx-body {
+            font-size: 10px;
+            line-height: 1.7;
+            color: #7a9aaa;
+        }
+        .ctx-body strong { color: #9ab8c8; }
+        .ctx-body em     { color: var(--ctx-accent, #888); font-style: normal; }
+        .ctx-footer {
+            display: flex;
+            justify-content: flex-end;
+            padding: 0 12px 10px;
+        }
+        .ctx-got-it {
+            background: none;
+            border: 1px solid rgba(255,255,255,0.1);
+            color: #4a6a7a;
+            font-size: 9px;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            padding: 4px 12px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: 0.18s;
+        }
+        .ctx-got-it:hover { background: rgba(255,255,255,0.06); color: #8aabc4; }
+
+        /* ── Scanning pulse: fires on .hud-panel when camera moves ───────────
+           A slow, faint cyan border-glow cycles while the view is in motion,
+           giving the status board a live-sensor feel without being distracting. */
+        @keyframes scan-pulse {
+            0%   { box-shadow: 0 0 0px  rgba(0,255,204,0.00), inset 0 0 0px  rgba(0,255,204,0.00); }
+            40%  { box-shadow: 0 0 10px rgba(0,255,204,0.18), inset 0 0 4px  rgba(0,255,204,0.06); }
+            100% { box-shadow: 0 0 0px  rgba(0,255,204,0.00), inset 0 0 0px  rgba(0,255,204,0.00); }
+        }
+        .hud-panel.scanning {
+            animation: scan-pulse 0.9s ease-in-out infinite;
+        }
+
+        /* ── Threat level colouring ──────────────────────────────────────────
+           Written as CSS classes so JS only swaps a class, not inline styles. */
+
+
+        /* ── Vessel vignette (Plan 02) ───────────────────────────────────────────
+           Radial dark overlay centered on the locked vessel.
+           Origin tracks via --vessel-x / --vessel-y set by TransitionManager.
+           z-index 8 sits above terrain but below the detail panel (z-index 10). */
+        #vessel-vignette {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 8;
+            opacity: 0;
+            transition: opacity 600ms ease;
+            background: radial-gradient(
+                ellipse 30% 30% at var(--vessel-x, 50%) var(--vessel-y, 50%),
+                transparent 0%,
+                rgba(6, 12, 20, 0.80) 100%
+            );
+        }
+        #vessel-vignette.active { opacity: 1; }
+
+        /* ── Threat vignette ─────────────────────────────────────────────────────
+           Radial red vignette that strengthens as threat level rises.
+           Opacity is driven by main.js (_currentThreatIntensity × 0.80).
+           Pointer-events none ensures it never blocks mouse interaction.          */
+        /* ── Vessel class filter bar ─────────────────────────────────────────── */
+        #vessel-filter-bar {
+            position: fixed;
+            top: 14px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 5px;
+            z-index: 15;
+            pointer-events: auto;
+            user-select: none;
+        }
+        .vf-btn {
+            background: rgba(1, 10, 20, 0.80);
+            border: 1px solid rgba(64, 196, 255, 0.25);
+            color: #4a6b84;
+            font-family: 'Courier New', monospace;
+            font-size: 9px;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            padding: 5px 10px;
+            cursor: pointer;
+            border-radius: 2px;
+            transition: all 0.15s;
+            backdrop-filter: blur(8px);
+        }
+        .vf-btn:hover {
+            border-color: var(--cyan);
+            color: var(--cyan);
+            background: rgba(64, 196, 255, 0.08);
+        }
+        .vf-btn.active {
+            border-color: var(--cyan);
+            color: var(--cyan);
+            background: rgba(64, 196, 255, 0.14);
+            box-shadow: 0 0 8px rgba(64, 196, 255, 0.20);
+        }
+        .vf-dark { border-color: rgba(255, 23, 68, 0.35) !important; color: #884455 !important; }
+        .vf-dark:hover, .vf-dark.active { border-color: #ff1744 !important; color: #ff1744 !important; background: rgba(255,23,68,0.10) !important; box-shadow: 0 0 8px rgba(255,23,68,0.20) !important; }
+
+        /* ── Port detail panel ───────────────────────────────────────────────── */
+        #port-detail-panel {
+            position: fixed;
+            bottom: 50px;
+            right: 80px;
+            width: 280px;
+            background: rgba(1, 10, 20, 0.92);
+            border: 1px solid rgba(64, 196, 255, 0.3);
+            border-left: 3px solid var(--cyan);
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            color: #8aabc4;
+            z-index: 20;
+            box-shadow: 0 0 30px rgba(64,196,255,0.10);
+            backdrop-filter: blur(12px);
+            letter-spacing: 0.8px;
+        }
+        #pdp-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 12px 8px;
+            border-bottom: 1px solid rgba(64,196,255,0.14);
+            background: rgba(64,196,255,0.05);
+        }
+        #pdp-header > div { display: flex; align-items: center; gap: 8px; }
+        #pdp-icon { font-size: 14px; color: var(--cyan); }
+        #pdp-name { font-size: 14px; font-weight: 800; color: #fff; letter-spacing: 2px; text-transform: uppercase; }
+        #pdp-close { background: none; border: none; color: #4a6b84; cursor: pointer; font-size: 16px; padding: 0 4px; line-height: 1; }
+        #pdp-close:hover { color: var(--cyan); }
+        #pdp-meta { padding: 8px 12px 4px; }
+        #pdp-region { color: var(--cyan); font-size: 9px; letter-spacing: 2px; text-transform: uppercase; }
+        #pdp-coords { color: #4a6b84; font-size: 9px; margin-top: 2px; }
+        #pdp-rank-row { padding: 0 12px 4px; display: flex; gap: 10px; flex-wrap: wrap; }
+        #pdp-rank { color: #ffd700; font-size: 9px; letter-spacing: 1px; }
+        #pdp-type { color: #8aabc4; font-size: 9px; }
+        #pdp-max-vessel { padding: 0 12px 8px; color: #4a6b84; font-size: 9px; }
+        .pdp-divider { height: 1px; background: rgba(64,196,255,0.10); margin: 2px 0; }
+        #pdp-weather { padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
+        #pdp-weather-val { color: #fff; font-size: 10px; }
+        .pdp-label { color: var(--cyan); font-size: 9px; letter-spacing: 2px; text-transform: uppercase; }
+        #pdp-vessels-header { padding: 8px 12px 4px; display: flex; justify-content: space-between; }
+        #pdp-vessel-count { color: #fff; font-size: 13px; font-weight: 800; }
+        #pdp-vessel-breakdown { padding: 0 12px 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .pdp-class-chip {
+            background: rgba(64,196,255,0.08); border: 1px solid rgba(64,196,255,0.20);
+            color: #8aabc4; font-size: 9px; padding: 2px 7px; border-radius: 2px;
+            font-family: 'Courier New', monospace; letter-spacing: 0.5px;
+        }
+        #pdp-watchlisted { padding: 0 12px 8px; }
+        .pdp-watch-row { padding: 3px 0; color: #8aabc4; font-size: 9px; display: flex; gap: 8px; }
+        .pdp-watch-name { color: #fff; font-weight: 800; }
+        .pdp-watch-dest { color: #4a6b84; }
+        #pdp-serves { padding: 4px 12px 10px; }
+        .pdp-serves-item { color: #8aabc4; font-size: 9px; padding: 2px 0; }
+        .pdp-serves-item::before { content: '→ '; color: var(--cyan); }
+
+        #threat-vignette {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 5;
+            background: radial-gradient(
+                ellipse 120% 110% at 50% 50%,
+                transparent 38%,
+                rgba(180, 0, 0, 0.28) 72%,
+                rgba(200, 0, 0, 0.55) 100%
+            );
+            opacity: 0;
+            /* Use CSS transition for extra smoothness on top of the JS lerp */
+            transition: opacity 0.6s ease;
+        }
+
+        /* ── Off-screen edge indicators ──────────────────────────────────────────
+           Container spans the full viewport; arrows are absolutely positioned
+           inside it. Pointer-events: none so they never steal mouse focus.        */
+        #edge-indicators {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 50;
+            overflow: hidden;
+        }
+
+        .edge-arrow {
+            position: absolute;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+            opacity: 0;
+            /* No transition — position updates every 80 ms, transition would lag */
+        }
+
+        /* Triangle pointing "up" in local space; JS rotates the element to aim
+           it toward the off-screen target. The color is set inline by JS.        */
+        .ea-tri {
+            width: 0; height: 0;
+            border-left:  7px solid transparent;
+            border-right: 7px solid transparent;
+            border-bottom: 12px solid #ff1744;   /* overridden inline */
+            filter: drop-shadow(0 0 5px currentColor);
+        }
+
+        .ea-label {
+            font-family: 'Courier New', monospace;
+            font-size: 8px;
+            font-weight: 800;
+            letter-spacing: 1.5px;
+            text-shadow: 0 0 6px currentColor;
+            /* label sits below the triangle; overall block is centered on edge */
+            white-space: nowrap;
+        }
+
+        /* ══════════════════════════════════════════════════════════════════════
+           VESSELS TAB — geographic groups + vessel rows
+        ══════════════════════════════════════════════════════════════════════ */
+        .vt-summary {
+            font-size: 8px; letter-spacing: 1.5px; color: #4a6b84;
+            text-transform: uppercase; padding: 0 0 8px 0;
+            border-bottom: 1px solid rgba(64,196,255,0.1);
+            margin-bottom: 6px;
+        }
+
+        /* ── Region group ────────────────────────────────────────────────────── */
+        .vt-region { margin-bottom: 2px; }
+        .vt-region-header {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 4px;
+            cursor: pointer; user-select: none;
+            border-radius: 2px;
+            transition: background 0.12s;
+        }
+        .vt-region-header:hover { background: rgba(64,196,255,0.06); }
+        .vt-chevron   { font-size: 8px; color: #3a6070; flex-shrink: 0; width: 10px; }
+        .vt-region-name {
+            flex: 1; font-size: 8px; letter-spacing: 1.5px;
+            color: #8aabc4; text-transform: uppercase; font-weight: 800;
+        }
+        .vt-region-count {
+            font-size: 8px; color: var(--cyan); background: rgba(64,196,255,0.1);
+            padding: 1px 5px; border-radius: 8px; letter-spacing: 0;
+            font-family: 'Courier New', monospace;
+        }
+        .vt-region-body { padding-left: 4px; }
+
+        /* ── Vessel row ─────────────────────────────────────────────────────── */
+        .vt-vessel-row {
+            display: flex; align-items: flex-start; gap: 7px;
+            padding: 6px 4px;
+            cursor: pointer;
+            border-radius: 2px;
+            border-left: 2px solid transparent;
+            transition: background 0.1s, border-color 0.1s;
+        }
+        .vt-vessel-row:hover {
+            background: rgba(64,196,255,0.05);
+            border-left-color: rgba(64,196,255,0.3);
+        }
+        .vt-vessel-row.vt-selected {
+            background: rgba(64,196,255,0.1);
+            border-left-color: var(--cyan);
+        }
+        .vt-vessel-row.vt-is-dark {
+            border-left-color: rgba(255,94,0,0.4);
+        }
+        .vt-vessel-row.vt-is-dark:hover { border-left-color: var(--orange); }
+
+        .vt-flag { font-size: 14px; flex-shrink: 0; line-height: 1.3; }
+
+        .vt-info { flex: 1; min-width: 0; }
+
+        .vt-name-row {
+            display: flex; align-items: center; gap: 5px;
+            margin-bottom: 2px;
+        }
+        .vt-name {
+            font-size: 9px; color: #c8dae8; font-weight: 800;
+            letter-spacing: 0.5px; text-transform: uppercase;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            font-family: 'Courier New', monospace;
+        }
+        .vt-dark-badge {
+            font-size: 7px; letter-spacing: 1px; color: var(--orange);
+            border: 1px solid rgba(255,94,0,0.4); padding: 1px 4px;
+            flex-shrink: 0;
+        }
+
+        .vt-detail-row {
+            display: flex; align-items: center; gap: 4px;
+            font-size: 8px; color: #4a6b84;
+            font-family: 'Courier New', monospace;
+        }
+        .vt-speed   { color: #6ab8c8; }
+        .vt-unit    { color: #3a6070; font-size: 7px; }
+        .vt-moored  { color: #4a6b84; }
+        .vt-unknown { color: #2a4050; }
+        .vt-arrow   { color: #2a4050; }
+        .vt-dest    { color: #6a8a9e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+
+        /* ── Vessel row watchlist button ─────────────────────────────────────── */
+        .vt-wl-btn {
+            background: none;
+            border: 1px solid #1a3545;
+            color: #2a5060;
+            width: 19px; height: 19px;
+            font-size: 12px; line-height: 1;
+            cursor: pointer; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 2px;
+            transition: border-color 0.15s, color 0.15s, background 0.15s;
+            padding: 0; font-family: inherit;
+            align-self: center;
+        }
+        .vt-wl-btn:hover {
+            border-color: #3a8a6a; color: #3a8a6a;
+            background: rgba(58,138,106,0.12);
+        }
+        .vt-wl-btn.vt-wl-on {
+            color: #3a9a7a; border-color: #2a6a52;
+            background: rgba(58,138,106,0.08);
+        }
+        .vt-wl-btn.vt-wl-on:hover {
+            color: #ff6060; border-color: #6a2020;
+            background: rgba(180,40,40,0.10);
+        }
+
+        /* Double-click hint on row names */
+        .vt-name { cursor: default; }
+
+        /* ══════════════════════════════════════════════════════════════════════
+           FEED TAB — two-section RSS feed with search + tag filtering
+        ══════════════════════════════════════════════════════════════════════ */
+
+        /* Toolbar: search input + tag pills */
+        #fd-toolbar {
+            padding: 10px 12px 8px;
+            border-bottom: 1px solid rgba(64,196,255,0.08);
+            flex-shrink: 0;
+        }
+        #fd-search {
+            width: 100%; box-sizing: border-box;
+            background: rgba(8,24,42,0.8);
+            border: 1px solid rgba(64,196,255,0.2);
+            color: #a8cce0; font-family: 'Courier New', monospace;
+            font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+            padding: 6px 9px; outline: none; transition: border-color 0.2s;
+        }
+        #fd-search:focus { border-color: rgba(64,196,255,0.35); }
+        #fd-search::placeholder { color: #3a6070; }
+        #fd-tags {
+            display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px;
+        }
+        .fd-tag {
+            background: rgba(8,22,32,0.6); border: 1px solid #1e3545;
+            color: #2e5068; font-family: 'Courier New', monospace;
+            font-size: 8px; letter-spacing: 1px; text-transform: uppercase;
+            padding: 3px 7px; cursor: pointer; transition: 0.15s;
+        }
+        .fd-tag:hover { color: #5a8aaa; border-color: #2a4a60; }
+        .fd-tag.fd-tag-active {
+            background: rgba(20,50,70,0.7);
+            border-color: rgba(64,196,255,0.3);
+            color: var(--cyan);
+        }
+
+        /* Status bar: last updated + refresh button */
+        #fd-status-bar {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 4px 12px;
+            border-bottom: 1px solid rgba(64,196,255,0.06);
+            background: rgba(1,8,18,0.5);
+            flex-shrink: 0;
+        }
+        #fd-status {
+            font-size: 8px; letter-spacing: 1.5px; color: #5a8090; text-transform: uppercase;
+        }
+        #fd-refresh-btn {
+            background: none; border: none; color: #2a4a60;
+            font-family: 'Courier New', monospace; font-size: 8px;
+            letter-spacing: 1px; cursor: pointer; padding: 2px 4px;
+            transition: 0.15s; text-transform: uppercase;
+        }
+        #fd-refresh-btn:hover { color: var(--cyan); }
+
+        /* Scrollable content area */
+        #fd-content {
+            flex: 1; overflow-y: auto; min-height: 0;
+        }
+        #fd-content::-webkit-scrollbar { width: 3px; }
+        #fd-content::-webkit-scrollbar-thumb { background: rgba(64,196,255,0.15); }
+
+        /* Section */
+        .fd-section { border-bottom: 1px solid rgba(64,196,255,0.06); }
+        .fd-section-hdr {
+            display: flex; align-items: center; gap: 6px;
+            padding: 8px 12px 6px;
+            font-size: 8px; letter-spacing: 2px; text-transform: uppercase;
+            color: #6a9ab8; border-bottom: 1px solid rgba(64,196,255,0.08);
+            position: sticky; top: 0;
+            background: rgba(4,16,30,0.97);
+            backdrop-filter: blur(6px);
+            z-index: 1;
+        }
+        .fd-section-icon { font-size: 10px; }
+        .fd-icon-intel   { color: #ff5e00; }
+        .fd-icon-news    { color: rgba(64,196,255,0.5); }
+        .fd-section-count { color: #3a6880; font-size: 8px; margin-left: auto; }
+        .fd-section-body  { }
+
+        /* Article row */
+        .fd-article {
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            background: rgba(8,22,38,0.55);
+            cursor: pointer; transition: background 0.1s;
+        }
+        .fd-article:hover { background: rgba(20,50,75,0.6); }
+        .fd-article.fd-expanded { background: rgba(12,35,58,0.75); }
+
+        .fd-article-row {
+            display: flex; align-items: baseline; gap: 6px;
+            padding: 7px 12px;
+        }
+        .fd-time {
+            font-size: 8px; color: #5a8090; white-space: nowrap;
+            flex-shrink: 0; min-width: 22px; text-align: right;
+        }
+        .fd-src-tag {
+            font-size: 7px; letter-spacing: 0.8px; text-transform: uppercase;
+            color: #5a90ac; background: rgba(40,80,110,0.3);
+            border: 1px solid #2a5a72;
+            padding: 1px 5px; flex-shrink: 0; white-space: nowrap;
+        }
+        .fd-title {
+            flex: 1; font-size: 10px; color: #a0c2d6; line-height: 1.4;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+        .fd-article.fd-expanded .fd-title {
+            color: #c0d8e8;
+            -webkit-line-clamp: unset;
+        }
+
+        /* Pin button */
+        .fd-pin-btn {
+            background: none; border: none; cursor: pointer;
+            font-size: 10px; padding: 0; opacity: 0.2;
+            flex-shrink: 0; transition: opacity 0.15s;
+            line-height: 1;
+        }
+        .fd-article:hover .fd-pin-btn { opacity: 0.5; }
+        .fd-pin-btn.fd-pinned { opacity: 1 !important; }
+
+        /* Expanded body */
+        .fd-article-body {
+            padding: 4px 12px 10px 40px;
+        }
+        .fd-desc {
+            font-size: 9px; color: #7aA0b8; line-height: 1.6;
+            margin: 0 0 8px 0;
+        }
+        .fd-read-link {
+            font-size: 9px; color: var(--cyan); letter-spacing: 0.5px;
+            text-decoration: none; opacity: 0.7; transition: opacity 0.15s;
+        }
+        .fd-read-link:hover { opacity: 1; }
+
+        /* Empty state */
+        .fd-empty {
+            padding: 18px 12px; font-size: 9px; letter-spacing: 1.5px;
+            color: #4a7080; text-align: center; text-transform: uppercase;
+        }
+
+        /* ══════════════════════════════════════════════════════════════════════
+           SITREP TAB — situation report: brief + log view switcher
+        ══════════════════════════════════════════════════════════════════════ */
+
+        /* View switcher: BRIEF | LOG */
+        #sr-view-switcher {
+            display: flex; flex-shrink: 0;
+            border-bottom: 1px solid rgba(64,196,255,0.1);
+            background: rgba(4,14,26,0.8);
+        }
+        .sr-view-btn {
+            flex: 1; background: none; border: none; border-bottom: 2px solid transparent;
+            color: #2e5068; font-family: 'Courier New', monospace;
+            font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+            padding: 9px 0; cursor: pointer; transition: 0.15s;
+        }
+        .sr-view-btn:hover { color: #5a8aaa; }
+        .sr-view-btn.sr-view-active {
+            color: var(--cyan); border-bottom-color: var(--cyan);
+            background: rgba(64,196,255,0.05);
+        }
+
+        /* Content area — scrollable */
+        #sr-content-area {
+            flex: 1; overflow-y: auto; min-height: 0;
+        }
+        #sr-content-area::-webkit-scrollbar { width: 3px; }
+        #sr-content-area::-webkit-scrollbar-thumb { background: rgba(64,196,255,0.15); }
+
+        /* Brief header */
+        .sr-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px 8px;
+            border-bottom: 1px solid rgba(64,196,255,0.08);
+        }
+        .sr-header-label {
+            font-size: 8px; letter-spacing: 2.5px; color: var(--cyan);
+            text-transform: uppercase; font-weight: bold;
+        }
+        .sr-header-time { font-size: 8px; color: #4a7085; letter-spacing: 1px; }
+
+        /* No-change indicator */
+        .sr-no-change {
+            font-size: 8px; letter-spacing: 1.5px; color: #3a6070;
+            text-transform: uppercase; text-align: center;
+            padding: 5px 14px; background: rgba(4,20,36,0.6);
+            border-bottom: 1px solid rgba(64,196,255,0.06);
+        }
+
+        /* Sections */
+        .sr-section {
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(64,196,255,0.06);
+        }
+        .sr-section-lbl {
+            font-size: 7px; letter-spacing: 2px; color: #3a6070;
+            text-transform: uppercase; margin-bottom: 8px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid rgba(64,196,255,0.07);
+        }
+
+        /* Collapsible sections (details/summary) */
+        details.sr-collapsible { padding: 0; }
+        details.sr-collapsible > summary {
+            list-style: none; cursor: pointer;
+            display: flex; align-items: center; gap: 6px;
+            padding: 12px 14px 12px;
+            margin-bottom: 0;
+            border-bottom: 1px solid rgba(64,196,255,0.07);
+            user-select: none;
+        }
+        details.sr-collapsible > summary::-webkit-details-marker { display: none; }
+        details.sr-collapsible > summary:hover { color: #5a8fa8; }
+        details.sr-collapsible[open] > summary { border-bottom-color: rgba(64,196,255,0.04); }
+        .sr-caret {
+            margin-left: auto; font-size: 9px; color: #3a6070;
+            transition: transform 0.15s;
+        }
+        details.sr-collapsible[open] .sr-caret { transform: rotate(180deg); }
+        .sr-count-badge {
+            font-size: 8px; color: #5a8090; background: rgba(64,196,255,0.07);
+            padding: 1px 5px; border-radius: 2px; letter-spacing: 0;
+        }
+        .sr-collapsible-body { padding: 10px 14px; }
+
+        /* Executive summary paragraphs */
+        .sr-para {
+            font-size: 10px; color: #9abccf; line-height: 1.7;
+            margin: 0 0 8px; letter-spacing: 0.2px;
+        }
+        .sr-para:last-child { margin-bottom: 0; }
+
+        /* Vessel rows */
+        .sr-vessel {
+            padding: 8px 10px; margin-bottom: 6px;
+            background: rgba(8,22,38,0.6);
+            border-left: 2px solid transparent;
+        }
+        .sr-vessel:last-child { margin-bottom: 0; }
+        .sr-vessel-nominal  { border-left-color: #00cc66; }
+        .sr-vessel-warning  { border-left-color: #ff8c00; }
+        .sr-vessel-critical { border-left-color: #ff1744; background: rgba(30,4,8,0.5); }
+
+        .sr-vessel-top {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 4px;
+        }
+        .sr-vessel-name {
+            font-size: 10px; color: #c0d8e8; letter-spacing: 0.5px;
+            text-transform: uppercase; font-weight: bold;
+        }
+        .sr-vessel-badge {
+            font-size: 8px; letter-spacing: 1px; text-transform: uppercase;
+            padding: 1px 6px;
+        }
+        .sr-badge-nominal  { color: #00cc66; }
+        .sr-badge-warning  { color: #ff8c00; }
+        .sr-badge-critical { color: #ff1744; }
+
+        .sr-vessel-meta {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 9px; color: #5a8090;
+        }
+        .sr-arr { color: #2a4a5a; }
+        .sr-offline {
+            font-size: 7px; letter-spacing: 1px; color: #ff5e00;
+            border: 1px solid rgba(255,94,0,0.3); padding: 1px 5px;
+            margin-left: 4px;
+        }
+        .sr-vessel-tags {
+            display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap;
+        }
+        .sr-vtag {
+            font-size: 7px; letter-spacing: 0.8px; text-transform: uppercase;
+            color: #ff8c00; border: 1px solid rgba(255,140,0,0.3);
+            padding: 1px 5px; background: rgba(255,140,0,0.06);
+        }
+
+        /* Active alert rows */
+        .sr-alert-row {
+            display: flex; align-items: center; gap: 8px;
+            padding: 6px 8px; margin-bottom: 4px;
+            background: rgba(8,22,38,0.5);
+            border-left: 2px solid transparent;
+        }
+        .sr-alert-row:last-child { margin-bottom: 0; }
+        .sr-alert-critical { border-left-color: #ff1744; background: rgba(30,4,8,0.4); }
+        .sr-alert-warning  { border-left-color: #ff8c00; }
+        .sr-alert-info     { border-left-color: #ffcc00; }
+
+        .sr-alert-icon { font-size: 11px; flex-shrink: 0; }
+        .sr-alert-body { flex: 1; min-width: 0; }
+        .sr-alert-vessel {
+            display: block; font-size: 9px; color: #b0ccd8;
+            text-transform: uppercase; font-weight: bold; letter-spacing: 0.3px;
+        }
+        .sr-alert-type {
+            display: block; font-size: 8px; color: #4a7085;
+            text-transform: uppercase; letter-spacing: 0.5px; margin-top: 1px;
+        }
+        .sr-alert-time { font-size: 8px; color: #2e5068; white-space: nowrap; flex-shrink: 0; }
+
+        /* Intel article rows */
+        .sr-intel-row {
+            display: flex; align-items: baseline; gap: 7px;
+            padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+        .sr-intel-row:last-child { border-bottom: none; }
+        .sr-intel-src {
+            font-size: 7px; letter-spacing: 0.8px; text-transform: uppercase;
+            color: #3a7090; background: rgba(30,64,90,0.3);
+            border: 1px solid #1e4560; padding: 1px 5px; flex-shrink: 0;
+        }
+        .sr-intel-title {
+            font-size: 9px; color: #7aaabf; line-height: 1.4;
+            text-decoration: none; transition: color 0.15s;
+        }
+        .sr-intel-title:hover { color: #a0cce0; }
+
+        /* ── LOG view ──────────────────────────────────────────────────────── */
+        .sr-log-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px 8px;
+            border-bottom: 1px solid rgba(64,196,255,0.08);
+            position: sticky; top: 0;
+            background: rgba(4,14,26,0.97); z-index: 1;
+        }
+        .sr-log-header-lbl {
+            font-size: 7px; letter-spacing: 2px; color: #3a6070; text-transform: uppercase;
+        }
+        .sr-log-add-btn {
+            width: 22px; height: 22px; border-radius: 50%;
+            background: rgba(64,196,255,0.12); border: 1px solid rgba(64,196,255,0.3);
+            color: var(--cyan); font-size: 16px; line-height: 1;
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            padding: 0; transition: background 0.15s, border-color 0.15s;
+            font-family: inherit;
+        }
+        .sr-log-add-btn:hover { background: rgba(64,196,255,0.22); border-color: var(--cyan); }
+        .sr-log-add-btn:disabled { opacity: 0.3; cursor: default; }
+
+        /* Compose box */
+        .sr-log-compose {
+            margin: 12px 12px 4px;
+            background: #f4f7f9;
+            border-radius: 3px;
+            overflow: hidden;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        .sr-log-compose-ts {
+            font-size: 8px; letter-spacing: 0.8px; color: #6a8090;
+            padding: 8px 12px 4px; font-family: 'Courier New', monospace;
+            text-transform: uppercase; background: #eaeef1;
+            border-bottom: 1px solid #d8dfe4;
+        }
+        .sr-log-compose-area {
+            width: 100%; box-sizing: border-box;
+            background: #f4f7f9; border: none; outline: none; resize: none;
+            font-family: 'Courier New', monospace; font-size: 11px;
+            color: #1a2a36; line-height: 1.6; padding: 10px 12px;
+        }
+        .sr-log-compose-area::placeholder { color: #aab8c2; }
+        .sr-log-compose-actions {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 6px 10px 8px; background: #eaeef1;
+            border-top: 1px solid #d8dfe4;
+        }
+        .sr-log-cancel-btn, .sr-log-save-btn {
+            width: 28px; height: 28px; border-radius: 50%;
+            border: none; cursor: pointer; font-size: 14px;
+            display: flex; align-items: center; justify-content: center;
+            font-family: inherit; font-weight: 700; transition: opacity 0.15s;
+        }
+        .sr-log-cancel-btn { background: #ff4055; color: #fff; }
+        .sr-log-cancel-btn:hover { opacity: 0.85; }
+        .sr-log-save-btn   { background: #00c96e; color: #fff; }
+        .sr-log-save-btn:hover { opacity: 0.85; }
+
+        /* Saved entries */
+        .sr-log-entries { padding: 8px 0; }
+        .sr-log-entry {
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(64,196,255,0.05);
+        }
+        .sr-log-entry:last-child { border-bottom: none; }
+        .sr-log-entry-head {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 6px;
+        }
+        .sr-log-entry-ts {
+            font-size: 8px; letter-spacing: 0.6px; color: #3a6878;
+            text-transform: uppercase; font-family: 'Courier New', monospace;
+        }
+        .sr-log-del-btn {
+            background: none; border: none; color: #2a4050; cursor: pointer;
+            font-size: 11px; padding: 0 2px; line-height: 1;
+            transition: color 0.1s; font-family: inherit;
+        }
+        .sr-log-del-btn:hover { color: #ff4055; }
+        .sr-log-entry-text {
+            font-size: 10px; color: #8aabc4; line-height: 1.65;
+            white-space: pre-wrap; word-break: break-word;
+        }
+
+        /* Empty state */
+        .sr-log-empty {
+            display: flex; flex-direction: column; align-items: center;
+            padding: 48px 20px; text-align: center; gap: 8px;
+        }
+        .sr-log-empty-icon { font-size: 20px; color: #253545; }
+        .sr-log-empty-lbl  { font-size: 9px; letter-spacing: 2px; color: #2e4a5a; text-transform: uppercase; }
+        .sr-log-empty-sub  { font-size: 8px; color: #1e3040; line-height: 1.6; }
+
+        /* ══════════════════════════════════════════════════════════════════════
+           VANGUARD PANEL — floating draggable window with horizontal tabs
+           Default position: top-left. Fully draggable. Position persists in
+           localStorage. Tabs: Vessels | Watchlist | Alerts | Feed | Markets
+        ══════════════════════════════════════════════════════════════════════ */
+        #vanguard-panel {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 400px;
+            max-height: 72vh;
+            background: rgba(10, 28, 48, 0.92);
+            border: 1px solid rgba(64,196,255,0.22);
+            border-top: 3px solid var(--cyan);
+            border-radius: 3px;
+            backdrop-filter: blur(14px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            z-index: 15;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            user-select: none;
+        }
+        #vanguard-panel.vp-closed { display: none; }
+        /* Collapsed: show only the title bar — hide the tab row and body */
+        #vanguard-panel.vp-collapsed #vp-tab-row { display: none; }
+        #vanguard-panel.vp-collapsed #vp-body    { display: none; }
+
+        /* ── Title / drag handle ─────────────────────────────────────────────── */
+        #vp-titlebar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 7px 10px 7px 14px;
+            background: rgba(6, 20, 38, 0.98);
+            border-bottom: 1px solid rgba(64,196,255,0.14);
+            cursor: grab;
+            flex-shrink: 0;
+        }
+        #vp-titlebar:active { cursor: grabbing; }
+        #vp-title-text {
+            font-size: 9px;
+            letter-spacing: 2.5px;
+            color: var(--cyan);
+            font-weight: 800;
+            text-transform: uppercase;
+            opacity: 0.85;
+        }
+        #vp-win-controls {
+            display: flex;
+            gap: 2px;
+        }
+        #vp-win-controls button {
+            background: none;
+            border: none;
+            color: #4a6b84;
+            cursor: pointer;
+            font-size: 12px;
+            width: 22px; height: 22px;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 2px;
+            transition: color 0.15s, background 0.12s;
+            font-family: monospace;
+        }
+        #vp-win-controls button:hover { color: var(--cyan); background: rgba(64,196,255,0.1); }
+
+        /* ── Horizontal tab row ──────────────────────────────────────────────── */
+        #vp-tab-row {
+            display: flex;
+            flex-direction: row;
+            align-items: stretch;
+            background: rgba(2, 10, 20, 0.85);
+            border-bottom: 1px solid rgba(64,196,255,0.14);
+            flex-shrink: 0;
+            overflow: hidden;
+        }
+        .vp-tab {
+            flex: 1;
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: #3a6070;
+            font-size: 8px;
+            letter-spacing: 1.5px;
+            font-weight: 800;
+            text-transform: uppercase;
+            cursor: pointer;
+            padding: 8px 4px 6px;
+            transition: color 0.15s, border-color 0.15s, background 0.12s;
+            font-family: 'Courier New', monospace;
+            position: relative;
+            white-space: nowrap;
+        }
+        .vp-tab:hover  { color: #8aabc4; background: rgba(64,196,255,0.05); }
+        .vp-tab.active { color: var(--cyan); border-bottom-color: var(--cyan); background: rgba(64,196,255,0.08); }
+
+        /* Alert count badge */
+        .vp-badge {
+            display: none;
+            position: absolute;
+            top: 4px; right: 4px;
+            min-width: 13px; height: 13px;
+            background: var(--red);
+            border-radius: 7px;
+            font-size: 7px; color: #fff;
+            align-items: center; justify-content: center;
+            padding: 0 2px;
+            font-weight: bold;
+            letter-spacing: 0;
+        }
+        .vp-tab.has-alert .vp-badge { display: flex; }
+
+        /* ── Content panes ───────────────────────────────────────────────────── */
+        #vp-body {
+            flex: 1;
+            overflow: hidden;
+            min-height: 0; /* required for flex children to shrink + scroll */
+        }
+        .vp-pane {
+            display: none;
+            max-height: calc(72vh - 72px); /* panel max-height minus titlebar+tabrow */
+            overflow-y: auto;
+            padding: 12px 14px;
+        }
+        .vp-pane.vp-active { display: block; }
+
+        /* Feed and SITREP panes need flex-column layout — override block above.  */
+        /* Using !important because .vp-pane.vp-active has equal specificity.     */
+        #vp-feed.vp-active,
+        #vp-sitrep.vp-active {
+            display: flex !important;
+            flex-direction: column;
+            overflow: hidden;
+            padding: 0;
+        }
+
+        .vp-pane::-webkit-scrollbar { width: 3px; }
+        .vp-pane::-webkit-scrollbar-thumb { background: rgba(64,196,255,0.2); }
+
+        /* Empty state */
+        .vp-empty {
+            color: #4a6b84;
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            text-align: center;
+            padding: 40px 0;
+            line-height: 2.4;
+        }
+
+        /* ── System Status panel (Operational Theatre) ───────────────────────── */
+        /* Accessible via ⊙ button in right toolbar. Inherits hud-panel style.    */
+        #ui-layer { display: none; } /* hidden by default — opened by toolbar btn */
+        #system-status-toggle.active { color: var(--cyan) !important; border-color: rgba(64,196,255,0.4) !important; }
+
+        /* ── Vanguard Panel toggle in right toolbar ───────────────────────────── */
+        #vanguard-toggle.active { color: var(--cyan) !important; border-color: rgba(64,196,255,0.4) !important; }
+
+        /* ══════════════════════════════════════════════════════════════════════
+           BOTTOM STATUS BAR
+           Slim fixed bar at bottom edge. Shows feed state, vessel count, FPS.
+           Collapses to a 4px accent line with an expand tab in the corner.
+        ══════════════════════════════════════════════════════════════════════ */
+        #status-bar {
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            height: 28px;
+            background: rgba(2, 8, 18, 0.93);
+            border-top: 1px solid rgba(64, 196, 255, 0.16);
+            backdrop-filter: blur(14px);
+            z-index: 20;
+            display: flex;
+            align-items: center;
+            padding: 0 10px 0 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 9px;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: #4a6b84;
+            transition: height 0.2s ease;
+            overflow: hidden;
+        }
+        #status-bar.sb-collapsed {
+            height: 4px;
+            padding: 0;
+            border-top-color: rgba(64,196,255,0.30);
+        }
+        #status-bar.sb-collapsed #status-bar-inner { opacity: 0; pointer-events: none; }
+        #status-bar.sb-collapsed #sb-expand-btn    { display: flex; }
+        #status-bar.sb-collapsed #sb-collapse-btn  { display: none; }
+
+        #status-bar-inner {
+            display: flex;
+            align-items: center;
+            flex: 1;
+            gap: 0;
+            transition: opacity 0.12s;
+            overflow: hidden;
+        }
+
+        .sb-seg {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 0 10px;
+            border-right: 1px solid rgba(64,196,255,0.09);
+            height: 100%;
+            white-space: nowrap;
+        }
+        .sb-seg:first-child { padding-left: 2px; }
+        .sb-val           { color: var(--cyan); font-weight: bold; }
+        .sb-val.orange    { color: var(--orange); }
+        .sb-val.red       { color: var(--red); }
+        .sb-val.green     { color: #40ffaa; }
+        .sb-val.muted     { color: #4a6b84; }
+        .sb-dot-live {
+            width: 5px; height: 5px; border-radius: 50%;
+            background: #40ffaa; box-shadow: 0 0 4px #40ffaa;
+            display: inline-block; flex-shrink: 0;
+            animation: sb-pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes sb-pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
+        .sb-dot-off {
+            width: 5px; height: 5px; border-radius: 50%;
+            background: #253d50;
+            display: inline-block; flex-shrink: 0;
+        }
+
+        #sb-collapse-btn {
+            margin-left: auto;
+            flex-shrink: 0;
+            background: none; border: none;
+            color: #3a6070; cursor: pointer;
+            font-size: 9px; padding: 0 6px; height: 100%;
+            display: flex; align-items: center;
+            transition: color 0.15s; letter-spacing: 1px;
+            font-family: monospace;
+        }
+        #sb-collapse-btn:hover { color: var(--cyan); }
+
+        #sb-expand-btn {
+            display: none;
+            position: fixed;
+            bottom: 4px; right: 8px;
+            background: rgba(4, 14, 24, 0.92);
+            border: 1px solid rgba(64,196,255,0.22);
+            border-radius: 3px 3px 0 0;
+            color: #3a6070; cursor: pointer;
+            font-size: 8px; padding: 3px 9px;
+            letter-spacing: 1px;
+            font-family: monospace;
+            transition: color 0.15s;
+            align-items: center; gap: 4px;
+            z-index: 21;
+        }
+        #sb-expand-btn:hover { color: var(--cyan); }
+    </style>
+
+    <!-- Import map: maps bare specifiers to CDN URLs (Three.js r184) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.184.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.184.0/examples/jsm/",
+            "@mkkellogg/gaussian-splats-3d": "./lib/gaussian-splats-3d.module.js",
+            "3d-tiles-renderer": "https://esm.sh/3d-tiles-renderer@0.3.44?deps=three@0.184.0",
+            "3d-tiles-renderer/plugins": "https://esm.sh/3d-tiles-renderer@0.3.44/plugins?deps=three@0.184.0"
+        }
+    }
+    </script>
+
+</head>
+<body>
+
+    <!-- Alert zone badge — top center, visible when a zone is active -->
+    <div id="alert-zone-badge"></div>
+
+    <div id="loading-screen">
+        <div style="color:var(--cyan); letter-spacing:4px; font-weight:800; font-size:24px;">VANGUARD OS</div>
+        <div style="font-size:10px; color:#4a6b84; margin-top:10px; text-transform: uppercase;">Initializing Bathymetric Sensor Sweep...</div>
+    </div>
+
+    <div id="tactical-tooltip">
+        <div class="tt-header" id="tt-id">◉ LIVE</div>
+        <div id="tt-name" style="color:#fff; font-size:12px; font-weight:800; letter-spacing:1px; margin:3px 0 5px;">UNKNOWN</div>
+        <div style="display:flex; gap:14px;">
+            <div>CLASS: <span id="tt-class" style="color:var(--cyan)">—</span></div>
+            <div>HDG: <span id="tt-hdg" style="color:var(--cyan)">—</span></div>
+        </div>
+        <div style="margin-top:3px;">SPD: <span id="tt-spd" style="color:var(--cyan)">0</span> KTS</div>
+        <div id="tt-wind-row" style="margin-top:3px; display:none; align-items:center; gap:5px;">
+            <span>WIND:</span>
+            <svg id="tt-wind-arrow" width="11" height="11" viewBox="-6 -6 12 12"
+                 style="display:inline-block; vertical-align:middle; transition:transform 0.25s ease; transform-origin:center;">
+                <path d="M0,-5 L3.5,3 L0,1 L-3.5,3 Z" fill="currentColor"/>
+            </svg>
+            <span id="tt-wind" style="color:var(--cyan)">—</span>
+        </div>
+        <div style="margin-top:6px; font-size:8px; color:#555; letter-spacing:1px;">[CLICK TO LOCK TARGET]</div>
+    </div>
+
+    <div id="ui-layer">
+        <div class="hud-panel">
+            <!-- Drag handle + collapse toggle -->
+            <div id="ui-drag-handle">
+                <span>⠿ VANGUARD PANEL</span>
+                <button id="ui-collapse-btn" title="Collapse panel">▲</button>
+            </div>
+            <div id="ui-panel-body">
+            <div class="ot-header-row" id="ot-toggle-btn">
+                <h1>Operational Theatre</h1>
+                <span class="panel-chevron" id="ot-chevron">▼</span>
+            </div>
+            <div id="ot-body">
+            <div class="status" id="theatre-status">SYSTEM: ACTIVE</div>
+
+            <!-- ── Read-only telemetry ─────────────────────────────────────────
+                 .status-readout scopes dimming rules so they never bleed into
+                 the vessel detail panel which also uses .sys-stat.            -->
+            <div class="zone-label">System Status</div>
+            <div class="status-readout">
+                <div class="sys-stat"><span>TOPOGRAPHY:</span> <span style="color:var(--cyan)">BATHYMETRIC MATRIX</span></div>
+                <div class="sys-stat"><span>ON-SCREEN ASSETS:</span> <span id="node-count" style="color:var(--cyan)">0</span></div>
+                <div class="sys-stat"><span>ROUTING:</span> <span style="color:var(--orange)">SURFACE + TRENCH</span></div>
+                <!-- AIS live data rows -->
+                <div class="sys-stat">
+                    <span>AIS FEED:</span>
+                    <span><span class="ais-dot" id="ais-dot"></span><span id="ais-status" style="color:var(--cyan)">OFFLINE</span></span>
+                </div>
+                <div class="sys-stat">
+                    <span>LIVE VESSELS:</span>
+                    <span id="ais-vessel-count" style="color:var(--cyan)">0</span>
+                </div>
+                <div class="sys-stat">
+                    <span>AIR FEED:</span>
+                    <span><span class="ais-dot" id="flight-dot"></span><span id="flight-status" style="color:var(--orange)">OFFLINE</span></span>
+                </div>
+                <div class="sys-stat">
+                    <span>LIVE FLIGHTS:</span>
+                    <span id="flight-count" style="color:var(--orange)">0</span>
+                </div>
+                <div class="sys-stat">
+                    <span>SAT FEED:</span>
+                    <span><span class="ais-dot" id="sat-dot"></span><span id="sat-status" style="color:#40ffaa">OFFLINE</span></span>
+                </div>
+                <div class="sys-stat">
+                    <span>CABLE NET:</span>
+                    <span id="cable-status" style="color:#ff9900">STANDBY</span>
+                </div>
+                <div class="sys-stat">
+                    <span>DARK VESSELS:</span>
+                    <span id="dark-vessel-count" style="color:var(--orange)">0</span>
+                </div>
+                <div class="sys-stat">
+                    <span>GPU BACKEND:</span>
+                    <span id="gpu-backend" style="color:#4a6b84">INIT...</span>
+                </div>
+                <div class="sys-stat">
+                    <span>FPS:</span>
+                    <span id="fps-counter" style="color:#40c4ff">--</span>
+                </div>
+                <div class="sys-stat">
+                    <span>FRAME:</span>
+                    <span id="ms-counter" style="color:#4a6b84">-- ms</span>
+                </div>
+            </div>
+
+            <div class="zone-label zone-label--controls">Layer Controls</div>
+
+            <!-- ── GEOGRAPHY — collapsed by default ──────────────────────────── -->
+            <div class="toggle-group" id="grp-geography">
+                <div class="toggle-group-hdr">
+                    Geography
+                    <span class="grp-chevron">▼</span>
+                </div>
+                <div class="toggle-group-body">
+                    <div class="layer-control">
+                        <span>TERRAIN CLOUD</span>
+                        <label class="switch"><input type="checkbox" id="toggle-terrain" checked><span class="slider"></span></label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── INTELLIGENCE — open by default ────────────────────────────── -->
+            <div class="toggle-group open" id="grp-intelligence">
+                <div class="toggle-group-hdr">
+                    Intelligence
+                    <span class="grp-chevron">▼</span>
+                </div>
+                <div class="toggle-group-body">
+                    <div class="layer-control">
+                        <span>AIS SHIPPING LANES</span>
+                        <label class="switch"><input type="checkbox" id="toggle-lanes" checked><span class="slider"></span></label>
+                    </div>
+                    <div class="layer-control">
+                        <span>PORT MARKERS</span>
+                        <label class="switch"><input type="checkbox" id="toggle-ports" checked><span class="slider"></span></label>
+                    </div>
+                    <div class="layer-control">
+                        <span>SUBMARINE CABLES</span>
+                        <label class="switch"><input type="checkbox" id="toggle-cables" checked><span class="slider"></span></label>
+                    </div>
+                    <div class="layer-control">
+                        <span>ROUTE PREDICTION</span>
+                        <label class="switch"><input type="checkbox" id="toggle-prediction" checked><span class="slider"></span></label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GEOMAGNETIC / IONOSPHERIC LAYERS — hidden pending redesign -->
+
+            <!-- ── RENDERING — collapsed by default ──────────────────────────── -->
+            <div class="toggle-group" id="grp-rendering">
+                <div class="toggle-group-hdr">
+                    Rendering
+                    <span class="grp-chevron">▼</span>
+                </div>
+                <div class="toggle-group-body">
+                    <div class="layer-control">
+                        <span>DAY / NIGHT CYCLE</span>
+                        <label class="switch"><input type="checkbox" id="toggle-daynight" checked><span class="slider"></span></label>
+                    </div>
+                    <div class="layer-control">
+                        <span>AMBIENT OCCLUSION</span>
+                        <label class="switch"><input type="checkbox" id="toggle-ssao" checked><span class="slider"></span></label>
+                    </div>
+                    <div class="layer-control">
+                        <span>DEPTH OF FIELD</span>
+                        <label class="switch"><input type="checkbox" id="toggle-optics"><span class="slider"></span></label>
+                    </div>
+                    <div class="layer-control">
+                        <span>CINEMATIC DIRECTOR</span>
+                        <label class="switch"><input type="checkbox" id="toggle-director"><span class="slider"></span></label>
+                    </div>
+                </div>
+            </div>
+
+            <button id="present-mode" class="toggle-btn">CINEMATIC ORBIT: OFF</button>
+            <button id="toggle-mouse-mode" class="toggle-btn">LEFT-CLICK MODE: PAN MAP</button>
+
+            <div class="legend-header" id="legend-toggle-btn">
+                <span>◈ ASSET CLASSIFICATION KEY</span>
+                <span class="panel-chevron" id="legend-chevron" style="transform:rotate(-90deg)">▼</span>
+            </div>
+            <div id="legend-body">
+            <div id="search-panel">
+                <span id="search-label">ASSET SEARCH</span>
+                <input id="search-input" type="text" placeholder="callsign · MMSI · country · class" autocomplete="off" spellcheck="false">
+                <div id="search-match-count"></div>
+            </div>
+
+            <div style="font-size:9px; color:#4a6b84; letter-spacing:1px; text-transform:uppercase; margin-bottom:6px;">INFRASTRUCTURE // STATIC</div>
+            <div class="legend-item">
+                <div style="width:24px; height:3px; background: linear-gradient(90deg, #d0302d, #3b82f6, #22c55e, #a855f7); border-radius:1px; flex-shrink:0;"></div>
+                <span>SUBMARINE CABLES</span><span class="legend-shape">[FIBER]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #ffffff; border-radius: 50%;"></div>
+                <span>LANDING STATIONS</span><span class="legend-shape">[NODE]</span>
+            </div>
+
+            <div style="font-size:9px; color:#4a6b84; letter-spacing:1px; text-transform:uppercase; margin-bottom:6px;">INTEL // ANALYSIS</div>
+            <div class="legend-item">
+                <div style="width:24px; height:2px; background: #ffa726; border-radius:1px; flex-shrink:0; border-top: 1px dashed #ffa726;"></div>
+                <span>ROUTE PREDICTION</span><span class="legend-shape">[4HR]</span>
+            </div>
+            <div class="legend-item">
+                <div style="width:12px; height:12px; border-radius:50%; border: 2px solid #ff5e00; flex-shrink:0;"></div>
+                <span>DARK VESSEL</span><span class="legend-shape">[SILENT]</span>
+            </div>
+
+            <div style="font-size:9px; color:#4a6b84; letter-spacing:1px; text-transform:uppercase; margin-bottom:6px;">MARITIME // LIVE AIS</div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #a02020;"></div>
+                <span>COMMERCIAL CARGO</span><span class="legend-shape">[FREIGHTER]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #607d8b;"></div>
+                <span>PASSENGER / FERRY</span><span class="legend-shape">[PATROL]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #4caf50;"></div>
+                <span>SPECIAL VESSEL</span><span class="legend-shape">[MILITARY]</span>
+            </div>
+
+            <div style="font-size:9px; color:#4a6b84; letter-spacing:1px; text-transform:uppercase; margin-top:10px; margin-bottom:6px;">ORBITAL // LIVE TLE</div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #40ffaa;"></div>
+                <span>SPACE STATION</span><span class="legend-shape">[ISS/CSS]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #9988ff;"></div>
+                <span>STARLINK</span><span class="legend-shape">[LEO]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #ffcc00;"></div>
+                <span>GPS / GNSS</span><span class="legend-shape">[MEO]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #00ccff;"></div>
+                <span>WEATHER SAT</span><span class="legend-shape">[LEO/GEO]</span>
+            </div>
+
+            <div style="font-size:9px; color:#4a6b84; letter-spacing:1px; text-transform:uppercase; margin-top:10px; margin-bottom:6px;">AVIATION // LIVE OPENSKY</div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #ffcc00;"></div>
+                <span>LOW ALTITUDE</span><span class="legend-shape">[&lt;FL100]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #dde8f0;"></div>
+                <span>CRUISE ALTITUDE</span><span class="legend-shape">[FL100–FL350]</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #40c4ff;"></div>
+                <span>HIGH ALTITUDE</span><span class="legend-shape">[&gt;FL350]</span>
+            </div>
+            </div><!-- /#legend-body -->
+            </div><!-- /#ot-body -->
+            </div><!-- /#ui-panel-body -->
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         RIGHT TOOLBAR — single flex column, spatially chunked into 4 groups:
+           A  Zoom          +  −
+           B  Navigation    NA  EU  PAC
+           C  Data panels   Ships  Flights  Cities  Search  AI
+           D  System        Settings
+         Each group is separated by .col-divider--group (21 px visual gap).
+         ═══════════════════════════════════════════════════════════════════ -->
+    <div id="right-toolbar">
+        <!-- Row 1: Zoom + FOV -->
+        <button class="zoom-btn" id="btn-zoom-in"  title="Zoom in">+</button>
+        <button class="zoom-btn" id="btn-zoom-out" title="Zoom out">−</button>
+        <button id="btn-fov"                       title="Camera projection: BALANCED">BAL</button>
+
+        <!-- Row 2: Region jump -->
+        <button class="sector-btn" id="btn-na"   title="Jump to North America"><span class="sb-icon">◎</span>NA</button>
+        <button class="sector-btn" id="btn-eu"   title="Jump to Europe / Atlantic"><span class="sb-icon">◎</span>EU</button>
+        <button class="sector-btn" id="btn-as"   title="Jump to Pacific / Asia"><span class="sb-icon">◎</span>PAC</button>
+        <button class="sector-btn" id="btn-home" title="Reset to global overview" style="grid-column:1/-1;letter-spacing:2px;">⌂ HOME</button>
+
+        <!-- Row 3: Map tools -->
+        <button id="layers-toggle"        title="Map Layers">⊞</button>
+        <button id="city-list-toggle"     title="Global Cities">◈</button>
+        <button id="sector-search-toggle" title="Sector Search [/]">⌕</button>
+
+        <!-- Row 4: Panels -->
+        <button id="vanguard-toggle"        title="Vanguard Panel [V]">⬡</button>
+        <button id="central-system-toggle"  title="Central System">SYS</button>
+
+        <!-- Row 5: Tools -->
+        <button id="camera-toggle"        title="Camera Controls">◉</button>
+        <button id="weather-toggle" title="Toggle GFS Wind Field">☁</button>
+        <button id="settings-toggle"      title="System Configuration">⚙</button>
+    </div>
+
+    <!-- Layers panel -->
+    <div id="layers-panel">
+        <div class="lp-header">
+            <span class="lp-title">Map Layers</span>
+            <button class="lp-close" id="layers-close">×</button>
+        </div>
+        <div class="lp-section">
+            <div class="lp-section-label">Maritime</div>
+            <div class="lp-row" data-layer="ais-vessels">
+                AIS Vessels
+                <span class="lp-dot on" id="dot-ais-vessels"></span>
+            </div>
+            <div class="lp-row" data-layer="vessel-trails">
+                Vessel Trails
+                <span class="lp-dot on" id="dot-vessel-trails"></span>
+            </div>
+            <div class="lp-row" data-layer="chokepoints">
+                Chokepoint Labels
+                <span class="lp-dot on" id="dot-chokepoints"></span>
+            </div>
+        </div>
+        <div class="lp-section">
+            <div class="lp-section-label">Terrain</div>
+            <div class="lp-row" data-layer="city-labels">
+                City Labels
+                <span class="lp-dot on" id="dot-city-labels"></span>
+            </div>
+            <div class="lp-row" data-layer="city-halos">
+                City Halos
+                <span class="lp-dot on" id="dot-city-halos"></span>
+            </div>
+            <div class="lp-row" data-layer="borders">
+                Country Borders
+                <span class="lp-dot on" id="dot-borders"></span>
+            </div>
+        </div>
+        <div class="lp-section">
+            <div class="lp-section-label">Atmosphere</div>
+            <div class="lp-row" data-layer="weather">
+                Surface Wind (10m)
+                <span class="lp-dot" id="dot-weather"></span>
+            </div>
+            <div class="lp-row" data-layer="wind-low">
+                Low-Level Wind (850mb)
+                <span class="lp-dot" id="dot-wind-low"></span>
+            </div>
+            <div class="lp-row" data-layer="wind-jet">
+                Jet Stream (250mb)
+                <span class="lp-dot" id="dot-wind-jet"></span>
+            </div>
+            <div class="lp-row" data-layer="altitude-decks">
+                Altitude Decks
+                <span class="lp-dot" id="dot-altitude-decks"></span>
+            </div>
+            <div class="lp-row" data-layer="storm-history">
+                IBTrACS Cyclones
+                <span class="lp-dot" id="dot-storm-history"></span>
+            </div>
+        </div>
+        <div class="lp-section">
+            <div class="lp-section-label">Operational</div>
+            <div class="lp-row" data-layer="gps-jamming">
+                GPS Jamming
+                <span class="lp-dot" id="dot-gps-jamming"></span>
+            </div>
+            <div class="lp-row" data-layer="aviation">
+                Aviation
+                <span class="lp-dot" id="dot-aviation"></span>
+            </div>
+        </div>
+        <div class="lp-section">
+            <div class="lp-section-label">Atmosphere</div>
+            <div class="lp-row" data-layer="fog">
+                Fog
+                <span class="lp-dot on" id="dot-fog"></span>
+            </div>
+        </div>
+        <!-- Geomagnetic layer row — hidden pending redesign -->
+    </div>
+
+    <!-- Camera controls panel -->
+    <div id="camera-panel">
+        <div id="cam-header">
+            <span class="cam-title">◉ Camera</span>
+            <div class="cam-win-ctrl">
+                <button id="cam-collapse-btn" title="Collapse">▲</button>
+                <button id="cam-close-btn"    title="Close">×</button>
+            </div>
+        </div>
+        <div id="cam-body">
+            <button class="cam-btn" id="cam-autorotate-btn">
+                <div class="cam-btn-inner">
+                    <span>Auto Rotate</span>
+                    <span class="cam-btn-sub">Orbit slowly around the globe</span>
+                </div>
+                <span class="cam-btn-icon">↻</span>
+            </button>
+            <button class="cam-btn" id="cam-freerotate-btn">
+                <div class="cam-btn-inner">
+                    <span>Free Rotate</span>
+                    <span class="cam-btn-sub">Left-drag to orbit the globe</span>
+                </div>
+                <span class="cam-btn-icon">⟳</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- City list toggle moved into #right-toolbar above -->
+
+    <!-- City list panel -->
+    <div id="city-list-panel" style="display:none; position:absolute; top:20px; right:375px;
+        width:290px; max-height:80vh; overflow-y:auto;
+        background:var(--ui-panel); border:1px solid rgba(64,196,255,0.2);
+        border-left:3px solid var(--cyan); backdrop-filter:blur(12px);
+        z-index:10; box-shadow:0 10px 30px rgba(0,0,0,0.8);">
+        <div class="sl-list-header" style="position:sticky; top:0; background:rgba(1,10,20,0.97); backdrop-filter:blur(12px); z-index:1;">
+            <span style="font-size:11px; letter-spacing:2px; color:#fff; font-weight:800; text-transform:uppercase;">
+                GLOBAL CITIES <span id="city-list-count" style="color:var(--cyan); margin-left:6px;">40</span>
+            </span>
+            <button id="city-list-close" style="background:none; border:none; color:#8aabc4; cursor:pointer; font-size:18px; padding:0; line-height:1;">×</button>
+        </div>
+        <div id="city-list-body"></div>
+    </div>
+
+
+    <!-- sector-search-toggle, settings-toggle are in #right-toolbar -->
+
+    <!-- Sector search command palette overlay -->
+    <div id="sector-search-overlay">
+        <div id="sector-search-modal">
+            <div id="sector-search-input-row">
+                <span id="sector-search-icon">⌕</span>
+                <input id="sector-search-input" type="text"
+                    placeholder="City name · lat,lon · region · ICAO…" autocomplete="off" spellcheck="false">
+                <span id="sector-search-hint">ESC to close</span>
+            </div>
+            <div id="sector-search-filter-row">
+                <button class="ss-filter active" data-filter="all">ALL</button>
+                <button class="ss-filter" data-filter="city">CITIES</button>
+                <button class="ss-filter" data-filter="region">REGIONS</button>
+                <button class="ss-filter" data-filter="port">PORTS</button>
+                <button class="ss-filter" data-filter="coord">COORDS</button>
+                <span id="sector-search-count"></span>
+            </div>
+            <div id="sector-search-results"></div>
+        </div>
+    </div>
+
+    <!-- Settings panel -->
+    <div id="settings-panel">
+        <div id="settings-header">
+            <span class="cfg-title">System Config</span>
+            <button class="cfg-close" id="settings-close">×</button>
+        </div>
+
+        <!-- Weather -->
+        <div class="cfg-section">
+            <div class="cfg-section-label">Weather Data</div>
+            <div class="cfg-row">
+                <span class="cfg-source-name">OpenWeatherMap</span>
+                <span class="cfg-status">
+                    <span class="cfg-dot" id="owm-dot"></span>
+                    <span id="owm-status-text">OFFLINE</span>
+                </span>
+            </div>
+            <input class="cfg-input" id="owm-key-input" type="password"
+                placeholder="Paste API key…" autocomplete="off" spellcheck="false" />
+            <button class="cfg-btn" id="owm-connect-btn">Connect</button>
+            <div class="cfg-feedback" id="owm-feedback"></div>
+        </div>
+    </div>
+
+    <!-- AI Co-Pilot panel removed — detection engine (aiCopilot.js) remains active in main.js.
+         Events will be routed to the Alerts tab when it is built. -->
+
+
+    <!-- Vessel detail panel -->
+    <div id="vessel-detail">
+        <!-- Drag handle / title bar -->
+        <div id="vd-header">
+            <div id="vd-name">—</div>
+            <div id="vd-win-btns">
+                <button id="vd-minimize" title="Minimize">—</button>
+                <button id="vd-close" title="Close">×</button>
+            </div>
+        </div>
+
+        <!-- Collapsible body -->
+        <div id="vd-body">
+            <div class="sys-stat"><span id="vd-id-label">MMSI</span><span id="vd-mmsi" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat"><span>CLASS</span><span id="vd-class" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat"><span>SPEED</span><span id="vd-speed" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat" id="vd-altitude-row"><span>ALTITUDE</span><span id="vd-altitude" style="color:var(--orange)">—</span></div>
+            <div class="sys-stat"><span>HEADING</span><span id="vd-heading" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat"><span>LAT</span><span id="vd-lat" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat"><span>LON</span><span id="vd-lon" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat"><span>REGION</span><span id="vd-region" style="color:var(--orange)">—</span></div>
+            <div class="sys-stat"><span>FLAG</span><span id="vd-country" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat"><span>DESTINATION</span><span id="vd-destination" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat"><span>ETA</span><span id="vd-eta" style="color:var(--cyan)">—</span></div>
+            <div class="sys-stat" id="vd-dark-row" style="display:none; border-top:1px solid rgba(255,94,0,0.3); margin-top:6px; padding-top:6px;">
+                <span style="color:var(--orange)">⚠ LAST CONTACT</span>
+                <span id="vd-last-contact" style="color:var(--orange); font-weight:bold;">—</span>
+            </div>
+            <!-- Plan 04: Behavioral profile tag -->
+            <div id="vd-behavior-section" style="display:none;">
+                <div id="vd-behavior-glyph"></div>
+                <div id="vd-behavior-tag"></div>
+            </div>
+
+            <!-- Plan 04: Comparative context field -->
+            <div id="vd-context" style="display:none;"></div>
+
+            <!-- Plan 04: 24-hour timeline strip -->
+            <div id="vd-timeline-wrap" style="display:none;">
+                <div class="vd-tl-label">24H TRACK</div>
+                <div id="vd-timeline"></div>
+            </div>
+
+            <div id="vd-arc-row" style="display:none; margin-top:10px;">
+                <button id="vd-arc-toggle" class="toggle-btn" style="margin-top:0; width:100%;">⌇ SHOW PASS ARC</button>
+            </div>
+            <button id="vd-track" class="toggle-btn" style="margin-top:8px;">LOCK TRACK</button>
+
+            <!-- ★ Add to Watchlist — shown when NOT watchlisted -->
+            <div id="vd-watchlist-add-row" style="display:none;">
+                <button id="vd-watchlist-add" class="toggle-btn">★ ADD TO WATCHLIST</button>
+            </div>
+
+            <!-- Watchlist section — shown when watchlisted -->
+            <div id="vd-watchlist-section" style="display:none;">
+                <div class="vd-wl-header">★ WATCHLISTED</div>
+                <textarea id="vd-notes" rows="2" placeholder="NOTES…"></textarea>
+                <div class="vd-alert-toggles">
+                    <div class="vd-alert-divider">ALERT TRIGGERS</div>
+                    <label class="vd-alert-row">
+                        <input type="checkbox" id="vd-alert-speed">
+                        SPEED ANOMALY
+                    </label>
+                    <label class="vd-alert-row">
+                        <input type="checkbox" id="vd-alert-course">
+                        COURSE CHANGE
+                    </label>
+                    <label class="vd-alert-row">
+                        <input type="checkbox" id="vd-alert-dark">
+                        DARK VESSEL
+                    </label>
+                </div>
+                <button id="vd-watchlist-remove" class="toggle-btn">✕ REMOVE FROM WATCHLIST</button>
+            </div>
+        </div><!-- #vd-body -->
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         VANGUARD PANEL — floating draggable window with horizontal tabs
+    ══════════════════════════════════════════════════════════════════════ -->
+    <div id="vanguard-panel">
+
+        <!-- Title bar / drag handle -->
+        <div id="vp-titlebar">
+            <span id="vp-title-text">⬡ VANGUARD PANEL</span>
+            <div id="vp-win-controls">
+                <button id="vp-collapse-btn" title="Collapse / expand">▲</button>
+                <button id="vp-close-btn"    title="Close panel">×</button>
+            </div>
+        </div>
+
+        <!-- Horizontal tab row -->
+        <div id="vp-tab-row">
+            <button class="vp-tab active" data-tab="vessels">VESSELS</button>
+            <button class="vp-tab"        data-tab="watchlist">WATCHLIST</button>
+            <button class="vp-tab"        data-tab="alerts">ALERTS<span class="vp-badge" id="vp-alerts-badge"></span></button>
+            <button class="vp-tab"        data-tab="feed">FEED</button>
+            <button class="vp-tab"        data-tab="sitrep">SITREP</button>
+        </div>
+
+        <!-- Tab content area -->
+        <div id="vp-body">
+            <div class="vp-pane vp-active" id="vp-vessels">
+                <div class="vp-empty">
+                    LOADING VESSEL DATA…<br>
+                    GEOGRAPHIC GROUPS WILL<br>
+                    APPEAR WHEN AIS IS LIVE
+                </div>
+            </div>
+
+            <div class="vp-pane" id="vp-watchlist">
+                <div class="vp-empty">
+                    NO VESSELS WATCHED<br>
+                    CLICK A VESSEL ON MAP<br>
+                    THEN ADD TO WATCHLIST
+                </div>
+            </div>
+
+            <div class="vp-pane" id="vp-alerts">
+                <div class="vp-empty">
+                    NO ACTIVE ALERTS<br>
+                    ANOMALY ENGINE MONITORING<br>
+                    ALL LIVE VESSELS
+                </div>
+            </div>
+
+            <div class="vp-pane" id="vp-feed">
+                <div class="vp-empty">
+                    FEED NOT CONFIGURED<br>
+                    RSS SOURCES WILL APPEAR<br>
+                    AFTER API SETUP
+                </div>
+            </div>
+
+            <div class="vp-pane" id="vp-sitrep">
+                <div class="vp-empty">
+                    CLICK TO GENERATE<br>
+                    SITUATION REPORT<br>
+                    APPEAR AFTER API SETUP
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         BOTTOM STATUS BAR
+         Slim 28px bar. Mirrors feed status + FPS. Collapsible to 4px line.
+    ══════════════════════════════════════════════════════════════════════ -->
+    <div id="status-bar">
+        <div id="status-bar-inner">
+            <div class="sb-seg">
+                <span class="sb-dot-off" id="sb-ais-dot"></span>
+                AIS
+                <span class="sb-val" id="sb-ais-val">OFFLINE</span>
+            </div>
+            <div class="sb-seg">
+                VESSELS
+                <span class="sb-val" id="sb-vessels-val">0</span>
+            </div>
+            <div class="sb-seg">
+                <span class="sb-dot-off" id="sb-air-dot"></span>
+                AIR
+                <span class="sb-val orange" id="sb-air-val">OFFLINE</span>
+            </div>
+            <div class="sb-seg">
+                ON-SCREEN
+                <span class="sb-val" id="sb-onscreen-val">0</span>
+            </div>
+            <div class="sb-seg">
+                FPS
+                <span class="sb-val" id="sb-fps-val">—</span>
+            </div>
+            <div class="sb-seg">
+                <span class="sb-val muted" id="sb-gpu-val">WebGL2</span>
+            </div>
+        </div>
+        <button id="sb-collapse-btn" title="Collapse status bar">▼ COLLAPSE</button>
+        <button id="sb-expand-btn"   title="Expand status bar">▲</button>
+    </div>
+
+    <div id="live-coords">
+        <div style="color:#8aabc4; font-weight:bold; border-bottom:1px solid rgba(64,196,255,0.3); padding-bottom:3px; margin-bottom:3px;">SENSOR ALIGNMENT</div>
+        LAT: <span id="coord-lat" style="color:#fff">00.0000</span><br>
+        LON: <span id="coord-lon" style="color:#fff">00.0000</span><br>
+        DEP: <span id="coord-dep" style="color:var(--orange)">000</span> M
+    </div>
+
+    <!-- Sector bookmark buttons moved to #zoom-controls column (top-right) -->
+
+    <div id="canvas-container"></div>
+
+    <!-- Vessel class filter bar — floating pill strip at top-center of canvas -->
+    <div id="vessel-filter-bar">
+        <button class="vf-btn active" data-class="ALL">ALL</button>
+        <button class="vf-btn" data-class="CARGO">CARGO</button>
+        <button class="vf-btn" data-class="TANKER">TANKER</button>
+        <button class="vf-btn" data-class="PATROL">PATROL</button>
+        <button class="vf-btn vf-dark" data-class="DARK">◉ DARK</button>
+    </div>
+
+    <!-- Port detail panel — shown on port label click -->
+    <div id="port-detail-panel" style="display:none;">
+        <div id="pdp-header">
+            <div>
+                <span id="pdp-icon">⚓</span>
+                <span id="pdp-name">PORT</span>
+            </div>
+            <button id="pdp-close">×</button>
+        </div>
+        <div id="pdp-meta">
+            <div id="pdp-region"></div>
+            <div id="pdp-coords"></div>
+        </div>
+        <div id="pdp-rank-row">
+            <span id="pdp-rank"></span>
+            <span id="pdp-type"></span>
+        </div>
+        <div id="pdp-max-vessel"></div>
+        <div class="pdp-divider"></div>
+        <div id="pdp-weather">
+            <span class="pdp-label">WEATHER</span>
+            <span id="pdp-weather-val">Loading…</span>
+        </div>
+        <div class="pdp-divider"></div>
+        <div id="pdp-vessels-header">
+            <span class="pdp-label">VESSELS IN PORT</span>
+            <span id="pdp-vessel-count">0</span>
+        </div>
+        <div id="pdp-vessel-breakdown"></div>
+        <div id="pdp-watchlisted" style="display:none;">
+            <div class="pdp-divider"></div>
+            <div class="pdp-label">WATCHLISTED ★</div>
+            <div id="pdp-watch-list"></div>
+        </div>
+        <div class="pdp-divider"></div>
+        <div>
+            <div class="pdp-label">SERVES</div>
+            <div id="pdp-serves"></div>
+        </div>
+    </div>
+
+    <!-- Threat vignette: radial red overlay driven by threat intensity lerp in main.js -->
+    <div id="threat-vignette"></div>
+
+    <!-- Vessel vignette: dark radial overlay centered on locked vessel (Plan 02 / TransitionManager) -->
+    <div id="vessel-vignette"></div>
+
+    <!-- Off-screen edge indicators: arrow pool created by JS in main.js -->
+    <div id="edge-indicators"></div>
+
+    <div id="gpu-status">WebGL2</div>
+    <div id="buildings-status"></div>
+    <!-- Animate AIS status dot when feed goes live -->
+    <script>
+        function watchDot(statusId, dotId, color) {
+            const obs = new MutationObserver(() => {
+                const txt = document.getElementById(statusId)?.innerText || '';
+                const dot = document.getElementById(dotId);
+                if (dot) dot.classList.toggle('live', txt.startsWith('LIVE'));
+            });
+            document.addEventListener('DOMContentLoaded', () => {
+                const el = document.getElementById(statusId);
+                if (el) obs.observe(el, { childList: true, characterData: true, subtree: true });
+            });
+        }
+        watchDot('ais-status',    'ais-dot',    'var(--cyan)');
+        watchDot('flight-status', 'flight-dot', 'var(--orange)');
+        watchDot('sat-status',    'sat-dot',    '#40ffaa');
+
+        // ── Operational Theatre collapse ──────────────────────────────────────
+        document.addEventListener('DOMContentLoaded', () => {
+            const otBtn     = document.getElementById('ot-toggle-btn');
+            const otBody    = document.getElementById('ot-body');
+            const otChevron = document.getElementById('ot-chevron');
+            otBtn?.addEventListener('click', () => {
+                const collapsed = otBody.classList.toggle('collapsed');
+                otChevron.classList.toggle('collapsed', collapsed);
+            });
+
+            // Legend toggle is handled by uiController.js (class-based,
+            // progressive disclosure — starts collapsed by default).
+        });
+
+        // ── FOV mode toggle ───────────────────────────────────────────────────
+        document.addEventListener('DOMContentLoaded', () => {
+            // FOV mode toggle — cycles CINEMATIC → BALANCED → TACTICAL
+            document.getElementById('btn-fov')?.addEventListener('click', () => {
+                window._cycleFOVMode?.();
+            });
+        });
+
+        // ── Anomaly event router — fed by aiCopilot.onEvent() in main.js ───────
+        // Placeholder: will populate the Alerts tab when it is built.
+        // The detection engine (aiCopilot.js) remains fully active — events are
+        // captured here so nothing errors during the transition period.
+        window.vanguardCopilotEvent = function(event) {
+            // TODO: route event to Alerts tab
+            // event shape: { type, label, body, cls, severity, mmsi, timestamp, ... }
+        };
+
+        // Style the flight dot orange when live
+        document.addEventListener('DOMContentLoaded', () => {
+            const style = document.createElement('style');
+            style.textContent = `
+                #flight-dot.live { background: var(--orange) !important; box-shadow: 0 0 6px var(--orange) !important; }
+                #sat-dot.live    { background: #40ffaa !important;        box-shadow: 0 0 6px #40ffaa !important;        }
+            `;
+            document.head.appendChild(style);
+        });
+    </script>
+
+    <!-- ── Context card — first-encounter explainer ───────────────────────── -->
+    <div id="context-card">
+        <div class="ctx-header">
+            <span class="ctx-icon">◉</span>
+            <span class="ctx-title">Context</span>
+            <button class="ctx-dismiss" id="ctx-dismiss-btn" title="Dismiss">×</button>
+        </div>
+        <div class="ctx-body-wrap">
+            <div class="ctx-body"></div>
+        </div>
+        <div class="ctx-footer">
+            <button class="ctx-got-it" id="ctx-got-it-btn">GOT IT</button>
+        </div>
+    </div>
+
+
+    <!-- ── Panel drag + collapse ──────────────────────────────────────────── -->
+    <script>
+    (function() {
+        function initPanel() {
+            const layer  = document.getElementById('ui-layer');
+            const handle = document.getElementById('ui-drag-handle');
+            const colBtn = document.getElementById('ui-collapse-btn');
+            const body   = document.getElementById('ui-panel-body');
+            if (!layer || !handle || !colBtn || !body) return;
+
+            // ── Collapse / expand ────────────────────────────────────────────
+            let collapsed = false;
+            colBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                collapsed = !collapsed;
+                body.style.display  = collapsed ? 'none' : '';
+                colBtn.textContent  = collapsed ? '▼' : '▲';
+                colBtn.title        = collapsed ? 'Expand panel' : 'Collapse panel';
+            });
+
+            // ── Drag ─────────────────────────────────────────────────────────
+            let dragging = false, ox = 0, oy = 0;
+
+            handle.addEventListener('mousedown', (e) => {
+                if (e.target === colBtn) return;
+                dragging = true;
+                const rect = layer.getBoundingClientRect();
+                ox = e.clientX - rect.left;
+                oy = e.clientY - rect.top;
+                handle.style.cursor = 'grabbing';
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                const x = Math.max(0, Math.min(window.innerWidth  - layer.offsetWidth,  e.clientX - ox));
+                const y = Math.max(0, Math.min(window.innerHeight - layer.offsetHeight, e.clientY - oy));
+                layer.style.left = x + 'px';
+                layer.style.top  = y + 'px';
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (!dragging) return;
+                dragging = false;
+                handle.style.cursor = 'grab';
+            });
+        }
+
+        // Init after DOM ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initPanel);
+        } else {
+            initPanel();
+        }
+    })();
+    </script>
+
+    <!-- ── Vanguard Panel + toolbar controllers ──────────────────────────── -->
+    <script>
+    (function () {
+        'use strict';
+
+        /* ── Vanguard Panel ─────────────────────────────────────────────────── */
+        const LS_POS  = 'vg1_vp_pos';
+        const LS_TAB  = 'vg1_vp_tab';
+        const LS_OPEN = 'vg1_vp_open';
+        const LS_COLL = 'vg1_vp_collapsed';
+
+        let vpCollapsed = false;
+
+        function initVanguardPanel() {
+            const panel    = document.getElementById('vanguard-panel');
+            const titlebar = document.getElementById('vp-titlebar');
+            const colBtn   = document.getElementById('vp-collapse-btn');
+            const closeBtn = document.getElementById('vp-close-btn');
+            const tabs     = document.querySelectorAll('.vp-tab');
+            const toggle   = document.getElementById('vanguard-toggle');
+            if (!panel) return;
+
+            // Tab switching
+            tabs.forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+
+            // Collapse
+            colBtn?.addEventListener('click', e => {
+                e.stopPropagation();
+                vpCollapsed = !vpCollapsed;
+                panel.classList.toggle('vp-collapsed', vpCollapsed);
+                colBtn.textContent = vpCollapsed ? '▼' : '▲';
+                colBtn.title       = vpCollapsed ? 'Expand' : 'Collapse';
+                try { localStorage.setItem(LS_COLL, vpCollapsed); } catch(_) {}
+            });
+
+            // Close
+            closeBtn?.addEventListener('click', () => {
+                panel.classList.add('vp-closed');
+                toggle?.classList.remove('active');
+                try { localStorage.setItem(LS_OPEN, 'false'); } catch(_) {}
+            });
+
+            // Toolbar toggle
+            toggle?.addEventListener('click', () => {
+                const closed = panel.classList.toggle('vp-closed');
+                toggle.classList.toggle('active', !closed);
+                try { localStorage.setItem(LS_OPEN, !closed); } catch(_) {}
+            });
+
+            // Drag
+            let dragging = false, ox = 0, oy = 0;
+            titlebar?.addEventListener('mousedown', e => {
+                if (e.target.closest('button')) return;
+                dragging = true;
+                const rect = panel.getBoundingClientRect();
+                ox = e.clientX - rect.left;
+                oy = e.clientY - rect.top;
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+            document.addEventListener('mousemove', e => {
+                if (!dragging) return;
+                const x = Math.max(0, Math.min(window.innerWidth  - panel.offsetWidth,  e.clientX - ox));
+                const y = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - oy));
+                panel.style.left = x + 'px';
+                panel.style.top  = y + 'px';
+                panel.style.right = 'auto'; panel.style.bottom = 'auto';
+                try { localStorage.setItem(LS_POS, JSON.stringify({x, y})); } catch(_) {}
+            });
+            document.addEventListener('mouseup', () => {
+                if (dragging) document.body.style.userSelect = '';
+                dragging = false;
+            });
+
+            // Restore state
+            try {
+                const pos  = JSON.parse(localStorage.getItem(LS_POS) || 'null');
+                const tab  = localStorage.getItem(LS_TAB)  || 'vessels';
+                const open = localStorage.getItem(LS_OPEN) !== 'false';
+                const coll = localStorage.getItem(LS_COLL) === 'true';
+                if (pos) { panel.style.left = pos.x + 'px'; panel.style.top = pos.y + 'px'; }
+                if (!open) panel.classList.add('vp-closed');
+                else toggle?.classList.add('active');
+                if (coll) {
+                    vpCollapsed = true;
+                    panel.classList.add('vp-collapsed');
+                    if (colBtn) { colBtn.textContent = '▼'; colBtn.title = 'Expand'; }
+                }
+                switchTab(tab, true);
+            } catch(_) { switchTab('vessels', true); }
+        }
+
+        function switchTab(tab, silent) {
+            document.querySelectorAll('.vp-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+            document.querySelectorAll('.vp-pane').forEach(p => p.classList.toggle('vp-active', p.id === 'vp-' + tab));
+            if (!silent) try { localStorage.setItem(LS_TAB, tab); } catch(_) {}
+        }
+
+        window.vanguardPanel = {
+            switchTab,
+            open() {
+                const p = document.getElementById('vanguard-panel');
+                p?.classList.remove('vp-closed');
+                document.getElementById('vanguard-toggle')?.classList.add('active');
+                try { localStorage.setItem(LS_OPEN, 'true'); } catch(_) {}
+            },
+            setAlertBadge(n) {
+                const t = document.querySelector('.vp-tab[data-tab="alerts"]');
+                const b = document.getElementById('vp-alerts-badge');
+                if (!t || !b) return;
+                t.classList.toggle('has-alert', n > 0);
+                b.textContent = n > 99 ? '99+' : String(n);
+            },
+        };
+
+        /* ── Central System / System Status toggle ──────────────────────────── */
+        // Both buttons open/close the same left HUD panel (#ui-layer).
+        // Clicking either one flips the shared state and syncs both buttons.
+        function initSystemStatus() {
+            const sysBtnEl  = document.getElementById('system-status-toggle');
+            const csBtnEl   = document.getElementById('central-system-toggle');
+            const uiLayer   = document.getElementById('ui-layer');
+            if (!uiLayer) return;
+
+            let visible = false;
+
+            function setVisible(v) {
+                visible = v;
+                uiLayer.style.display = visible ? 'block' : 'none';
+                sysBtnEl?.classList.toggle('active', visible);
+                csBtnEl?.classList.toggle('active',  visible);
+            }
+
+            sysBtnEl?.addEventListener('click', () => setVisible(!visible));
+            csBtnEl?.addEventListener('click',  () => setVisible(!visible));
+        }
+
+        /* ── Layers panel ────────────────────────────────────────────────────── */
+        function initLayersPanel() {
+            const toggle = document.getElementById('layers-toggle');
+            const panel  = document.getElementById('layers-panel');
+            const close  = document.getElementById('layers-close');
+            if (!toggle || !panel) return;
+
+            toggle.addEventListener('click', () => {
+                const open = panel.classList.toggle('open');
+                toggle.classList.toggle('active', open);
+            });
+            close?.addEventListener('click', () => {
+                panel.classList.remove('open');
+                toggle.classList.remove('active');
+            });
+
+            // Layer row toggles — expose via window.layerStates for other modules
+            window.layerStates = {};
+            panel.querySelectorAll('.lp-row[data-layer]').forEach(row => {
+                const key = row.dataset.layer;
+                const dot = row.querySelector('.lp-dot');
+                // Initialise from dot's starting class
+                window.layerStates[key] = dot?.classList.contains('on') ?? true;
+
+                row.addEventListener('click', () => {
+                    const on = !window.layerStates[key];
+                    window.layerStates[key] = on;
+                    dot?.classList.toggle('on', on);
+                    // Dispatch event so 3D modules can react
+                    window.dispatchEvent(new CustomEvent('layerToggle', { detail: { layer: key, on } }));
+                });
+            });
+        }
+
+        /* ── Weather button — one-click shortcut for the GFS wind layer ──────
+           Sets the wind layer row state and fires the same layerToggle event
+           the Map Layers panel uses, so the dot in the panel stays in sync.  */
+        function initWeatherToggle() {
+            const btn = document.getElementById('weather-toggle');
+            const dot = document.getElementById('dot-weather');
+            if (!btn) return;
+
+            btn.addEventListener('click', () => {
+                const on = !(window.layerStates && window.layerStates['weather']);
+                if (window.layerStates) window.layerStates['weather'] = on;
+                btn.classList.toggle('active', on);
+                dot?.classList.toggle('on', on);
+                window.dispatchEvent(new CustomEvent('layerToggle',
+                    { detail: { layer: 'weather', on } }));
+            });
+        }
+
+        /* ── Camera controls panel ───────────────────────────────────────────── */
+        function initCameraPanel() {
+            const toggle  = document.getElementById('camera-toggle');
+            const panel   = document.getElementById('camera-panel');
+            const header  = document.getElementById('cam-header');
+            const colBtn      = document.getElementById('cam-collapse-btn');
+            const closeBtn    = document.getElementById('cam-close-btn');
+            const autoBtn     = document.getElementById('cam-autorotate-btn');
+            const freeRotBtn  = document.getElementById('cam-freerotate-btn');
+            if (!toggle || !panel) return;
+
+            // Open / close
+            toggle.addEventListener('click', () => {
+                const open = panel.classList.toggle('open');
+                toggle.classList.toggle('active', open);
+            });
+            closeBtn?.addEventListener('click', () => {
+                panel.classList.remove('open');
+                toggle.classList.remove('active');
+            });
+
+            // Collapse
+            let camCollapsed = false;
+            colBtn?.addEventListener('click', () => {
+                camCollapsed = !camCollapsed;
+                panel.classList.toggle('cam-collapsed', camCollapsed);
+                colBtn.textContent = camCollapsed ? '▼' : '▲';
+            });
+
+            // Drag
+            let dragging = false, ox = 0, oy = 0;
+            header?.addEventListener('mousedown', e => {
+                if (e.target.closest('button')) return;
+                dragging = true;
+                const rect = panel.getBoundingClientRect();
+                ox = e.clientX - rect.left; oy = e.clientY - rect.top;
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+            document.addEventListener('mousemove', e => {
+                if (!dragging) return;
+                const x = Math.max(0, Math.min(window.innerWidth  - panel.offsetWidth,  e.clientX - ox));
+                const y = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - oy));
+                panel.style.left = x + 'px'; panel.style.top = y + 'px';
+                panel.style.right = 'auto';  panel.style.bottom = 'auto';
+            });
+            document.addEventListener('mouseup', () => { if(dragging) document.body.style.userSelect=''; dragging=false; });
+
+            // Auto-rotate (uses OrbitControls.autoRotate if available)
+            let autoRotate = false;
+            autoBtn?.addEventListener('click', () => {
+                autoRotate = !autoRotate;
+                autoBtn.classList.toggle('active', autoRotate);
+                // OrbitControls is exposed on window.controls by main.js
+                if (window.controls) {
+                    window.controls.autoRotate      = autoRotate;
+                    window.controls.autoRotateSpeed = 0.4;
+                }
+            });
+
+            // Free Rotate — swaps left-click from PAN to ROTATE
+            let freeRotate = false;
+            freeRotBtn?.addEventListener('click', () => {
+                freeRotate = !freeRotate;
+                freeRotBtn.classList.toggle('active', freeRotate);
+                if (window.controls) {
+                    // THREE.MOUSE: ROTATE=0, DOLLY=1, PAN=2
+                    window.controls.mouseButtons = freeRotate
+                        ? { LEFT: 0, MIDDLE: 1, RIGHT: 0 }   // left-drag = orbit
+                        : { LEFT: 2, MIDDLE: 1, RIGHT: 0 };  // left-drag = pan (default)
+                }
+            });
+        }
+
+        // Boot all on DOMContentLoaded
+        function bootAll() {
+            initVanguardPanel();
+            initSystemStatus();
+            initLayersPanel();
+            initWeatherToggle();
+            initCameraPanel();
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', bootAll);
+        } else {
+            bootAll();
+        }
+    })();
+    </script>
+
+
+    <!-- ── Bottom Status Bar controller ────────────────────────────────────── -->
+    <script>
+    (function () {
+        'use strict';
+
+        const LS_KEY = 'vg1_sb_collapsed';
+
+        let fps = 0;
+        let frameCount = 0;
+        let lastFpsTime = performance.now();
+
+        // FPS ticker — hooked into rAF by patching requestAnimationFrame
+        const _origRAF = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = function(cb) {
+            return _origRAF(function(t) {
+                frameCount++;
+                const elapsed = t - lastFpsTime;
+                if (elapsed >= 1000) {
+                    fps = Math.round(frameCount * 1000 / elapsed);
+                    frameCount  = 0;
+                    lastFpsTime = t;
+                    updateFPS();
+                }
+                cb(t);
+            });
+        };
+
+        function updateFPS() {
+            const el = document.getElementById('sb-fps-val');
+            if (!el) return;
+            el.textContent = fps;
+            el.className = 'sb-val' + (fps < 30 ? ' red' : fps < 50 ? ' orange' : '');
+        }
+
+        function mirrorStatus() {
+            // AIS feed
+            const aisText = document.getElementById('ais-status')?.textContent || '';
+            const aisLive = aisText.startsWith('LIVE');
+            const aisDot  = document.getElementById('sb-ais-dot');
+            const aisVal  = document.getElementById('sb-ais-val');
+            if (aisDot) aisDot.className = aisLive ? 'sb-dot-live' : 'sb-dot-off';
+            if (aisVal)  {
+                aisVal.textContent = aisLive ? 'LIVE' : 'OFFLINE';
+                aisVal.className   = 'sb-val' + (aisLive ? ' green' : '');
+            }
+
+            // Vessel count
+            const vc   = document.getElementById('ais-vessel-count')?.textContent || '0';
+            const vcEl = document.getElementById('sb-vessels-val');
+            if (vcEl) vcEl.textContent = vc;
+
+            // Air feed
+            const airText = document.getElementById('flight-status')?.textContent || '';
+            const airLive = airText.startsWith('LIVE');
+            const airDot  = document.getElementById('sb-air-dot');
+            const airVal  = document.getElementById('sb-air-val');
+            if (airDot) airDot.className = airLive ? 'sb-dot-live' : 'sb-dot-off';
+            if (airVal) {
+                airVal.textContent = airLive ? 'LIVE' : 'OFFLINE';
+                airVal.className   = 'sb-val' + (airLive ? ' green' : ' orange');
+            }
+
+            // On-screen asset count
+            const nc   = document.getElementById('node-count')?.textContent || '0';
+            const ncEl = document.getElementById('sb-onscreen-val');
+            if (ncEl) ncEl.textContent = nc;
+
+            // GPU
+            const gpuEl = document.getElementById('sb-gpu-val');
+            const gpuSrc = document.getElementById('gpu-status');
+            if (gpuEl && gpuSrc) gpuEl.textContent = gpuSrc.textContent || 'WebGL2';
+        }
+
+        function initStatusBar() {
+            const bar       = document.getElementById('status-bar');
+            const colBtn    = document.getElementById('sb-collapse-btn');
+            const expBtn    = document.getElementById('sb-expand-btn');
+            if (!bar) return;
+
+            // Restore collapsed state
+            let collapsed = false;
+            try { collapsed = localStorage.getItem(LS_KEY) === 'true'; } catch(_) {}
+            if (collapsed) bar.classList.add('sb-collapsed');
+
+            colBtn?.addEventListener('click', () => {
+                bar.classList.add('sb-collapsed');
+                try { localStorage.setItem(LS_KEY, 'true'); } catch(_) {}
+            });
+            expBtn?.addEventListener('click', () => {
+                bar.classList.remove('sb-collapsed');
+                try { localStorage.setItem(LS_KEY, 'false'); } catch(_) {}
+            });
+
+            // Mirror status values every second
+            setInterval(mirrorStatus, 1000);
+            mirrorStatus();
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initStatusBar);
+        } else {
+            initStatusBar();
+        }
+    })();
+    </script>
+
+    <!-- ── Vessel detail card: drag + minimize ──────────────────────────────── -->
+    <script>
+    (function() {
+        const panel  = document.getElementById('vessel-detail');
+        const header = document.getElementById('vd-header');
+        const minBtn = document.getElementById('vd-minimize');
+        if (!panel || !header || !minBtn) return;
+
+        // ── Minimize / restore ────────────────────────────────────────────────
+        minBtn.addEventListener('click', () => {
+            const minimized = panel.classList.toggle('vd-minimized');
+            minBtn.textContent = minimized ? '□' : '—';
+            minBtn.title       = minimized ? 'Restore' : 'Minimize';
+        });
+
+        // ── Drag logic ────────────────────────────────────────────────────────
+        // The panel starts anchored via CSS bottom/right. On first drag we
+        // convert to absolute top/left so position is fully mouse-driven.
+        let _dragging = false;
+        let _ox = 0, _oy = 0;  // offset from pointer to panel top-left on mousedown
+
+        function _initPosition() {
+            // Convert current rendered position to top/left if still using bottom/right
+            if (panel.style.left === '') {
+                const rect = panel.getBoundingClientRect();
+                panel.style.left   = rect.left + 'px';
+                panel.style.top    = rect.top  + 'px';
+                panel.style.right  = 'auto';
+                panel.style.bottom = 'auto';
+            }
+        }
+
+        header.addEventListener('mousedown', e => {
+            // Ignore clicks on the window control buttons
+            if (e.target === minBtn || e.target === document.getElementById('vd-close')) return;
+            e.preventDefault();
+            _initPosition();
+            const rect = panel.getBoundingClientRect();
+            _ox = e.clientX - rect.left;
+            _oy = e.clientY - rect.top;
+            _dragging = true;
+            panel.classList.add('vd-dragging');
+        });
+
+        document.addEventListener('mousemove', e => {
+            if (!_dragging) return;
+            let x = e.clientX - _ox;
+            let y = e.clientY - _oy;
+            // Clamp to viewport so card can't be lost off-screen
+            x = Math.max(0, Math.min(x, window.innerWidth  - panel.offsetWidth));
+            y = Math.max(0, Math.min(y, window.innerHeight - panel.offsetHeight));
+            panel.style.left = x + 'px';
+            panel.style.top  = y + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!_dragging) return;
+            _dragging = false;
+            panel.classList.remove('vd-dragging');
+        });
+
+        // When the card is re-opened (new vessel), reset to default bottom-right
+        // position so it doesn't reappear in an unexpected place mid-screen.
+        // uiController.js calls panel.style.display='block' to show; we hook
+        // that via a MutationObserver so we don't need to touch uiController.
+        const _obs = new MutationObserver(() => {
+            if (panel.style.display !== 'none' && panel.style.display !== '') {
+                // Only reset if the user has never dragged it (left still unset)
+                // so a manually positioned card stays put across vessel switches.
+            }
+        });
+        _obs.observe(panel, { attributes: true, attributeFilter: ['style'] });
+    })();
+    </script>
+
+    <!-- ── Space Weather Telemetry HUD Updater ───────────────────────────────
+         Listens to vg1:spaceWeather CustomEvent fired by SpaceWeatherManager.
+         Runs immediately on first data arrival; refreshes every 15 min poll.
+         Bz: green = northward (safe) · red = southward (storm driver).
+         Kp/AE bars: cyan → amber (warn) → red+glow (storm).                  -->
+    <script>
+    (function() {
+        function _barClass(fill, warnThresh, stormThresh, val) {
+            fill.classList.remove('sw-bar--warn', 'sw-bar--storm');
+            if      (val >= stormThresh) fill.classList.add('sw-bar--storm');
+            else if (val >= warnThresh)  fill.classList.add('sw-bar--warn');
+        }
+
+        window.addEventListener('vg1:spaceWeather', function(e) {
+            const d = e.detail;
+
+            // ── Solar wind ────────────────────────────────────────────────────
+            const speedEl    = document.getElementById('sw-speed');
+            const densityEl  = document.getElementById('sw-density');
+            const pressureEl = document.getElementById('sw-pressure');
+            const bzEl       = document.getElementById('sw-bz');
+
+            if (speedEl)    speedEl.textContent    = Math.round(d.solarWindSpeed)      + ' km/s';
+            if (densityEl)  densityEl.textContent  = d.solarWindDensity.toFixed(1)     + ' p/cm³';
+            if (pressureEl) pressureEl.textContent = d.solarWindPressure.toFixed(1)    + ' nPa';
+
+            // IMF Bz colour: southward (neg) red — it opens the magnetosphere;
+            // northward (pos) green — magnetosphere stays closed.
+            if (bzEl) {
+                const sign = d.imfBz >= 0 ? '+' : '';
+                bzEl.textContent = sign + d.imfBz.toFixed(1) + ' nT';
+                bzEl.className   = 'sw-val ' + (d.imfBz < -1 ? 'sw-bz-neg'
+                                              : d.imfBz >  1 ? 'sw-bz-pos'
+                                              : '');
+            }
+
+            // ── Kp bar (range 0–9) ────────────────────────────────────────────
+            const kpBar = document.getElementById('sw-kp-bar');
+            const kpVal = document.getElementById('sw-kp');
+            if (kpBar) {
+                kpBar.style.width = Math.min(100, (d.kp / 9) * 100).toFixed(1) + '%';
+                _barClass(kpBar, 4, 6, d.kp);
+            }
+            if (kpVal) kpVal.textContent = d.kp.toFixed(1);
+
+            // ── AE bar (display range 0–1000 nT) ─────────────────────────────
+            const aeBar = document.getElementById('sw-ae-bar');
+            const aeVal = document.getElementById('sw-ae');
+            if (aeBar) {
+                aeBar.style.width = Math.min(100, (d.ae / 1000) * 100).toFixed(1) + '%';
+                _barClass(aeBar, 200, 600, d.ae);
+            }
+            if (aeVal) aeVal.textContent = Math.round(d.ae) + ' nT';
+
+            // ── Aurora status badge ───────────────────────────────────────────
+            const auroraEl = document.getElementById('sw-aurora');
+            if (auroraEl) {
+                const level = (d.ae > 600 || d.kp >= 6) ? 'STORM'
+                            : (d.ae > 200 || d.kp >= 4) ? 'ACTIVE'
+                            : 'QUIET';
+                auroraEl.textContent = level;
+                auroraEl.className   = 'sw-aurora-badge sw-aurora--' + level.toLowerCase();
+            }
+
+            // ── Last poll timestamp ───────────────────────────────────────────
+            const updEl = document.getElementById('sw-updated');
+            if (updEl && d.lastUpdate) {
+                const t = new Date(d.lastUpdate);
+                const hh = String(t.getUTCHours()).padStart(2, '0');
+                const mm = String(t.getUTCMinutes()).padStart(2, '0');
+                updEl.textContent = 'UPDATED ' + hh + ':' + mm + ' UTC';
+            }
+        });
+    })();
+    </script>
+
+    <!-- ES6 module entry point — must be served via HTTP (not file://) -->
+    <script type="module" src="./main.js"></script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+{
+  "name": "vanguard1-agents",
+  "version": "1.0.0",
+  "description": "AI agents for Vanguard1 map — graphics QA, bug hunting, code compliance, layer scaffolding",
+  "type": "module",
+  "scripts": {
+    "visual-regression": "node visual-regression-guard.js",
+    "visual-regression:update": "node visual-regression-guard.js --update",
+    "bug-hunt": "node antarctica-bug-hunter.js",
+    "compliance": "node architecture-compliance.js",
+    "scaffold": "node layer-scaffolder.js",
+    "tune-shader": "node shader-auto-tuner.js",
+    "lod-check": "node lod-validator.js",
+    "innovate": "node research-innovator.js",
+    "innovate:fast": "node research-innovator.js --fast",
+    "enhance-graphics": "node graphics-enhancer.js",
+    "enhance-graphics:vessels": "node graphics-enhancer.js --track vessels",
+    "enhance-graphics:realism": "node graphics-enhancer.js --track realism",
+    "enhance-graphics:terrain": "node graphics-enhancer.js --track point-cloud",
+    "vision": "node map-vision-agent.js",
+    "vision:atmosphere": "node map-vision-agent.js --focus atmosphere_and_lighting",
+    "vision:water": "node map-vision-agent.js --focus water_and_ocean",
+    "vision:vessels": "node map-vision-agent.js --focus vessel_and_asset_detail",
+    "plan": "node iteration-planner-agent.js",
+    "plan:quick": "node iteration-planner-agent.js --quick",
+    "realism": "node realism-engine-agent.js",
+    "realism:water": "node realism-engine-agent.js --domain physically_based_water",
+    "realism:atmosphere": "node realism-engine-agent.js --domain volumetric_atmosphere",
+    "realism:lighting": "node realism-engine-agent.js --domain dynamic_lighting",
+    "realism:holographic": "node realism-engine-agent.js --domain holographic_display"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.3",
+    "pixelmatch": "^5.3.0",
+    "pngjs": "^7.0.0",
+    "puppeteer": "^22.8.2"
+  }
+}
