@@ -5,6 +5,10 @@ satellites, submarine cables, ports, chokepoints, and space weather — rendered
 1.5M-point terrain cloud with day/night, ocean simulation, and cinematic camera work.
 Built with Three.js and plain ES modules. No build step, no framework.
 
+**▶ [Live demo](https://jamalrfordii-arch.github.io/Vanguard-Map/)** — no signup needed:
+click **VIEW DEMO** on the opening screen for synthetic traffic, or paste a free
+[aisstream.io](https://aisstream.io) key for live global ship data.
+
 ![demo](docs/demo.gif)
 
 ## Try it

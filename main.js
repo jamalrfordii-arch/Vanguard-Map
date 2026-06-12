@@ -732,6 +732,13 @@ async function init(mapData) {
         stopAll() { aisManager.detachAllSources(); simClock.goLive(); console.log('[Scenario] all sources detached, clock live'); },
     };
 
+    // Demo mode (key prompt's "VIEW DEMO" button) — synthetic traffic, no key.
+    window.addEventListener('vg1:demoMode', () => {
+        window.vg1Scenario.load('./scenarios/hormuz-demo.json')
+            .then(() => console.log('[Demo] Synthetic scenario running — Strait of Hormuz'))
+            .catch(e => console.warn('[Demo] scenario load failed:', e.message));
+    });
+
     // ── UI wiring ─────────────────────────────────────────────────────────────
     const tooltipEl = document.getElementById('tactical-tooltip');
     const raycaster = new THREE.Raycaster();

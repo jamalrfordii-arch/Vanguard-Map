@@ -107,8 +107,20 @@ function promptForAPIKey() {
                     transition:background 0.2s;
                 ">CONNECT TO AIS NETWORK</button>
 
+                <button id="ais-demo-btn" style="
+                    width:100%; margin-top:10px;
+                    background:transparent;
+                    border:1px solid rgba(138,171,196,0.45);
+                    color:#8aabc4; padding:12px;
+                    font-family:'Courier New',monospace;
+                    font-size:11px; cursor:pointer;
+                    text-transform:uppercase; letter-spacing:2px;
+                    transition:border-color 0.2s, color 0.2s;
+                ">VIEW DEMO — NO KEY NEEDED</button>
+
                 <div style="margin-top:14px; font-size:9px; color:#4a6b84; text-align:center; text-transform:uppercase; letter-spacing:1px; line-height:1.6;">
-                    Free API key available at <span style="color:#40c4ff;">aisstream.io</span>
+                    Free API key available at <span style="color:#40c4ff;">aisstream.io</span><br>
+                    Demo mode shows scripted synthetic traffic — no live data
                 </div>
             </div>
         `;
@@ -137,9 +149,22 @@ function promptForAPIKey() {
 
         btn.addEventListener('click', submit);
         input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+
+        // Demo mode — no key, no live socket; synthetic scenario instead.
+        const demoBtn = document.getElementById('ais-demo-btn');
+        demoBtn.addEventListener('mouseover', () => { demoBtn.style.borderColor = '#8aabc4'; demoBtn.style.color = '#cfe3f1'; });
+        demoBtn.addEventListener('mouseout',  () => { demoBtn.style.borderColor = 'rgba(138,171,196,0.45)'; demoBtn.style.color = '#8aabc4'; });
+        demoBtn.addEventListener('click', () => {
+            overlay.remove();
+            resolve(DEMO_MODE);
+        });
+
         input.focus();
     });
 }
+
+// Sentinel returned by promptForAPIKey when the user picks demo mode.
+export const DEMO_MODE = Symbol('vg1-demo-mode');
 
 // ── AISManager ───────────────────────────────────────────────────────────────
 export class AISManager {
@@ -182,12 +207,21 @@ export class AISManager {
         this._sources.clear();
     }
 
-    // Call once after scene is ready. Shows key prompt then opens socket.
+    // Call once after scene is ready. Shows key prompt then opens socket —
+    // or, in demo mode, skips the socket and announces vg1:demoMode so
+    // main.js can load a synthetic scenario instead.
     async init() {
-        this._apiKey = await promptForAPIKey();
+        const result = await promptForAPIKey();
         // AIS key prompt dismissed — unblock context cards so they can now show.
         // Dynamic import avoids a circular dep (aisManager has no other UI imports).
         import('./contextCardManager.js').then(m => m.contextCards.unblock());
+
+        if (result === DEMO_MODE) {
+            this._setStatus('DEMO // SYNTHETIC');
+            window.dispatchEvent(new CustomEvent('vg1:demoMode'));
+            return;
+        }
+        this._apiKey = result;
         this._connect();
     }
 
