@@ -222,6 +222,11 @@ async function init(mapData) {
     // ── Day / night overlay ───────────────────────────────────────────────────
     const dayNightManager = new DayNightManager(scene);
 
+    // Calm starfield backdrop — frames the board in quiet space.
+    const { StarManager } = await import('./starManager.js');
+    const starField = new StarManager(scene);
+    window.starField = starField;
+
     // ── Sky (sun direction math, bloom colour) ────────────────────────────────
     const skyManager = new SkyManager(scene, renderer);
 
@@ -1331,6 +1336,9 @@ async function init(mapData) {
 
         // RF distress beacons — expanding-ring animation + stale cleanup
         rfBeacons.tick(elapsed, camera.quaternion);
+
+        // Calm starfield drift + twinkle
+        starField.update(elapsed, delta);
 
         // Drive scene lights from solar elevation.
         // Intensities tuned for Three.js r184 physically-correct lighting mode —
