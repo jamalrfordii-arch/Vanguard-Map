@@ -32,7 +32,7 @@
 //   buildingManager.update(camera, elapsed);
 
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { MAP_WIDTH, MAP_HEIGHT, TERRAIN_VERTICAL_SCALE } from './config.js';
 import { CITIES }               from './cityManager.js';
 import { getTrueElevation }     from './terrainBuilder.js';
 
@@ -230,7 +230,7 @@ out body qt;`;
         const hM     = getTrueElevation(cx, cz);
         const dist2  = (cx / MAP_WIDTH) ** 2 + (cz / MAP_HEIGHT) ** 2;
         const curveY = -dist2 * 20.0;
-        const baseY  = (hM > 0 ? hM / 1000.0 : 0) + curveY - 0.2 + 0.05;
+        const baseY  = (hM > 0 ? hM / 1000.0 : 0) * TERRAIN_VERTICAL_SCALE + curveY - 0.2 + 0.05;
 
         // Buffers for merged geometry
         const wallPos  = [];   // solid building walls + roofs

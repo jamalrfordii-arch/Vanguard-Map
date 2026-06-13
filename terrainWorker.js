@@ -9,7 +9,9 @@ self.onmessage = function(e) {
         colorData, colorW, colorH,
         MAP_WIDTH, MAP_HEIGHT,
         LAND_GRID, OCEAN_GRID,
-        prngSeed
+        prngSeed,
+        VSCALE_LAND  = 1.0,  // land vertical exaggeration (config.TERRAIN_VSCALE_LAND)
+        VSCALE_OCEAN = 1.0,  // ocean vertical exaggeration (config.TERRAIN_VSCALE_OCEAN)
     } = e.data;
 
     // ── Seeded PRNG (mulberry32) ───────────────────────────────────────────────
@@ -37,7 +39,7 @@ self.onmessage = function(e) {
     function getSceneY(x, z) {
         const hM   = getTrueElevation(x, z);
         const dist = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
-        return (hM < 0 ? hM / 600.0 : hM / 650.0) - Math.pow(dist, 2) * 20.0;
+        return (hM < 0 ? (hM / 600.0) * VSCALE_OCEAN : (hM / 650.0) * VSCALE_LAND) - Math.pow(dist, 2) * 20.0;
     }
 
     const normalDelta = (MAP_WIDTH / imgW) * 1.2;
@@ -88,7 +90,7 @@ self.onmessage = function(e) {
             // Reduces apparent steepness on mountain faces so grid points cluster tighter
             const highBlend = Math.min(1.0, Math.max(0.0, (hMeters - 2000.0) / 2000.0));
             const exag  = 650.0 + highBlend * 450.0;
-            const finalY = hMeters / exag;
+            const finalY = (hMeters / exag) * VSCALE_LAND;
 
             // ── Satellite colour pipeline ─────────────────────────────────────
             let cU = Math.floor((x / MAP_WIDTH  + 0.5) * (colorW - 1));
@@ -202,7 +204,7 @@ self.onmessage = function(e) {
             // ── Earth-curvature Y offset ──────────────────────────────────────
             const dist   = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
             const curveY = -Math.pow(dist, 2) * 20.0;
-            const finalY = hMeters / 600.0;
+            const finalY = (hMeters / 600.0) * VSCALE_OCEAN;
 
             // ── Ocean depth colour — matches the oceanFloorMesh bands ─────────
             // Same four-band scheme as terrainBuilder.createSolidOceanFloor so

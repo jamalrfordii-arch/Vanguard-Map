@@ -8,7 +8,7 @@ export const MAP_WIDTH  = 300;   // scene units = full longitude span
 export const MAP_HEIGHT = 300;   // scene units = full latitude span (Mercator)
 
 // ── Point cloud ───────────────────────────────────────────────────────────────
-export const MAX_SPLAT_BUDGET  = 1_500_000;   // bumped from 1M — same logic, more density
+export const MAX_SPLAT_BUDGET  = 2_000_000;   // bumped from 1.5M — denser terrain (2026-06-12)
 export const SPLAT_LAND_GRID   = 7500;    // ~7500² × 0.30 ≈ 16.9M candidates, sampled to budget
 export const SPLAT_OCEAN_GRID  = 3000;    // bumped from 1195 — ocean now reads as point-cloud at the same density language as land
 
@@ -52,6 +52,40 @@ export const DIR_LIGHT_INTENSITY_MAX = 2.0; // at solar noon (pow(dayFactor, 0.7
 // ── Water ─────────────────────────────────────────────────────────────────────
 export const WATER_OPACITY = 0.85;
 
+// ── Day/night terrain shading (terrainBuilder splat shader) ──────────────────
+// Geographic terminator dimming of the terrain itself — tracks the real sun
+// (and simClock scrubbing). Tunable live:
+//   window.splatCloud.material.uniforms.uNightDim.value   = 0..1 (effect strength)
+//   window.splatCloud.material.uniforms.uNightFloor.value = min brightness on night side
+export const DAYNIGHT_TERRAIN = {
+    // NOTE: this dim MULTIPLIES with the dayNightManager overlay's own night
+    // darkening — keep STRENGTH/FLOOR gentle or night-side land goes black.
+    STRENGTH: 0.35,   // 0 = off, 1 = full terminator contrast
+    FLOOR:    0.60,   // night side never darker than this × day color (keeps terrain readable)
+};
+
+// ── Terrain vertical exaggeration ─────────────────────────────────────────────
+// 1.0 = the original hand-tuned look (~200× true vertical exaggeration at low
+// elevations). Lower = flatter, more physically honest terrain — sensible now
+// that the map supports deep zoom. Applied at terrain BUILD time: change
+// requires a reload to take effect. Flows to: splat worker, ocean floor mesh,
+// terrain mesh, tile stream, buildings, city patches, cable depths, and the
+// shader's elevation-decode (contours/cliff thresholds).
+export const TERRAIN_VSCALE_LAND  = 0.05;  // land: near-true scale — flat, clean for tracking
+export const TERRAIN_VSCALE_OCEAN = 1.0;   // ocean: full original drama — bathymetry is information
+
+// Back-compat alias (single-scale consumers); prefer the split constants above.
+export const TERRAIN_VERTICAL_SCALE = TERRAIN_VSCALE_LAND;
+
+// ── Splat FX (terrainBuilder splat shader) ────────────────────────────────────
+// Tunable live:
+//   window.splatCloud.material.uniforms.uSplatScale.value = 1.3  (point size, closes gaps)
+//   window.splatCloud.material.uniforms.uRidgePulse.value = 0.3  (ridge energy glow, 0 = off)
+export const SPLAT_FX = {
+    SCALE:       1.15,  // global point-size multiplier — >1 closes inter-splat gaps
+    RIDGE_PULSE: 0.18,  // animated ridge glow strength — subtle by default
+};
+
 // ── Aquarium walls (ocean floor edge depth) ───────────────────────────────────
 export const AQUARIUM_DEPTH = 28; // scene units below sea level — must exceed deepest ocean floor
 
@@ -62,7 +96,7 @@ export const AIRCRAFT_TIME_SCALE = 0.4; // visual speed multiplier (tooltip knot
 export const AIS = {
     WS_URL:      'wss://stream.aisstream.io/v0/stream',
     STORAGE_KEY: 'vanguard_ais_key',
-    MAX_VESSELS: 200,
+    MAX_VESSELS: 500,   // raised from 200 (2026-06-12) — GPU headroom confirmed
     STALE_MS:    10 * 60 * 1000,  // remove vessels silent for 10 min
     DARK_MS:      5 * 60 * 1000,  // flag as "dark" after 5 min silence
     BBOX:        [[-90.0, -180.0], [90.0, 180.0]],

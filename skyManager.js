@@ -206,6 +206,11 @@ export class SkyManager {
     }
 
     update(latRad, lonRad) {
+        // Geographic sub-solar point — read by main.js for the splat shader's
+        // day/night terminator uniforms (uSubSolarLat/Lon).
+        this.sunLatRad = latRad;
+        this.sunLonRad = lonRad;
+
         const cosLat = Math.cos(latRad);
         this.sunDirection.set(
             cosLat * Math.sin(lonRad),

@@ -8,7 +8,7 @@
 // so cables dip into trenches and rise over ridges exactly as the splat cloud does.
 
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { MAP_WIDTH, MAP_HEIGHT, TERRAIN_VSCALE_OCEAN } from './config.js';
 import { getTrueElevation } from './terrainBuilder.js';
 
 // Routed via local proxy (same as OpenSky + Celestrak) — avoids CORS and GitHub branch issues.
@@ -33,7 +33,7 @@ function seabedSceneY(hMeters, x, z) {
     const dist   = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
     const curveY = -Math.pow(dist, 2) * 20.0;
     // Ocean: push down proportional to depth; shore/land: sit at the curve surface
-    const depthY = hMeters < 0 ? (hMeters / 1500.0) : 0;
+    const depthY = hMeters < 0 ? (hMeters / 1500.0) * TERRAIN_VSCALE_OCEAN : 0;
     return depthY + curveY + CABLE_Y_OFFSET;
 }
 

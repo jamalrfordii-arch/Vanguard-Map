@@ -9,6 +9,9 @@ export const waterUniforms = {
     uSunElevation:     { value: 1.0 },
     uHexGridScale:     { value: 18.0 }, // cell size — larger = smaller cells
     uHexGridIntensity: { value: 3.0  }, // master brightness, 0 = off
+    // ── Photoreal pass (2026-06-12) — live tunable, 0 disables ──────────────
+    uGlitterStrength:  { value: 0.9  }, // per-pixel sun sparkle along the light path
+    uSSSStrength:      { value: 0.8  }, // translucent teal glow through wave crests
 };
 
 export function createDynamicSeaLevel(scene) {
@@ -42,6 +45,8 @@ export function createDynamicSeaLevel(scene) {
         shader.uniforms.uSunElevation     = waterUniforms.uSunElevation;
         shader.uniforms.uHexGridScale     = waterUniforms.uHexGridScale;
         shader.uniforms.uHexGridIntensity = waterUniforms.uHexGridIntensity;
+        shader.uniforms.uGlitterStrength  = waterUniforms.uGlitterStrength;
+        shader.uniforms.uSSSStrength      = waterUniforms.uSSSStrength;
         
         shader.vertexShader = `
             uniform float uTime;
@@ -167,6 +172,8 @@ export function createDynamicSeaLevel(scene) {
             uniform float uSunElevation;
             uniform float uHexGridScale;
             uniform float uHexGridIntensity;
+            uniform float uGlitterStrength;
+            uniform float uSSSStrength;
             varying float vWaveHeight;
             varying vec3  vWorldNormal;
             varying vec3  vWorldPos;
@@ -218,6 +225,30 @@ export function createDynamicSeaLevel(scene) {
             skyCol       += vec3(1.0, 0.85, 0.55) * sunSpec * clamp(uSunElevation, 0.0, 1.0) * 0.8;
 
             gl_FragColor.rgb = mix(gl_FragColor.rgb, skyCol, fresnel);
+
+            float dayLit = clamp(uSunElevation, 0.0, 1.0);
+
+            // ── Photoreal: sun glitter path ───────────────────────────────────
+            // Real water sparkles because micro-facets catch the sun per-pixel.
+            // Jitter the surface normal with scrolling hash noise and take a very
+            // tight specular lobe — dense sparkle near the sun line, scattered
+            // glints further out. A broad warm lobe (pow 36) underlays the path.
+            vec2  gUV   = vWorldPos.xz * 7.0 + vec2(uTime * 0.6, -uTime * 0.4);
+            float gHash = fract(sin(dot(floor(gUV), vec2(12.9898, 78.233))) * 43758.5453);
+            vec3  gN    = normalize(vWorldNormal + vec3(gHash - 0.5, 0.0, fract(gHash * 7.31) - 0.5) * 0.10);
+            vec3  gRefl = reflect(-viewDir, gN);
+            float sparkle  = pow(max(0.0, dot(gRefl, uSunDir)), 700.0);
+            float broadPath= pow(max(0.0, dot(reflDir, uSunDir)), 36.0);
+            gl_FragColor.rgb += (vec3(1.0, 0.93, 0.72) * sparkle * 1.6
+                               + vec3(0.55, 0.45, 0.28) * broadPath * 0.10)
+                               * dayLit * uGlitterStrength;
+
+            // ── Photoreal: crest translucency (fake subsurface scattering) ────
+            // Looking toward the sun, wave crests glow teal as light passes
+            // through the thin water — strongest on high crests at low sun.
+            float sssGeom = pow(max(0.0, dot(viewDir, -uSunDir) * 0.5 + 0.5), 3.0);
+            float sssAmt  = sssGeom * smoothstep(0.10, 0.60, vWaveHeight) * dayLit;
+            gl_FragColor.rgb += vec3(0.02, 0.17, 0.15) * sssAmt * uSSSStrength;
 
             // ── Hex Depth Grid ────────────────────────────────────────────────────
             // World UV in [-0.5, +0.5] across the 300-unit map

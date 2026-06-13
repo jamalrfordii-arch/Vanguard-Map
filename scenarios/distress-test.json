@@ -1,0 +1,27 @@
+{
+  "name": "Distress beacon test — MOB device, Gulf of Mexico",
+  "entities": [
+    {
+      "mmsi": "972000001",
+      "name": "MOB TEST BEACON",
+      "shipType": 0,
+      "speedKts": 1,
+      "loop": false,
+      "waypoints": [
+        { "lon": -89.5, "lat": 27.2, "t": 0 },
+        { "lon": -89.45, "lat": 27.15, "t": 7200 }
+      ]
+    },
+    {
+      "mmsi": "999000010",
+      "name": "SYN RESCUE VESSEL",
+      "shipType": 35,
+      "speedKts": 22,
+      "loop": false,
+      "waypoints": [
+        { "lon": -90.2, "lat": 28.0 },
+        { "lon": -89.5, "lat": 27.22 }
+      ]
+    }
+  ]
+}

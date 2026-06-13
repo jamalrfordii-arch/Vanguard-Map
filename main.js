@@ -34,6 +34,9 @@ import {
 import { AISManager, lonLatToScene } from './aisManager.js';
 import { simClock } from './simClock.js';
 import { SyntheticAISSource, RecordedAISSource, AISRecorder } from './dataSource.js';
+import { initArchivePanel } from './archiveManager.js';
+import { rfIntel, initRFIntelPanel } from './rfIntelManager.js';
+import { RFEmergencyBeaconManager } from './rfEmergencyBeaconManager.js';
 import { initVesselTab } from './vesselTab.js';
 import { initWatchlist } from './watchlist.js';
 import { initAlertsManager } from './alertsManager.js';
@@ -707,7 +710,21 @@ async function init(mapData) {
     //   vg1Scenario.stopAll()                             — detach all non-live sources
     //   simClock.setTime(...) / setRate(...) / pause() / goLive()
     const aisRecorder = new AISRecorder();
-    aisManager.onRawMessage = aisRecorder.tap();
+
+    // ── RF Intelligence domain (Phase 1) ──────────────────────────────────────
+    // Coordinator + feed panel + distress beacon detector. Beacons inspect every
+    // raw message, so onRawMessage multiplexes recorder tap + RF inspection.
+    const rfBeacons = new RFEmergencyBeaconManager(scene);
+    initRFIntelPanel({
+        flyTo: (lat, lon) => {
+            const p = lonLatToScene(lon, lat);
+            controls.target.set(p.x, 0, p.z);
+            camera.position.set(p.x, 38, p.z + 26);
+            controls.update();
+        }
+    });
+    const _recTap = aisRecorder.tap();
+    aisManager.onRawMessage = (msg) => { _recTap(msg); rfBeacons.inspect(msg); };
 
     window.vg1Scenario = {
         async load(urlOrObj) {
@@ -731,6 +748,10 @@ async function init(mapData) {
         recorder: aisRecorder,
         stopAll() { aisManager.detachAllSources(); simClock.goLive(); console.log('[Scenario] all sources detached, clock live'); },
     };
+
+    // Archive panel — session recorder: AIS stream + camera path, with
+    // POV replay (mutes live feed, clears world, re-flies the camera).
+    initArchivePanel({ aisManager, recorder: aisRecorder, camera, controls });
 
     // Demo mode (key prompt's "VIEW DEMO" button) — synthetic traffic, no key.
     window.addEventListener('vg1:demoMode', () => {
@@ -1294,6 +1315,18 @@ async function init(mapData) {
         // Push sun direction + elevation into the splat cloud shader
         splatUniforms.uSunDir.value.copy(skyManager.sunDirection);
         splatUniforms.uSunElevation.value = Math.max(0.70, sunElev);
+
+        // Day/night terminator — geographic sub-solar point for terrain dimming.
+        // Follows simClock automatically (skyManager is fed from sim time).
+        if (splatUniforms.uSubSolarLat) {
+            splatUniforms.uSubSolarLat.value = skyManager.sunLatRad ?? 0;
+            splatUniforms.uSubSolarLon.value = skyManager.sunLonRad ?? 0;
+        }
+        // Ridge pulse animation clock (seconds)
+        if (splatUniforms.uTime) splatUniforms.uTime.value = elapsed;
+
+        // RF distress beacons — expanding-ring animation + stale cleanup
+        rfBeacons.tick(elapsed);
 
         // Drive scene lights from solar elevation.
         // Intensities tuned for Three.js r184 physically-correct lighting mode —

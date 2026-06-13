@@ -8,7 +8,7 @@
 //   cityManager.setMode('military'|'business') — switch visual palette
 
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT, prng } from './config.js';
+import { MAP_WIDTH, MAP_HEIGHT, prng, TERRAIN_VERTICAL_SCALE } from './config.js';
 import { getTrueElevation, getTrueColor } from './terrainBuilder.js';
 
 // ── City dataset ──────────────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ export class CityManager {
 
                 // ── Vertex elevation + globe curvature ────────────────────
                 const gDist = Math.sqrt((vx / MAP_WIDTH) ** 2 + (vz / MAP_HEIGHT) ** 2);
-                pos.setY(i, (hM > 0 ? hM / 1000 : 0) - Math.pow(gDist, 2) * 20.0);
+                pos.setY(i, (hM > 0 ? hM / 1000 : 0) * TERRAIN_VERTICAL_SCALE - Math.pow(gDist, 2) * 20.0);
 
                 // ── Central-difference slope magnitude ────────────────────
                 const dydx    = (getTrueElevation(vx + step, vz) - getTrueElevation(vx - step, vz)) / (2 * step * 1000);

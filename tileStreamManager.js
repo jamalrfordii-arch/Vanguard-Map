@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────────
 
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { MAP_WIDTH, MAP_HEIGHT, TERRAIN_VERTICAL_SCALE } from './config.js';
 
 // ── Cesium Ion credentials ────────────────────────────────────────────────────
 // Token is NOT hardcoded (repo is public-ready). Get a free token at
@@ -428,6 +428,7 @@ class TileCache {
             } else {
                 elevY = elev / 2000.0;              // land
             }
+            elevY *= TERRAIN_VERTICAL_SCALE;
 
             const curve = curveOffset(sceneX, sceneZ);
 

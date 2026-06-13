@@ -2080,6 +2080,15 @@
         }
         .vp-tab.has-alert .vp-badge { display: flex; }
 
+        /* ── RF INTEL tab flash — fires on each new RF event; color carries
+              severity (violet INFO, amber WATCH, red ALERT) via CSS var. ── */
+        @keyframes rf-tab-flash {
+            0%, 100% { background: transparent;        color: #5b6a7c; }
+            50%      { background: var(--rf-flash, rgba(184,112,255,0.35));
+                       color: #e8eef5; }
+        }
+        .vp-tab.rf-flash { animation: rf-tab-flash 1.2s ease-in-out 3; }
+
         /* ── Content panes ───────────────────────────────────────────────────── */
         #vp-body {
             flex: 1;
@@ -2799,6 +2808,7 @@
             <button class="vp-tab"        data-tab="alerts">ALERTS<span class="vp-badge" id="vp-alerts-badge"></span></button>
             <button class="vp-tab"        data-tab="feed">FEED</button>
             <button class="vp-tab"        data-tab="sitrep">SITREP</button>
+            <button class="vp-tab"        data-tab="rf">RF<span class="vp-badge" id="vp-rf-badge"></span></button>
         </div>
 
         <!-- Tab content area -->
@@ -2832,6 +2842,14 @@
                     FEED NOT CONFIGURED<br>
                     RSS SOURCES WILL APPEAR<br>
                     AFTER API SETUP
+                </div>
+            </div>
+
+            <div class="vp-pane" id="vp-rf">
+                <div class="vp-empty">
+                    NO RF EVENTS<br>
+                    SPECTRUM MONITORING ACTIVE<br>
+                    DISTRESS · DIVERGENCE · JAMMING
                 </div>
             </div>
 
@@ -3621,6 +3639,15 @@
             }
         });
     })();
+    </script>
+
+    <!-- Service worker: network-first for code so module updates apply on next
+         reload — kills the stale-mixed-module-cache failure mode. See sw.js. -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js').catch(e =>
+                console.warn('[SW] registration failed (non-fatal):', e.message));
+        }
     </script>
 
     <!-- ES6 module entry point — must be served via HTTP (not file://) -->

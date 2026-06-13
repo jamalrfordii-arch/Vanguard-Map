@@ -1,19 +1,18 @@
 # Vanguard1 Innovator — Error Report
 
-**Date:** 2026-06-11  
+**Date:** 2026-06-12 (repeat failure — also failed 2026-06-11)
 **Task:** vanguard-weekly-innovator (scheduled, fast mode)
 
 ## Error
 
-The `ANTHROPIC_API_KEY` environment variable is not set in the scheduled-task execution environment.
+The `ANTHROPIC_API_KEY` environment variable is not set in the scheduled-task execution environment, so `agents/research-innovator.js` cannot make Claude API calls and was not run. No `.env` file was found in `Vanguard1/` or `Vanguard1/agents/` either.
 
-The agent at `C:\Users\jamal\Desktop\Vanguard1\agents\research-innovator.js` requires this key to make Claude API calls. Without it, the agent cannot run.
+## Why setting a Windows env var may not be enough
 
-## Fix
+Scheduled tasks run the agent inside Claude's sandboxed Linux shell, which does not inherit Windows user environment variables. The most reliable fix is a file-based approach:
 
-Set `ANTHROPIC_API_KEY` in the environment where Claude's scheduled tasks run. On Windows, you can do this via:
-
-1. **System Environment Variables:** Search "Edit the system environment variables" → Environment Variables → New (under User variables) → Name: `ANTHROPIC_API_KEY`, Value: your key.
-2. After setting it, restart the Claude desktop app so the new environment is picked up.
+1. Create `Vanguard1/agents/.env` containing:
+   `ANTHROPIC_API_KEY=sk-ant-...`
+2. Make the agent load it — either `npm install dotenv` in `agents/` and add `require('dotenv').config()` (or `import 'dotenv/config'`) at the top of `research-innovator.js`, or have the scheduled task source the file before invoking node.
 
 Once the key is available, re-run the task or wait for the next scheduled execution.

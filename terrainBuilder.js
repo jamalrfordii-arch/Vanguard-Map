@@ -6,6 +6,9 @@ import {
     SPLAT_LAND_GRID, SPLAT_OCEAN_GRID,
     SPLAT_FADE_START, SPLAT_FADE_END,
     AQUARIUM_DEPTH,
+    DAYNIGHT_TERRAIN,
+    SPLAT_FX,
+    TERRAIN_VSCALE_LAND, TERRAIN_VSCALE_OCEAN,
 } from './config.js';
 
 // Module-level references set once via init
@@ -170,6 +173,22 @@ export function createHighFidelityPointCloud(scene) {
             //   window.splatCloud.material.uniforms.uEdgeFadeStart.value = 110
             uEdgeFadeStart: { value: 125.0 },   // start fading at this |x| or |z|
             uEdgeFadeEnd:   { value: 150.0 },   // fully transparent at the boundary
+            // ── Day/night terrain shading — geographic terminator ────────────
+            // Sub-solar point (radians) written each frame by main.js from
+            // skyManager (same site that writes uSunDir). Tune live:
+            //   window.splatCloud.material.uniforms.uNightDim.value = 0.8
+            uSubSolarLat:   { value: 0.0 },
+            uSubSolarLon:   { value: 0.0 },
+            uNightDim:      { value: DAYNIGHT_TERRAIN.STRENGTH },
+            uNightFloor:    { value: DAYNIGHT_TERRAIN.FLOOR },
+            // ── Splat FX — coverage scale + animated ridge energy ────────────
+            uSplatScale:    { value: SPLAT_FX.SCALE },
+            uTime:          { value: 0.0 },   // seconds, written by main.js loop
+            uRidgePulse:    { value: SPLAT_FX.RIDGE_PULSE },
+            // Vertical exaggeration — used to decode metres from vHeight for
+            // contours and cliff thresholds. Set once; never written at runtime.
+            uVScaleLand:    { value: TERRAIN_VSCALE_LAND },
+            uVScaleOcean:   { value: TERRAIN_VSCALE_OCEAN },
         },
         vertexColors: true,
         vertexShader: /* glsl */`
@@ -188,13 +207,28 @@ export function createHighFidelityPointCloud(scene) {
             varying float vDist;
             varying float vLatitude;  // 0=equator, 1=pole — abs(Z)/150
             varying float vEdgeFade;  // 1=interior, 0=at map boundary
+            varying float vDayFactor; // 1=full day, 0=full night (geographic terminator)
 
             uniform float uEdgeFadeStart;
             uniform float uEdgeFadeEnd;
+            uniform float uSubSolarLat;  // radians
+            uniform float uSubSolarLon;  // radians
+            uniform float uSplatScale;   // global point-size multiplier
 
             void main() {
                 vColor       = color;
                 vHeight      = aHeight;
+
+                // ── Geographic day/night factor ────────────────────────────────
+                // Recover lon/lat from scene XZ (inverse Mercator, mirrors
+                // lonLatToScene in aisManager.js), then compute local solar
+                // elevation against the sub-solar point. Smooth twilight band.
+                float lonRad = position.x * (3.14159265 / 150.0);          // x → lon
+                float mercY  = -position.z * (3.14159265 / 150.0);         // z → mercator y
+                float latRad = 2.0 * atan(exp(mercY)) - 1.57079633;        // → lat
+                float sinElev = sin(latRad) * sin(uSubSolarLat)
+                              + cos(latRad) * cos(uSubSolarLat) * cos(lonRad - uSubSolarLon);
+                vDayFactor = smoothstep(-0.10, 0.14, sinElev);
                 // Latitude: Z axis spans -150(north) to +150(south), 150 = MAP_HEIGHT/2
                 vLatitude    = abs(position.z) / 150.0;
 
@@ -240,7 +274,9 @@ export function createHighFidelityPointCloud(scene) {
                 // Raised from 3.0 to 4.5 so splats overlap more at close zoom and
                 // read as a continuous surface instead of discrete grainy dots.
                 float maxSize   = mix(4.5, 3.0, clamp(1.0 - dist / 80.0, 0.0, 1.0));
-                gl_PointSize    = clamp(perspSize, lodMin, maxSize);
+                // uSplatScale: global coverage multiplier — >1 closes the gaps
+                // between points so terrain reads as continuous surface.
+                gl_PointSize    = clamp(perspSize, lodMin, maxSize) * uSplatScale;
                 gl_Position  = projectionMatrix * mvPos;
             }
         `,
@@ -261,6 +297,12 @@ export function createHighFidelityPointCloud(scene) {
             uniform vec3  uPolarTint;
             uniform vec3  uAridTint;
             uniform vec3  uSnowTint;
+            uniform float uNightDim;
+            uniform float uNightFloor;
+            uniform float uTime;
+            uniform float uRidgePulse;
+            uniform float uVScaleLand;
+            uniform float uVScaleOcean;
 
             varying vec3  vColor;
             varying vec3  vWorldNormal;
@@ -269,6 +311,7 @@ export function createHighFidelityPointCloud(scene) {
             varying float vDist;
             varying float vLatitude;
             varying float vEdgeFade;
+            varying float vDayFactor;
 
             void main() {
                 // ── Gaussian soft splat ───────────────────────────────────────
@@ -351,7 +394,7 @@ export function createHighFidelityPointCloud(scene) {
                 // Each splat is a point with one elevation, so contours appear as
                 // statistically dense dots clustering along level lines — exactly
                 // the dotted-line look of a topographic / tactical map.
-                float elevMeters = vHeight * mix(600.0, 650.0, oceanMask);
+                float elevMeters = vHeight * mix(600.0, 650.0, oceanMask) / mix(uVScaleOcean, uVScaleLand, oceanMask);
 
                 // Minor ring every 500 m — muted teal glow
                 float minorMod  = mod(abs(elevMeters), 500.0);
@@ -452,7 +495,7 @@ export function createHighFidelityPointCloud(scene) {
                 // vHeight = hMeters/1000 for land → 0.20 = 200 m scene units.
                 // vRidge 0–1 steepness; coastal cliffs score ≈ 1.0.
                 float pcCliff = smoothstep(0.28, 0.68, vRidge)
-                              * (1.0 - smoothstep(0.0, 0.35, vHeight))
+                              * (1.0 - smoothstep(0.0, 0.35 * uVScaleLand, vHeight))
                               * oceanMask;
                 litColor  *= 1.0 - pcCliff * 0.97;
                 // Dissolve steep coastal splats to transparent so they don't
@@ -492,6 +535,25 @@ export function createHighFidelityPointCloud(scene) {
                 vec3 snowResult  = mix(aridResult,  uSnowTint  * biomeLum * 1.4,  snowMask * 0.75);
                 litColor = mix(litColor, snowResult, uBiomeStrength);
                 litColor = clamp(litColor, 0.0, 1.0);
+
+                // ── Ridge energy pulse — slow luminous flow along mountain ranges
+                // Uses the existing ridge mask (vRidge); phase varies with height
+                // and latitude so the glow travels along ranges instead of
+                // blinking uniformly. uRidgePulse=0 disables. Additive color is
+                // capped well below bloom threshold (0.95) — no bloom risk.
+                float ridgeWave = 0.5 + 0.5 * sin(uTime * 0.6 + vHeight * 4.0 + vLatitude * 14.0);
+                litColor += vec3(0.10, 0.34, 0.52) * vRidge * ridgeWave * uRidgePulse;
+                litColor = clamp(litColor, 0.0, 1.0);
+
+                // ── Day/night terminator dim ──────────────────────────────────
+                // Night side of the terrain darkens toward uNightFloor; twilight
+                // gets a faint warm tint so the terminator band reads naturally.
+                // uNightDim=0 disables entirely (identical to pre-feature look).
+                float dnFactor = mix(uNightFloor, 1.0, vDayFactor);
+                vec3  dnColor  = litColor * dnFactor;
+                float twilight = vDayFactor * (1.0 - vDayFactor) * 4.0;  // peaks at terminator
+                dnColor += vec3(0.030, 0.012, 0.0) * twilight;            // subtle amber band
+                litColor = mix(litColor, dnColor, uNightDim);
 
                 gl_FragColor = vec4(litColor, softAlpha * uFade * vEdgeFade);
             }
@@ -546,6 +608,8 @@ export function createHighFidelityPointCloud(scene) {
         MAP_WIDTH, MAP_HEIGHT,
         LAND_GRID:  SPLAT_LAND_GRID,
         OCEAN_GRID: SPLAT_OCEAN_GRID,
+        VSCALE_LAND:  TERRAIN_VSCALE_LAND,
+        VSCALE_OCEAN: TERRAIN_VSCALE_OCEAN,
         prngSeed: 12345,  // fixed seed → deterministic splat distribution
     });
 
@@ -574,7 +638,8 @@ export function createSolidOceanFloor(scene) {
 
         const dist   = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
         const curveY = -Math.pow(dist, 2) * 20.0;
-        rawY[i] = (hMeters < 0 ? hMeters / 900.0 : hMeters / 1000.0) + curveY - 0.2;
+        rawY[i] = (hMeters < 0 ? (hMeters / 900.0) * TERRAIN_VSCALE_OCEAN
+                               : (hMeters / 1000.0) * TERRAIN_VSCALE_LAND) + curveY - 0.2;
     }
 
     // ── Pass 2: 6-iteration Gaussian-weighted smoothing (ocean only) ────────
@@ -808,7 +873,8 @@ function _drawBorderRing(ring, material, bordersGroup) {
         const isOcean = hMeters < 0;
         const dist    = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
         const curveY  = -Math.pow(dist, 2) * 20.0;
-        const finalY  = isOcean ? (hMeters / 600.0) : (hMeters / 1000.0);
+        const finalY  = isOcean ? (hMeters / 600.0) * TERRAIN_VSCALE_OCEAN
+                                : (hMeters / 1000.0) * TERRAIN_VSCALE_LAND;
 
         // Break line at anti-meridian jumps
         if (points.length > 0 && Math.abs(x - points[points.length - 1].x) > MAP_WIDTH * 0.5) {
@@ -910,7 +976,7 @@ export function createOceanDepthMarkers(scene) {
         const hMeters = getBestElevation(x, z);
         const dist    = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
         const curveY  = -Math.pow(dist, 2) * 20.0;
-        const floorY  = hMeters / 800.0 + curveY - 0.2;
+        const floorY  = (hMeters / 800.0) * TERRAIN_VSCALE_OCEAN + curveY - 0.2;
 
         // Label floats above the floor; stem connects label to floor
         const stemHeight = Math.max(1.5, Math.abs(hMeters) / 800.0 * 0.18);

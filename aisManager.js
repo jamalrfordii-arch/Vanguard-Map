@@ -207,6 +207,22 @@ export class AISManager {
         this._sources.clear();
     }
 
+    // Pause/resume the LIVE WebSocket feed without closing the socket —
+    // used during replay so recorded and live traffic don't fight.
+    setLivePaused(v) { this._livePaused = !!v; }
+
+    // Remove every vessel (fires onVesselRemove for scene cleanup). Used when
+    // entering replay: a fresh world prevents the invariant gate from rejecting
+    // replayed positions as impossible teleports of existing vessels.
+    clearAllVessels() {
+        this.vessels.forEach((v, mmsi) => {
+            if (this.onVesselRemove) this.onVesselRemove(mmsi);
+        });
+        this.vessels.clear();
+        this._updateCount();
+        this._updateDarkCount();
+    }
+
     // Call once after scene is ready. Shows key prompt then opens socket —
     // or, in demo mode, skips the socket and announces vg1:demoMode so
     // main.js can load a synthetic scenario instead.
@@ -242,7 +258,7 @@ export class AISManager {
             try {
                 const text = e.data instanceof Blob ? await e.data.text() : e.data;
                 const msg  = JSON.parse(text);
-                console.log('[AIS RAW] MessageType:', msg.MessageType, '| MMSI:', msg.MetaData?.MMSI);
+                if (this._livePaused) return;  // replay in progress — live feed muted
                 this.ingest(msg);
             }
             catch (err) { console.warn('[AIS] Parse error:', err); }
