@@ -905,6 +905,10 @@ async function init(mapData) {
                 else if (filter === 'DARK')  passes = isDark;
                 else                         passes = (ud.class === filter) && !isDark;
 
+                // Persistent flag — the per-frame dot/visibility loops honor this
+                // so the filter isn't stomped each frame by clustering/dot logic.
+                ud._classHidden = !passes;
+
                 // Dark vessels: main 3D object is ALWAYS hidden (model invisible);
                 // only the dark marker dot/ring shows. Never set ship.visible = true
                 // for a dark vessel — that would show a floating model at stale coords.
@@ -1532,7 +1536,8 @@ async function init(mapData) {
                 // known position stays visible but clearly signals lost contact.
                 const dot = ship.userData.vesselDot;
                 if (dot) {
-                    dot.visible = showClose;
+                    // Respect the class filter — hidden classes stay hidden.
+                    dot.visible = showClose && !ship.userData._classHidden;
                     const mat = dot.userData._vesselDotMat;
                     if (mat) {
                         if (ship.userData.isDark) {
@@ -1794,6 +1799,11 @@ async function init(mapData) {
 async function _showPortPanel(portData, camera, controls, stateRef) {
     const panel = document.getElementById('port-detail-panel');
     if (!panel) return;
+
+    // Close button — bind here (idempotent onclick) so the × actually dismisses
+    // the panel. Previously unbound, so the panel could not be closed.
+    const _pdpClose = document.getElementById('pdp-close');
+    if (_pdpClose) _pdpClose.onclick = () => { panel.style.display = 'none'; };
 
     // ── Static fields ──────────────────────────────────────────────────────────
     document.getElementById('pdp-name').textContent    = portData.name;

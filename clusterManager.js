@@ -214,7 +214,7 @@ export class ClusterManager {
                 this._shipActive = false;
                 aisShips.forEach(ship => {
                     if (ship.userData.isRealAIS && !ship.userData.isDark)
-                        ship.visible = true;
+                        ship.visible = !ship.userData._classHidden;  // honor class filter
                 });
                 this._shipClusters.forEach(c => { c.sprite.visible = false; c.shadow.visible = false; });
                 this._darkClusters.forEach(c   => { c.sprite.visible = false; c.shadow.visible = false; });
