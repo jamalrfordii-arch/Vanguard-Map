@@ -35,10 +35,18 @@ export class RFEmergencyBeaconManager {
         this.beacons = new Map();              // mmsi → { obj, rings, lastSeen, kind }
         this._ringGeo = new THREE.RingGeometry(0.5, 0.62, 48);
         this._ringGeo.rotateX(-Math.PI / 2);
+
+        // Telemetry — visible on the RF tab's sensor status board
+        this.stats = rfIntel.registerDetector('beacons', {
+            name:   'DISTRESS BEACONS',
+            source: 'AIS MMSI 970/972/974 + msg14',
+        });
     }
 
     // Fed every raw AIS message (multiplexed in main.js).
     inspect(msg) {
+        this.stats.inspected++;
+        this.stats.lastInspect = Date.now();
         const meta = msg.MetaData;
         if (!meta) return;
         const mmsi   = String(meta.MMSI ?? '');
@@ -89,6 +97,8 @@ export class RFEmergencyBeaconManager {
             this.group.add(obj);
             b = { obj, rings, core, kind, firstSeen: simClock.now() };
             this.beacons.set(mmsi, b);
+            this.stats.events++;
+            this.stats.extra = { 'active beacons': this.beacons.size };
 
             // Feed event — once per beacon activation, not per ping
             const hhmm = new Date(simClock.now()).toISOString().slice(11, 16);
@@ -128,6 +138,7 @@ export class RFEmergencyBeaconManager {
             const b = this.beacons.get(mmsi);
             this.group.remove(b.obj);
             this.beacons.delete(mmsi);
+            this.stats.extra = { 'active beacons': this.beacons.size };
         });
     }
 }

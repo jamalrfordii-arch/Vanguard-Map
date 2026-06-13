@@ -863,91 +863,84 @@ function _makePortLabelSprite(name) {
 // the vessel object.
 export function createDarkVesselMarker(position, parentGroup) {
     const group = new THREE.Group();
-    const segs  = 64;
+    const BEAM_H = 6.0;   // beam height in scene units
 
-    // Outer pulsing ring
-    const outerPts = [];
+    // ── Vertical signal beam (the "laser") — anchored at the waterline ───────
+    // A slim cylinder rising from y=0; a height-fading shader keeps the base
+    // bright and the tip dissolving into air, so it reads as an emission
+    // column rather than a solid bar. Grounded — base sits exactly on water.
+    const beamGeo = new THREE.CylinderGeometry(0.07, 0.14, BEAM_H, 12, 1, true);
+    beamGeo.translate(0, BEAM_H / 2, 0);   // base at y=0
+    const beamMat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: { uOpacity: { value: 0.95 }, uColor: { value: new THREE.Color(0xff1744) } },
+        vertexShader: `
+            varying float vH;
+            void main() {
+                vH = position.y / ${BEAM_H.toFixed(1)};
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }`,
+        fragmentShader: `
+            uniform float uOpacity; uniform vec3 uColor; varying float vH;
+            void main() {
+                float fade = pow(1.0 - vH, 1.6);       // bright base → faint tip
+                gl_FragColor = vec4(uColor, fade * uOpacity);
+            }`,
+    });
+    const beam = new THREE.Mesh(beamGeo, beamMat);
+    beam.renderOrder = 6;
+    group.add(beam);
+
+    // ── Footprint ring — flat on the water, grounds the beam to a location ───
+    const segs = 48, ringPts = [];
     for (let i = 0; i <= segs; i++) {
         const a = (i / segs) * Math.PI * 2;
-        outerPts.push(new THREE.Vector3(Math.cos(a) * 1.8, 0.5, Math.sin(a) * 1.8));
+        ringPts.push(new THREE.Vector3(Math.cos(a) * 1.0, 0.02, Math.sin(a) * 1.0));
     }
-    const outerMat = new THREE.LineBasicMaterial({
-        color: 0xff1744, transparent: true, opacity: 0.95,
+    const ringMat = new THREE.LineBasicMaterial({
+        color: 0xff1744, transparent: true, opacity: 0.5,
         blending: THREE.AdditiveBlending, depthWrite: false,
     });
-    const outerRing = new THREE.Line(new THREE.BufferGeometry().setFromPoints(outerPts), outerMat);
-    outerRing.renderOrder = 5;
-    group.add(outerRing);
+    const ring = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ringPts), ringMat);
+    ring.renderOrder = 5;
+    group.add(ring);
 
-    // Middle ring
-    const midPts = [];
-    for (let i = 0; i <= segs; i++) {
-        const a = (i / segs) * Math.PI * 2;
-        midPts.push(new THREE.Vector3(Math.cos(a) * 1.2, 0.5, Math.sin(a) * 1.2));
+    // ── Rising motes — sparse points drifting up the beam (animated in main) ─
+    const MOTES = 9;
+    const moteArr = new Float32Array(MOTES * 3);
+    const motePhase = new Float32Array(MOTES);
+    for (let i = 0; i < MOTES; i++) {
+        motePhase[i] = i / MOTES;
+        moteArr[i * 3] = 0; moteArr[i * 3 + 1] = motePhase[i] * BEAM_H; moteArr[i * 3 + 2] = 0;
     }
-    const midMat = new THREE.LineBasicMaterial({
-        color: 0xff1744, transparent: true, opacity: 0.55,
-        blending: THREE.AdditiveBlending, depthWrite: false,
+    const moteGeo = new THREE.BufferGeometry();
+    moteGeo.setAttribute('position', new THREE.BufferAttribute(moteArr, 3));
+    const moteMat = new THREE.PointsMaterial({
+        color: 0xff5a78, size: 0.5, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
     });
-    const midRing = new THREE.Line(new THREE.BufferGeometry().setFromPoints(midPts), midMat);
-    midRing.renderOrder = 5;
-    group.add(midRing);
+    const motes = new THREE.Points(moteGeo, moteMat);
+    motes.renderOrder = 7;
+    group.add(motes);
 
-    // Inner ring
-    const innerPts = [];
-    for (let i = 0; i <= segs; i++) {
-        const a = (i / segs) * Math.PI * 2;
-        innerPts.push(new THREE.Vector3(Math.cos(a) * 0.7, 0.5, Math.sin(a) * 0.7));
-    }
-    const innerMat = new THREE.LineBasicMaterial({
-        color: 0xff1744, transparent: true, opacity: 0.40,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const innerRing = new THREE.Line(new THREE.BufferGeometry().setFromPoints(innerPts), innerMat);
-    innerRing.renderOrder = 5;
-    group.add(innerRing);
-
-    // Cross marker
-    const crossGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-1.2, 0.5, 0), new THREE.Vector3(1.2, 0.5, 0),
-        new THREE.Vector3(0, 0.5, -1.2), new THREE.Vector3(0, 0.5, 1.2),
-    ]);
-    const crossMat = new THREE.LineBasicMaterial({
-        color: 0xff1744, transparent: true, opacity: 0.95,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const cross = new THREE.LineSegments(crossGeo, crossMat);
-    cross.renderOrder = 5;
-    group.add(cross);
-
-    group.userData._darkOuterMat = outerMat;
-    group.userData._darkMidMat   = midMat;
-    group.userData._darkInnerMat = innerMat;
-    group.userData._darkCrossMat = crossMat;
+    // userData — keep the keys the animation loop expects. The beam shader's
+    // uOpacity stands in for the old _darkOuterMat.opacity (a setter shim);
+    // unused ring slots are null and guarded with && in main.js.
+    group.userData._darkOuterMat = { set opacity(v) { beamMat.uniforms.uOpacity.value = v; },
+                                     get opacity()  { return beamMat.uniforms.uOpacity.value; } };
+    group.userData._darkInnerMat = ringMat;
+    group.userData._darkMidMat   = null;
+    group.userData._darkCrossMat = null;
     group.userData._isDarkMarker = true;
+    group.userData._darkMotes    = { geo: moteGeo, phase: motePhase, h: BEAM_H };
 
     group.userData._darkBleedMat  = null;
     group.userData._darkBleedRing = null;
     group.userData._bleedStartMs  = 0;
 
-    // "DARK" canvas label sprite above the ring
-    const canvas   = document.createElement('canvas');
-    canvas.width   = 160;
-    canvas.height  = 40;
-    const ctx      = canvas.getContext('2d');
-    ctx.font       = 'bold 16px Courier New';
-    ctx.fillStyle  = 'rgba(255, 23, 68, 1.0)';
-    ctx.textAlign  = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('◉ DARK', 80, 20);
-    const tex      = new THREE.CanvasTexture(canvas);
-    const sprite   = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-    sprite.scale.set(5, 1.25, 1);
-    sprite.position.set(0, 4.5, 0);
-    sprite.renderOrder = 999;
-    group.add(sprite);
-
-    group.position.copy(position);
+    // Ground the whole marker at the waterline (ignore any vessel deck height).
+    group.position.set(position.x, 0, position.z);
     parentGroup.add(group);
     return group;
 }

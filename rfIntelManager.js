@@ -24,9 +24,38 @@ const SEV = {
 
 class RFIntelManager {
     constructor() {
-        this.events  = [];           // newest last
-        this.counts  = { INFO: 0, WATCH: 0, ALERT: 0 };
-        this._panel  = null;
+        this.events    = [];         // newest last
+        this.counts    = { INFO: 0, WATCH: 0, ALERT: 0 };
+        this._panel    = null;
+        this.detectors = new Map();  // id → stats (see registerDetector)
+    }
+
+    // ── Detector registry — every RF sub-manager reports its own health ──────
+    // An analyst must be able to tell "no events" from "sensor offline".
+    // Returns a stats handle the detector mutates directly:
+    //   stats.inspected++        every message/sample it examines
+    //   stats.events++           every event it fires
+    //   stats.extra = {...}      detector-specific gauges (shown on the board)
+    registerDetector(id, { name, source }) {
+        const stats = {
+            id, name, source,
+            inspected: 0,            // messages/samples examined
+            events: 0,               // events fired
+            startedAt: Date.now(),
+            lastInspect: 0,          // ms epoch of last examined sample
+            extra: {},               // detector-specific gauges
+        };
+        this.detectors.set(id, stats);
+        return stats;
+    }
+
+    // Health classification per detector — driven by data freshness.
+    detectorStatus(stats) {
+        const age = Date.now() - stats.lastInspect;
+        if (stats.lastInspect === 0) return { state: 'STANDBY', color: '#5b6a7c' }; // no data yet
+        if (age < 60_000)            return { state: 'ACTIVE',  color: '#3ac8d6' };
+        if (age < 5 * 60_000)        return { state: 'STALE',   color: '#ffb547' };
+        return                              { state: 'OFFLINE', color: '#ff2a4d' };
     }
 
     recordEvent(evt) {
@@ -82,15 +111,53 @@ export function initRFIntelPanel({ flyTo }) {
     if (!pane) { console.warn('[RF] #vp-rf pane missing — panel not initialized'); return null; }
 
     pane.innerHTML = `
-        <div id="rf-counters" style="letter-spacing:1px; color:#4a6b84; padding:8px 10px 4px;">
+        <div id="rf-sensors" style="padding:8px 10px 2px;"></div>
+        <div id="rf-counters" style="letter-spacing:1px; color:#4a6b84; padding:6px 10px 4px;
+             border-top:1px solid rgba(184,112,255,0.15);">
             0 INFO · 0 WATCH · 0 ALERT
         </div>
         <div id="rf-list" style="overflow-y:auto; padding:0 8px 8px;">
             <div style="color:#2e4a5e; padding:4px 2px;">NO RF EVENTS</div>
         </div>
     `;
-    const listEl = document.getElementById('rf-list');
-    const cntEl  = document.getElementById('rf-counters');
+    const listEl    = document.getElementById('rf-list');
+    const cntEl     = document.getElementById('rf-counters');
+    const sensorsEl = document.getElementById('rf-sensors');
+
+    // ── Detector status board — refreshed every 2 s ───────────────────────────
+    function fmtAge(ms) {
+        if (!ms) return '—';
+        const s = Math.floor((Date.now() - ms) / 1000);
+        return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`;
+    }
+    function renderSensors() {
+        if (!rfIntel.detectors.size) {
+            sensorsEl.innerHTML = '<div style="color:#2e4a5e;">NO DETECTORS REGISTERED</div>';
+            return;
+        }
+        let html = `<div style="color:#4a6b84; letter-spacing:2px; margin-bottom:5px;">SENSORS</div>`;
+        rfIntel.detectors.forEach(st => {
+            const { state, color } = rfIntel.detectorStatus(st);
+            const extras = Object.entries(st.extra)
+                .map(([k, v]) => `${k.toUpperCase()}: ${v}`).join(' · ');
+            html += `
+                <div style="border:1px solid rgba(184,112,255,0.15); border-left:3px solid ${color};
+                            padding:4px 7px; margin-bottom:4px; background:rgba(0,0,0,0.25);">
+                    <div style="display:flex; justify-content:space-between;">
+                        <span style="color:#cfe3f1; letter-spacing:1px;">${st.name}</span>
+                        <span style="color:${color};">● ${state}</span>
+                    </div>
+                    <div style="color:#4a6b84;">src: ${st.source}</div>
+                    <div style="color:#8aabc4;">
+                        ${st.inspected.toLocaleString()} inspected · ${st.events} events · last ${fmtAge(st.lastInspect)}
+                    </div>
+                    ${extras ? `<div style="color:#b870ff;">${extras}</div>` : ''}
+                </div>`;
+        });
+        sensorsEl.innerHTML = html;
+    }
+    setInterval(renderSensors, 2000);
+    renderSensors();
 
     // Unseen tracking — cleared when the tab is opened
     let unseen = 0;

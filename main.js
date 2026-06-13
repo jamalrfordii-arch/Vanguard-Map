@@ -51,6 +51,7 @@ import { AltitudeDeckManager } from './altitudeDeckManager.js';
 import { SkyManager }    from './skyManager.js';
 import { FogManager }    from './fogManager.js';
 import { TrailManager }  from './trailManager.js';
+import { vesselWaterPads } from './vesselWaterPad.js';
 import { WakeManager } from './wakeManager.js';
 import { CityManager } from './cityManager.js';
 import { ContinentMesh } from './continentMesh.js';
@@ -203,6 +204,7 @@ async function init(mapData) {
     const laneGroup = new THREE.Group();
     laneGroup.name  = 'laneGroup';
     scene.add(laneGroup);
+    vesselWaterPads.init(laneGroup);   // fjord/harbor coastline patch
 
     // Route prediction lines (AIS vessels)
     const predGroup = new THREE.Group();
@@ -481,6 +483,8 @@ async function init(mapData) {
             laneGroup.remove(obj.userData.vesselDot);
             obj.userData.vesselDot = null;
         }
+        // Remove fjord/harbor water pad
+        vesselWaterPads.remove(obj);
         // Remove anomaly ring sibling
         if (obj.userData.anomalyRing) {
             laneGroup.remove(obj.userData.anomalyRing);
@@ -1495,11 +1499,22 @@ async function init(mapData) {
                 if (!ship.userData.isDark) return;
                 const dm = ship.userData.darkMarker;
                 if (!dm || !dm.userData._isDarkMarker) return;
-                dm.userData._darkOuterMat.opacity = blinkOn ? 0.95 : 0.05;
+                dm.userData._darkOuterMat.opacity = blinkOn ? 0.95 : 0.18;
                 dm.userData._darkMidMat  && (dm.userData._darkMidMat.opacity  = blinkOn ? 0.55 : 0.04);
                 dm.userData._darkCrossMat && (dm.userData._darkCrossMat.opacity = blinkOn ? 0.95 : 0.10);
                 dm.userData._darkInnerMat && (dm.userData._darkInnerMat.opacity =
                     0.25 + 0.20 * Math.sin(elapsed * 2.8));
+
+                // Rising motes — drift up the beam, recycling at the top
+                const mo = dm.userData._darkMotes;
+                if (mo) {
+                    const arr = mo.geo.attributes.position.array;
+                    for (let k = 0; k < mo.phase.length; k++) {
+                        const t = (mo.phase[k] + elapsed * 0.18) % 1;
+                        arr[k * 3 + 1] = t * mo.h;
+                    }
+                    mo.geo.attributes.position.needsUpdate = true;
+                }
             });
         }
 
@@ -1515,7 +1530,16 @@ async function init(mapData) {
                     darkPositions.push(ship.userData.darkMarker.position);
             });
 
+            // Fjord/harbor water pad — hide land-colored splats under vessels
+            // the coarse DEM renders as land. Sampler-gated (not zoom-gated):
+            // pads are tiny and invisible from far out, and the per-vessel
+            // terrain sample is a cheap nearest-cell array lookup.
+            const padSample = window.terrainHeight?.sampleTerrainHeightXZ;
             window.aisShips.forEach(ship => {
+                if (padSample) {
+                    vesselWaterPads.update(ship, padSample);
+                }
+
                 // Show dot at close zoom for all tracked vessels.
                 // Active = green (#00ff88). Dark = red (#ff1744) so the last
                 // known position stays visible but clearly signals lost contact.
