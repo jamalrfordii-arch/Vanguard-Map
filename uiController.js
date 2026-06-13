@@ -81,6 +81,35 @@ export function detectRegion(lat, lon) {
     return 'OPEN OCEAN';
 }
 
+// ── Named waterways ─────────────────────────────────────────────────────────
+// The terrain DEM is too coarse to carve narrow fjords, sounds, and rivers, so
+// vessels genuinely on water there can render over land. This gazetteer names
+// the common cases so the vessel card explains where the ship actually is,
+// rather than leaving it looking mysteriously "on land". [latMin,latMax,lonMin,lonMax].
+const NAMED_WATERWAYS = [
+    { name: 'SOGNEFJORD',                 box: [60.8, 61.4,   4.8,  7.4] },
+    { name: 'OSLOFJORD',                  box: [59.0, 59.95, 10.2, 11.0] },
+    { name: 'HARDANGERFJORD',             box: [59.7, 60.6,   5.4,  7.2] },
+    { name: 'NORWEGIAN COASTAL WATERS',   box: [58.0, 71.5,   4.0, 31.0] },
+    { name: 'SALISH SEA / PUGET SOUND',   box: [47.0, 49.5, -125.0,-122.0] },
+    { name: 'FRASER RIVER / VANCOUVER',   box: [49.0, 49.45,-123.6,-122.4] },
+    { name: 'ST. LAWRENCE SEAWAY',        box: [45.0, 50.0, -75.0, -64.0] },
+    { name: 'DANISH STRAITS',             box: [54.5, 58.0,   9.0, 13.5] },
+    { name: 'STRAIT OF JUAN DE FUCA',     box: [48.0, 48.6, -124.8,-123.0] },
+    { name: 'CHESAPEAKE BAY',             box: [36.8, 39.6, -77.2, -75.8] },
+];
+
+// Returns a named waterway for a position, or null. Honest fallback handled
+// by the caller (it can show "COASTAL WATERWAY" when the DEM shows land here).
+export function detectWaterway(lat, lon) {
+    if (lat == null || lon == null) return null;
+    for (const w of NAMED_WATERWAYS) {
+        const [laM, laX, loM, loX] = w.box;
+        if (lat >= laM && lat <= laX && lon >= loM && lon <= loX) return w.name;
+    }
+    return null;
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 export function applySearchFilter(aisShips) {
     const q = _searchQuery.toLowerCase().trim();
@@ -458,7 +487,17 @@ export function tickVesselDetail(stateRef) {
 
     const regionEl = document.getElementById('vd-region');
     if (regionEl && latDeg != null && lonDeg != null) {
-        regionEl.innerText = detectRegion(latDeg, lonDeg);
+        const region   = detectRegion(latDeg, lonDeg);
+        // Name the specific waterway when known; otherwise, if the coarse DEM
+        // shows land under the vessel, note it's in a narrow waterway the
+        // terrain can't resolve (explains why it may look like it's on land).
+        let waterway = detectWaterway(latDeg, lonDeg);
+        if (!waterway) {
+            const h = window.terrainHeight?.sampleTerrainHeightXZ?.(
+                _detailShip.position.x, _detailShip.position.z) ?? 0;
+            if (h > 0.05) waterway = 'COASTAL / INLAND WATERWAY';
+        }
+        regionEl.innerText = waterway ? `${region} · ${waterway}` : region;
     }
 
     // Dark row — update elapsed time while panel is open
@@ -1184,8 +1223,12 @@ export function onClick(event, deps) {
 
     if (stateRef.hoveredShip) {
         if (stateRef.lockedShip === stateRef.hoveredShip) {
-            stateRef.lockedShip       = null;
-            stateRef.isFlyingToTarget = false;
+            // Re-clicking the locked vessel deselects it — dissolve the focus
+            // vignette and close the panel (same unlock path as the close button).
+            const prev = stateRef.lockedShip;
+            stateRef.lockedShip = null;
+            hideVesselDetail();
+            window.transitionMgr?.onUnlock(prev, stateRef);
             const ttId = document.getElementById('tt-id');
             if (ttId) ttId.innerText = 'ASSET ID: ' + stateRef.hoveredShip.userData.id;
         } else {
@@ -1212,8 +1255,16 @@ export function onClick(event, deps) {
             stateRef.isFlyingToTarget = true;
         }
     } else {
-        stateRef.lockedShip       = null;
-        stateRef.isFlyingToTarget = false;
+        // Clicked empty water/land — if a vessel was focused, release it:
+        // dissolve the vignette, undim, and close the panel.
+        const prev = stateRef.lockedShip;
+        stateRef.lockedShip = null;
+        if (prev) {
+            hideVesselDetail();
+            window.transitionMgr?.onUnlock(prev, stateRef);
+        } else {
+            stateRef.isFlyingToTarget = false;
+        }
     }
 }
 

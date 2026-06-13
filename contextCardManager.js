@@ -37,6 +37,19 @@ The system will alert if it reappears.`,
         accent: '#c06010',   // amber — matches the dark-vessel halo colour
     },
 
+    DISTRESS_BEACON: {
+        icon:  '◆',
+        title: 'Distress beacon detected',
+        body:  `A distress beacon is an emergency radio transmitter activated when a vessel or person is in danger at sea. This one was detected from its AIS broadcast — certain reserved transmitter IDs identify the device type:
+<br><br>
+<strong>EPIRB</strong> — Emergency Position-Indicating Radio Beacon, activates automatically when a vessel sinks.<br>
+<strong>SART</strong> — Search and Rescue Transponder, carried in life rafts to guide rescuers.<br>
+<strong>MOB</strong> — Man Overboard device, worn by crew and triggered when someone falls into the water.
+<br><br>
+The red marker hovers above the beacon's reported position. This is a life-safety signal — it is always shown, regardless of which layers are active. Coverage is partial: only beacons broadcasting over AIS are detected here, not the full Cospas-Sarsat satellite network.`,
+        accent: '#ff2a4d',
+    },
+
     HOSTILE: {
         icon:  '⬡',
         title: 'Military or law enforcement vessel',

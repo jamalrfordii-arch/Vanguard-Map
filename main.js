@@ -51,7 +51,6 @@ import { AltitudeDeckManager } from './altitudeDeckManager.js';
 import { SkyManager }    from './skyManager.js';
 import { FogManager }    from './fogManager.js';
 import { TrailManager }  from './trailManager.js';
-import { vesselWaterPads } from './vesselWaterPad.js';
 import { WakeManager } from './wakeManager.js';
 import { CityManager } from './cityManager.js';
 import { ContinentMesh } from './continentMesh.js';
@@ -204,7 +203,6 @@ async function init(mapData) {
     const laneGroup = new THREE.Group();
     laneGroup.name  = 'laneGroup';
     scene.add(laneGroup);
-    vesselWaterPads.init(laneGroup);   // fjord/harbor coastline patch
 
     // Route prediction lines (AIS vessels)
     const predGroup = new THREE.Group();
@@ -483,8 +481,6 @@ async function init(mapData) {
             laneGroup.remove(obj.userData.vesselDot);
             obj.userData.vesselDot = null;
         }
-        // Remove fjord/harbor water pad
-        vesselWaterPads.remove(obj);
         // Remove anomaly ring sibling
         if (obj.userData.anomalyRing) {
             laneGroup.remove(obj.userData.anomalyRing);
@@ -1330,7 +1326,7 @@ async function init(mapData) {
         if (splatUniforms.uTime) splatUniforms.uTime.value = elapsed;
 
         // RF distress beacons — expanding-ring animation + stale cleanup
-        rfBeacons.tick(elapsed);
+        rfBeacons.tick(elapsed, camera.quaternion);
 
         // Drive scene lights from solar elevation.
         // Intensities tuned for Three.js r184 physically-correct lighting mode —
@@ -1530,16 +1526,7 @@ async function init(mapData) {
                     darkPositions.push(ship.userData.darkMarker.position);
             });
 
-            // Fjord/harbor water pad — hide land-colored splats under vessels
-            // the coarse DEM renders as land. Sampler-gated (not zoom-gated):
-            // pads are tiny and invisible from far out, and the per-vessel
-            // terrain sample is a cheap nearest-cell array lookup.
-            const padSample = window.terrainHeight?.sampleTerrainHeightXZ;
             window.aisShips.forEach(ship => {
-                if (padSample) {
-                    vesselWaterPads.update(ship, padSample);
-                }
-
                 // Show dot at close zoom for all tracked vessels.
                 // Active = green (#00ff88). Dark = red (#ff1744) so the last
                 // known position stays visible but clearly signals lost contact.
@@ -1588,11 +1575,15 @@ async function init(mapData) {
             for (let i = 0, n = window.aisShips.length; i < n; i++) {
                 const ship = window.aisShips[i];
 
-                // Shadow sync
+                // Shadow sync — only show when zoomed in close enough to see the
+                // vessel models. At far zoom the 5-unit black shadows pile up
+                // (clustering doesn't hide the ships) and read as black holes on
+                // the bright terrain, so gate them off above SHADOW_MAX_ZOOM.
                 const shadow = ship.userData.shadowSprite;
                 if (shadow) {
-                    shadow.visible = ship.visible;
-                    if (ship.visible) {
+                    const showShadow = ship.visible && camera.position.y <= 70;
+                    shadow.visible = showShadow;
+                    if (showShadow) {
                         shadow.position.set(ship.position.x, 0.15, ship.position.z);
                     }
                 }

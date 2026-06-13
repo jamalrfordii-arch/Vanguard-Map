@@ -81,10 +81,11 @@ function makeClusterTexture(count, color = '#00D4FF') {
     ctx.lineWidth   = 3;
     ctx.stroke();
 
-    // Dark fill so count reads over busy terrain
+    // Subtle backing so the count stays legible over busy terrain — kept tight
+    // and translucent so the bubble no longer reads as a black hole on the map.
     ctx.beginPath();
-    ctx.arc(64, 64, 42, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(1, 10, 20, 0.92)';
+    ctx.arc(64, 64, 30, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(1, 10, 20, 0.34)';
     ctx.fill();
 
     // Count number — glow shadow pass then crisp solid pass on top
@@ -124,6 +125,7 @@ function makeSprite(scene) {
     });
     const shadow = new THREE.Sprite(shadowMat);
     shadow.renderOrder = -1;
+    shadow.visible = false;   // ground shadows disabled — read as black holes on bright terrain
     scene.add(shadow);
 
     return {
@@ -499,10 +501,11 @@ export class ClusterManager {
             // Only force visible if a fade-out didn't just hide it this tick
             if (cluster.fadeOutAt === 0) cluster.sprite.visible = true;
 
-            const shadowScale = Math.min(10 + d.count * 0.12, 28);
-            cluster.shadow.scale.set(shadowScale, shadowScale, 1);
-            cluster.shadow.position.set(d.cx, 0.3, d.cz);
-            if (cluster.fadeOutAt === 0) cluster.shadow.visible = true;
+            // Ground shadow disabled — over the bright flattened terrain these
+            // dark discs read as "black holes" blotting the map. The cluster
+            // bubble (ring + count) is legible on its own. Kept the sprite for
+            // back-compat but never shown.
+            cluster.shadow.visible = false;
         });
     }
 
