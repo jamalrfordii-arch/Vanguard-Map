@@ -1,5 +1,6 @@
 // sceneSetup.js — Renderer, camera, OrbitControls, lights, post-processing
 import * as THREE from 'three';
+import { quality } from './qualityManager.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -27,7 +28,9 @@ export function initScene() {
     // Cap at 1.5 — on Retina / 4K screens devicePixelRatio = 2.0, which means
     // 4× the pixels to shade per frame.  1.5 cuts that by ~44% with imperceptible
     // quality loss at tactical-map viewing distances.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    // Pixel ratio is capped per quality tier (1.0 on low-end / mobile up to 2.0
+    // on Ultra). The runtime monitor in main.js nudges it live from real FPS.
+    renderer.setPixelRatio(quality.pixelCap());
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.toneMapping         = THREE.ACESFilmicToneMapping;
     // ACES Filmic preserves colour saturation under bright light and gives the

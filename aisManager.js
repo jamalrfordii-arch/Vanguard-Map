@@ -20,17 +20,32 @@ export function lonLatToScene(lon, lat, y = 0) {
 }
 
 // ── AIS numeric ShipType → VANGUARD entity class ─────────────────────────────
-// Sources: ITU-R M.1371 Annex 8 (AIS ship type table)
-// Only three classes matter for the current filter bar — CARGO, TANKER, PATROL.
-// Everything else defaults to CARGO so it appears under the broadest category.
+// Source: ITU-R M.1371 Annex 8 (AIS ship-type table).
+//
+// HONESTY PRINCIPLE: AIS cannot detect warships — naval combatants do not
+// broadcast AIS, so there is NO military/patrol/hostile class here. Vessels
+// are classified strictly by what the transponder declares. Self-declared
+// "military operations" (35) and "law enforcement" (55) are rare and noisy,
+// so they fold into OTHER rather than implying real military detection.
+//
+// Note: the AIS type code cannot distinguish container vs bulk vs RoRo within
+// CARGO (the second digit encodes hazardous-cargo category, not ship subtype).
+// Finer cargo subtyping would require the ship name or an external registry.
 function aisTypeToClass(t) {
-    if (t >= 70 && t <= 79) return 'CARGO';   // general cargo / container
-    if (t >= 80 && t <= 89) return 'TANKER';  // oil, chemical, LNG, gas tankers
-    if (t >= 60 && t <= 69) return 'PATROL';  // passenger / ferry / cruise
-    if (t === 35 || t === 34) return 'PATROL'; // coast guard / law enforcement
-    if (t >= 31 && t <= 33) return 'PATROL';  // tug / dredger / pilot vessel
-    if (t >= 20 && t <= 29) return 'PATROL';  // wing-in-ground / high speed craft
-    return 'CARGO';                            // bulk, ro-ro, vehicles, etc.
+    if (t == null) return 'OTHER';
+    if (t >= 70 && t <= 79)                       return 'CARGO';     // 70-79 cargo
+    if (t >= 80 && t <= 89)                       return 'TANKER';    // 80-89 tanker
+    if (t >= 60 && t <= 69)                       return 'PASSENGER'; // 60-69 passenger/cruise/ferry
+    if (t >= 40 && t <= 49)                       return 'HSC';       // 40-49 high-speed craft
+    if (t === 30)                                 return 'FISHING';   // 30 fishing
+    if (t === 31 || t === 32 || t === 52)         return 'TUG';       // towing / tug
+    if (t === 33)                                 return 'DREDGER';   // dredging / underwater ops
+    if (t === 50)                                 return 'PILOT';     // pilot vessel
+    if (t === 36)                                 return 'SAILING';   // sailing
+    if (t === 37)                                 return 'PLEASURE';  // pleasure craft
+    if (t === 51 || t === 53 || t === 54 ||
+        t === 58 || t === 59)                     return 'SERVICE';   // SAR / tender / anti-pollution / medical / noncombatant
+    return 'OTHER';                                                   // 20-29 WIG, 35 military, 55 law enf., 90-99 other, unknown
 }
 
 // ── API Key prompt (styled to match VANGUARD HUD) ────────────────────────────

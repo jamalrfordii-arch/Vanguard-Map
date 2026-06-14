@@ -10,6 +10,7 @@ import {
     SPLAT_FX,
     TERRAIN_VSCALE_LAND, TERRAIN_VSCALE_OCEAN,
 } from './config.js';
+import { quality } from './qualityManager.js';
 
 // Module-level references set once via init
 let _demData, _imgW, _imgH, _colorData, _colorW, _colorH;
@@ -606,8 +607,10 @@ export function createHighFidelityPointCloud(scene) {
         colorW:    _colorW,
         colorH:    _colorH,
         MAP_WIDTH, MAP_HEIGHT,
-        LAND_GRID:  SPLAT_LAND_GRID,
-        OCEAN_GRID: SPLAT_OCEAN_GRID,
+        // Splat density scales with the quality tier — fewer points on
+        // low-end / mobile so the cloud stays within memory and fill budget.
+        LAND_GRID:  Math.max(1800, Math.round(SPLAT_LAND_GRID  * quality.gridScale())),
+        OCEAN_GRID: Math.max(800,  Math.round(SPLAT_OCEAN_GRID * quality.gridScale())),
         VSCALE_LAND:  TERRAIN_VSCALE_LAND,
         VSCALE_OCEAN: TERRAIN_VSCALE_OCEAN,
         prngSeed: 12345,  // fixed seed → deterministic splat distribution

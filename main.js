@@ -33,6 +33,7 @@ import {
 } from './uiController.js';
 import { AISManager, lonLatToScene } from './aisManager.js';
 import { simClock } from './simClock.js';
+import { quality } from './qualityManager.js';
 import { SyntheticAISSource, RecordedAISSource, AISRecorder } from './dataSource.js';
 import { initArchivePanel } from './archiveManager.js';
 import { rfIntel, initRFIntelPanel } from './rfIntelManager.js';
@@ -124,6 +125,8 @@ async function start() {
 async function init(mapData) {
     // ── Scene fundamentals ────────────────────────────────────────────────────
     const { scene, clock, camera, renderer, isWebGPU } = await initScene();
+    quality.attachRenderer(renderer);   // adaptive pixel ratio (runtime-tuned)
+    console.info('[Quality] tier:', quality.tier, quality.auto ? '(auto)' : '(manual)');
     const controls = initControls(camera, renderer, state);
     window.controls = controls;   // expose for camera panel + any UI that needs orbit control
     window.camera   = camera;     // expose for layer click-to-inspect (IBTrACS, etc.)
@@ -1339,6 +1342,9 @@ async function init(mapData) {
 
         // Calm starfield drift + twinkle
         starField.update(elapsed, delta);
+
+        // Adaptive quality — nudge pixel ratio from real frame time
+        quality.tick(delta);
 
         // Drive scene lights from solar elevation.
         // Intensities tuned for Three.js r184 physically-correct lighting mode —
