@@ -3,6 +3,10 @@
 Multi-domain 3D tactical intelligence map. Three.js + plain ES modules, no bundler.
 Platform: browser, served locally. Entry point: `index.html` → `main.js`.
 
+> **Read `memory/00-INDEX.md` first.** That folder is persistent memory ("the brain"):
+> doctrine (the maritime OSINT cycle this codebase implements), standing decisions, scar
+> tissue (gotchas), and how Jamal works. Read it at session start; update it at session end.
+
 ---
 
 ## Coordinate system

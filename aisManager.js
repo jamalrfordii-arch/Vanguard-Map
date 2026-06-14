@@ -299,6 +299,11 @@ export class AISManager {
 
             const existing = this.vessels.get(mmsi);
             if (existing) {
+                // IMO number — the key for Equasis dossier lookup. Only static
+                // (type 5) messages carry it; position reports do not.
+                const imo = static_.ImoNumber ?? static_.IMONumber ?? static_.Imo;
+                if (imo && Number(imo) > 0) existing.imo = String(imo);
+
                 const dest = (static_.Destination || '').trim().replace(/[@\x00]+/g, '').trim();
                 if (dest) existing.destination = dest.toUpperCase();
 

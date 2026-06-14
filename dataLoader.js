@@ -1,5 +1,7 @@
 // dataLoader.js — Remote tile fetching, stitching, and GeoJSON ingestion
 
+import { mark } from './bootProfiler.js';   // measurement-only; no behavior change
+
 export function loadRawImage(url) {
     return new Promise((resolve, reject) => {
         const img = new Image();
@@ -10,8 +12,11 @@ export function loadRawImage(url) {
     });
 }
 
-export async function loadAndStitchTiles(urls, gridCols, gridRows) {
+export async function loadAndStitchTiles(urls, gridCols, gridRows, tag = 'tiles') {
+    const tFetch = performance.now();
     const images = await Promise.all(urls.map(loadRawImage));
+    mark(`fetch ${tag}`, { tiles: urls.length });
+    const tStitch = performance.now();
     const tileW = images[0].width;
     const tileH = images[0].height;
     const canvas = document.createElement('canvas');
@@ -25,11 +30,10 @@ export async function loadAndStitchTiles(urls, gridCols, gridRows) {
         ctx.drawImage(images[i], col * tileW, row * tileH);
     }
 
-    return {
-        data: ctx.getImageData(0, 0, canvas.width, canvas.height).data,
-        w: canvas.width,
-        h: canvas.height
-    };
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    // getImageData on a 4096² canvas is a known mobile stall point — time it separately.
+    mark(`stitch+decode ${tag}`, { px: `${canvas.width}x${canvas.height}`, bufMB: +(data.byteLength / 1048576).toFixed(1) });
+    return { data, w: canvas.width, h: canvas.height };
 }
 
 export async function fetchWorldBorders() {
@@ -110,12 +114,14 @@ export async function loadAllData(onProgress) {
 
     if (onProgress) onProgress('DOWNLOADING REAL-WORLD DATA, BATHYMETRY & GEOPOLITICAL BORDERS...');
 
+    mark('loadAllData start', { zoom: ZOOM, gridTilesPerAxis: GRID_SIZE, totalTiles: GRID_SIZE * GRID_SIZE * 2 });
     const [demObj, colorObj, worldBordersGeoJSON, gebcoObj] = await Promise.all([
-        loadAndStitchTiles(demUrls, GRID_SIZE, GRID_SIZE),
-        loadAndStitchTiles(colorUrls, GRID_SIZE, GRID_SIZE),
-        fetchWorldBorders(),
+        loadAndStitchTiles(demUrls, GRID_SIZE, GRID_SIZE, 'DEM'),
+        loadAndStitchTiles(colorUrls, GRID_SIZE, GRID_SIZE, 'satellite'),
+        fetchWorldBorders().then(b => { mark('fetch world borders'); return b; }),
         loadGEBCO()
             .then(obj => {
+                mark('GEBCO load+decode', { bufMB: obj ? +(obj.data.byteLength / 1048576).toFixed(1) : 0 });
                 if (onProgress) onProgress('GEBCO BATHYMETRY LOADED — 8192×4096 OCEAN FLOOR ACTIVE');
                 return obj;
             })

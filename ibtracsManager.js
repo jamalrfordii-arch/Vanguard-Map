@@ -514,6 +514,7 @@ export class IBTrACSManager {
         // index mapping stays valid; everything reads from .recent.
         this._renderableIdx = renderable.map(s => this._tracks.indexOf(s));
 
+        this._buildWindFieldDiscs(renderable);   // affected-area wind-radius discs (R34/R64)
         this._buildTrackParticles(renderable);
         this._buildCycloneSprites(renderable);
         this._buildHeadRings(renderable);

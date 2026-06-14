@@ -29,6 +29,10 @@ desktop.ini
 *.local.js
 .claude/settings.local.json
 
+# ── Equasis dossier cache (local scraped data, not code) ──────────────────────
+equasis-cache.json
+equasis-cache-v2.json
+
 # ── Recordings / captures (can be large; share deliberately, not by default) ──
 captures/
 *.ndjson

@@ -8,6 +8,7 @@ import {
     CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER,
 } from './config.js';
 import { loadAllData } from './dataLoader.js';
+import { mark as bootMark, report as bootReport } from './bootProfiler.js';   // measurement-only
 import {
     initScene, initControls, addLights, initPostProcessing,
     createBoardPlaneAndReticle, onWindowResize
@@ -47,6 +48,7 @@ import { initSelectionRing } from './selectionRing.js';
 import { DayNightManager } from './dayNightManager.js';
 import { createDynamicSeaLevel, updateDynamicWater } from './waterManager.js';
 import { GFSWindManager }  from './gfsWindManager.js';
+import { BeaufortWarningManager } from './beaufortWarningManager.js';
 import { GFSUpperWindManager } from './gfsUpperWindManager.js';
 import { AltitudeDeckManager } from './altitudeDeckManager.js';
 import { SkyManager }    from './skyManager.js';
@@ -104,14 +106,19 @@ function getAltColor(altM) {
 // ── Boot sequence ─────────────────────────────────────────────────────────────
 async function start() {
     try {
+        bootMark('boot start');
         const mapData = await loadAllData(msg => {
             const el = document.getElementById('loading-screen');
             if (el) el.innerHTML +=
                 `<div style="font-size:10px;color:var(--cyan);margin-top:10px;">${msg}</div>`;
         });
+        bootMark('all data loaded');
 
         initTerrainData(mapData);
+        bootMark('terrain data indexed');
         await init(mapData);
+        bootMark('init() complete');
+        bootReport();   // auto-dump the breakdown once the map is up
     } catch (e) {
         console.error('[VANGUARD] Boot failed:', e);
         const el = document.getElementById('loading-screen');
@@ -170,6 +177,7 @@ async function init(mapData) {
 
     // ── Terrain layers ────────────────────────────────────────────────────────
     const splatCloud     = createHighFidelityPointCloud(scene);
+    bootMark('point cloud built', { tier: quality.tier });
     // Expose for live shader tuning from DevTools console:
     //   window.splatCloud.material.uniforms.uBiomeStrength.value = 0.5
     //   window.splatCloud.material.uniforms.uHemiStrength.value  = 0.0
@@ -254,6 +262,14 @@ async function init(mapData) {
     const gfsWindManager = new GFSWindManager(scene);
     window.gfsWindManager = gfsWindManager;
 
+    // Beaufort wind-warning contour layer — shares the GFS wind field.
+    const beaufortWarnings = new BeaufortWarningManager(scene);
+    beaufortWarnings.setWindSource(gfsWindManager);
+    beaufortWarnings.initInteraction(camera, renderer);   // hover + pin cards
+    window.vg1Warnings = beaufortWarnings;
+    // Rebuild periodically while visible (wind refreshes every 6 h; cheap resample)
+    setInterval(() => { if (beaufortWarnings.group.visible) beaufortWarnings.rebuild(); }, 180000);
+
     // ── Upper-air wind (850mb low-level + 250mb jet stream) ──────────────────
     // Gives the scene actual vertical extent. Surface wind sits at Y=8,
     // 850mb at Y=22, jet stream at Y=65. Tilt the camera to see the
@@ -317,10 +333,12 @@ async function init(mapData) {
     // absent, loadNormalMap() resolves to null and both systems fall back to
     // smooth vertex normals — no visual regression, just less fine detail.
     const normalMapTex = await loadNormalMap('./terrain_normals.png');
+    bootMark('normal map loaded (BLOCKING)', { note: '17MB await — candidate to defer' });
 
     // ── Global continent terrain mesh — satellite + geographic 3D character ──
     // Built in continentWorker.js off-thread; fades in at continent zoom
     const continentMesh = new ContinentMesh(scene, mapData, normalMapTex);
+    bootMark('continent mesh dispatched');
     // Phase 2 hybrid: continent mesh stays invisible (its render is disabled
     // in continentMesh.js) but its elevation data is exposed via the height
     // sampler so any entity manager can clamp its Y to real terrain.
@@ -378,6 +396,7 @@ async function init(mapData) {
         obj.userData.country     = vesselData.country;
         obj.userData.destination = vesselData.destination;
         obj.userData.eta         = vesselData.eta;
+        obj.userData.imo         = vesselData.imo;
 
         // Seed position log with first known position
         if (vesselData.latDeg != null && vesselData.lonDeg != null) {
@@ -451,6 +470,7 @@ async function init(mapData) {
         obj.userData.country     = vesselData.country;
         obj.userData.destination  = vesselData.destination;
         obj.userData.eta          = vesselData.eta;
+        obj.userData.imo          = vesselData.imo;
 
         // Plan 04 — throttled position log: record every 30 min, cap at 48 entries (24 h)
         if (vesselData.latDeg != null && vesselData.lonDeg != null) {
@@ -869,6 +889,7 @@ async function init(mapData) {
         const { layer, on } = e.detail;
         switch (layer) {
             case 'weather':      gfsWindManager.setVisible(on);      break;
+            case 'wind-warnings': beaufortWarnings.setVisible(on);  break;
             case 'wind-low':     gfsUpperWindManager.setLowVisible(on); break;
             case 'wind-jet':     gfsUpperWindManager.setJetVisible(on); break;
             case 'sea-state':    gfsWindManager.setWaveVisible(on);  break;  // deprecated, no-op
@@ -1374,6 +1395,7 @@ async function init(mapData) {
             ? gfsWindManager.getStormCells() : [];
         void stormCells;  // kept computed in case future weather visualisations consume it
         gfsWindManager.update(delta);
+        beaufortWarnings.update(elapsed);
         gfsUpperWindManager.update(delta);
         ibtracsManager.update(delta);
         gpsJammingManager.update(delta);

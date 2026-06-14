@@ -316,6 +316,116 @@ function _renderTimeline(positions, accentColor = '#00D4FF') {
 }
 
 // ── Vessel detail panel ───────────────────────────────────────────────────────
+// ── Equasis vessel dossier (owner / manager / flag / detentions) ────────────
+// Fetched on demand from the local proxy (node flight-proxy.js) → /vessel/<imo>.
+const DOSSIER_PROXY = 'http://localhost:8787/vessel';
+
+function renderDossier(r) {
+    if (!r || !r.ok) {
+        const why = r?.error || 'unavailable';
+        let diag = '';
+        if (r?.diag) {
+            const d = r.diag, L = d.login || {};
+            diag = `<div style="color:#4a6b84; font-size:9px; margin-top:4px; line-height:1.5;">
+                login: home ${L.homeStatus ?? '?'} · auth ${L.authStatus ?? '?'} → ${L.authFinal ?? '?'} · authed=${L.authed}<br>
+                search: ${d.searchStatus ?? '?'} → ${d.searchFinal ?? '?'} · ${d.htmlBytes ?? '?'} bytes · looksLikeLoginPage=${d.looksLikeLogin}
+            </div>`;
+        }
+        // Ambiguous name match — offer the candidate IMOs so the analyst can pick one.
+        let cand = '';
+        if (r?.match?.candidates?.length) {
+            cand = `<div style="color:#8aabc4; font-size:9px; margin-top:4px;">candidate IMOs: ${r.match.candidates.join(', ')}<br>
+                <span style="color:#4a6b84;">type one above to confirm</span></div>`;
+        }
+        return `<div style="color:#ff8c4a; font-size:10px;">Dossier: ${why}.<br>
+            <span style="color:#4a6b84;">Need <b>node flight-proxy.js</b> running with Equasis login in .env.</span>${cand}${diag}</div>`;
+    }
+    // ── Success: rich, collapsible dossier ───────────────────────────────────
+    const conf = r.match && r.match.confidence;
+    const confBadge = (conf && conf !== 'high' && conf !== 'exact')
+        ? `<div style="color:#e0a23a; font-size:9px; margin-bottom:4px;">⚠ matched by ${r.match.reason} — verify this is the right ship</div>`
+        : '';
+    const d = r.data;
+    const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    const row = (k, v) => v
+        ? `<div class="sys-stat"><span>${k}</span><span style="color:var(--cyan); text-align:right;">${esc(v)}</span></div>` : '';
+    const section = (title, bodyHtml, open, accent) => bodyHtml
+        ? `<details ${open ? 'open' : ''} style="margin-top:5px;">
+             <summary style="cursor:pointer; font-size:10px; letter-spacing:0.5px; color:${accent || '#8aabc4'}; padding:2px 0;">${title}</summary>
+             <div style="padding:3px 0 2px 4px;">${bodyHtml}</div>
+           </details>` : '';
+
+    const particulars = [
+        row('TYPE', d.type), row('GT', d.grossTonnage), row('DWT', d.dwt),
+        row('BUILT', d.built), row('CALL SIGN', d.callSign), row('MMSI', d.mmsi),
+        row('FLAG', d.flag ? `${esc(d.flag)}${d.flagCode && d.flag !== d.flagCode ? ' (' + d.flagCode + ')' : ''}` : ''),
+        row('STATUS', d.status), row('CLASS', d.class),
+    ].join('');
+
+    const mgmt = (d.management && d.management.length)
+        ? d.management.map(m => `<div class="sys-stat"><span style="color:#8aabc4">${esc(m.role)}</span><span style="color:var(--cyan); text-align:right;">${esc(m.company)}</span></div>`).join('')
+        : [row('OWNER', d.owner), row('MANAGER', d.manager)].join('');
+
+    const detLine = d.detentions > 0
+        ? `<div class="sys-stat"><span style="color:var(--orange)">⚠ DETENTIONS</span><span style="color:var(--orange); font-weight:bold;">${d.detentions} of ${d.inspectionCount || 0}</span></div>`
+        : `<div class="sys-stat"><span>DETENTIONS</span><span style="color:#7ad97a;">none on record</span></div>`;
+    const inspList = (d.inspections && d.inspections.length)
+        ? d.inspections.slice(0, 12).map(i => `<div style="font-size:9px; color:#9bbccc; display:flex; justify-content:space-between; gap:6px; padding:1px 0;">
+              <span>${esc(i.date)} · ${esc(i.authority || i.port || '')}</span>
+              <span style="color:${i.detained ? 'var(--orange)' : '#5aa57a'}; font-weight:${i.detained ? 'bold' : 'normal'};">${i.detained ? 'DETAINED' : 'clear'}</span></div>`).join('')
+        : '';
+    const inspections = detLine + inspList;
+
+    const histRows = (arr, label) => (arr && arr.length)
+        ? `<div style="font-size:9px;color:#8aabc4;margin-top:2px;">${label}</div>` + arr.slice(0, 8).map(n =>
+            `<div style="font-size:9px;color:#9bbccc;display:flex;justify-content:space-between;"><span>${esc(n.value)}</span><span style="color:#4a6b84;">${esc(n.date)}</span></div>`).join('')
+        : '';
+    const histBody = histRows(d.history?.names, 'FORMER NAMES') + histRows(d.history?.flags, 'FORMER FLAGS');
+
+    return `
+        ${confBadge}
+        ${section('PARTICULARS', particulars, true)}
+        ${section('MANAGEMENT &amp; OWNERSHIP', mgmt, true)}
+        ${section(`INSPECTIONS${d.inspectionCount ? ' (' + d.inspectionCount + ')' : ''}`, inspections, d.detentions > 0, d.detentions > 0 ? 'var(--orange)' : '#8aabc4')}
+        ${section('SHIP HISTORY', histBody, false)}
+        <div style="color:#4a6b84; font-size:9px; margin-top:5px;">Equasis${r.cached ? ' · cached' : ''} · IMO ${esc(d.imo)}</div>`;
+}
+
+function wireDossierButton(ud, isNonVessel) {
+    const section = document.getElementById('vd-dossier-section');
+    const btn   = document.getElementById('vd-dossier-btn');
+    const input = document.getElementById('vd-dossier-imo');
+    const body  = document.getElementById('vd-dossier-body');
+    if (!section || !btn || !input) return;
+    // Only vessels have an Equasis dossier — hide for aircraft/satellites.
+    section.style.display = isNonVessel ? 'none' : 'block';
+    body.style.display = 'none'; body.innerHTML = '';
+    // IMO box is now an optional override — by default we resolve from the
+    // vessel's name automatically, so no typing is needed.
+    input.value = ud.imo || '';
+    input.placeholder = 'IMO (optional)';
+    const name = ud.displayName || ud.id || '';
+
+    const run = () => {
+        const imo = String(input.value || '').replace(/\D/g, '');
+        if (imo.length < 6 && !name) { body.style.display = 'block';
+            body.innerHTML = '<div style="color:#ff8c4a; font-size:10px;">no name or IMO to look up</div>'; return; }
+        body.style.display = 'block';
+        body.innerHTML = '<div style="color:#8aabc4; font-size:10px;">querying Equasis…</div>';
+        const p = new URLSearchParams();
+        if (imo.length >= 6) p.set('imo', imo);
+        if (name)            p.set('name', name);
+        if (ud.country)      p.set('flag', ud.country);
+        fetch(DOSSIER_PROXY + '?' + p.toString())
+            .then(res => res.json())
+            .then(r => { body.innerHTML = renderDossier(r); })
+            .catch(() => { body.innerHTML = renderDossier({ ok: false, error: 'proxy offline' }); });
+    };
+    btn.disabled = false;
+    btn.onclick = run;
+    input.onkeydown = (e) => { if (e.key === 'Enter') run(); };
+}
+
 export function showVesselDetail(ship, camera, controls, stateRef) {
     _detailShip = ship;
     const ud    = ship.userData;
@@ -338,6 +448,8 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
     document.getElementById('vd-country').innerText  = ud.country   || '—';
     document.getElementById('vd-destination').innerText = ud.destination || '—';
     document.getElementById('vd-eta').innerText      = ud.eta       || '—';
+
+    wireDossierButton(ud, isAircraft || isSatellite);
 
     const altRow = document.getElementById('vd-altitude-row');
     if (altRow) altRow.style.display = (isAircraft || isSatellite) ? '' : 'none';

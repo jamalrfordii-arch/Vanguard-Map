@@ -12,6 +12,20 @@
 const http  = require('http');
 const https = require('https');
 const url   = require('url');
+const equasis = require('./equasis-lookup.js');   // vessel dossier (Equasis)
+
+// Load .env (EQUASIS_USER / EQUASIS_PASS, ANTHROPIC_API_KEY) if present —
+// no dependency; tiny KEY=VALUE parser.
+try {
+    const fs = require('fs'), path = require('path');
+    const envPath = path.join(__dirname, '.env');
+    if (fs.existsSync(envPath)) {
+        for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+            const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
+            if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+        }
+    }
+} catch (_) {}
 
 // ── Anthropic Claude API config ───────────────────────────────────────────────
 // Set your key: export ANTHROPIC_API_KEY=sk-ant-...
@@ -176,6 +190,22 @@ const server = http.createServer((req, res) => {
     if (pathname === '/flights') {
         console.log('[proxy] → airplanes.live (cached)');
         proxyFlightsCached(res);
+        return;
+    }
+
+    // ── /vessel — Equasis dossier (by IMO, or auto-resolved from name) ───────
+    //   /vessel/<imo>  or  /vessel?imo=...  or  /vessel?name=...&flag=...
+    if (pathname === '/vessel' || pathname.startsWith('/vessel/')) {
+        const q = parsed.query;
+        const imo = q.imo || pathname.split('/')[2] || '';
+        console.log(`[proxy] → Equasis ${imo ? 'IMO=' + imo : 'name=' + (q.name || '')}`);
+        equasis.lookup({ imo, name: q.name, flag: q.flag }).then(r => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(r));
+        }).catch(e => {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+        });
         return;
     }
 

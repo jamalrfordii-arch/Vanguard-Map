@@ -1,28 +1,26 @@
-# Innovator Agent Error — 2026-06-13
+# Vanguard1 Research Innovator — Error Report
 
-**Scheduled run:** Saturday, June 13, 2026  
-**Status:** ❌ Failed — ANTHROPIC_API_KEY not set
+**Date:** 2026-06-14  
+**Scheduled Task:** vanguard-sunday-deep-research  
 
-## What happened
+## Error: ANTHROPIC_API_KEY Not Set
 
-The `research-innovator.js` agent requires an `ANTHROPIC_API_KEY` environment variable to call the Claude API. The variable was not present in the execution environment when the scheduled task ran.
+The weekly deep-research agent (`agents/research-innovator.js`) could not run because the `ANTHROPIC_API_KEY` environment variable is empty.
 
-## How to fix
+The `.env` file at `C:\Users\jamal\Desktop\Vanguard1\.env` contains a placeholder for the key but no value has been filled in:
 
-Set the `ANTHROPIC_API_KEY` environment variable in your Windows user environment:
-
-1. Open **System Properties** → **Advanced** → **Environment Variables**
-2. Under **User variables**, click **New**
-3. Variable name: `ANTHROPIC_API_KEY`
-4. Variable value: your Anthropic API key (from https://console.anthropic.com/settings/keys)
-5. Click OK and restart any terminals or scheduled task runners
-
-Alternatively, create a `.env` file in `C:\Users\jamal\Desktop\Vanguard1\agents\` with:
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=
 ```
-and update `research-innovator.js` to load it with `dotenv` (add `import 'dotenv/config'` at the top and run `npm install dotenv` in the agents directory).
 
-## Next run
+## How to Fix
 
-The agent will retry on its next scheduled run (Sunday at 11pm). Once the API key is set, the full innovation report and scaffolded code will be generated automatically.
+1. Go to https://console.anthropic.com/account/keys and copy your API key.
+2. Open `C:\Users\jamal\Desktop\Vanguard1\.env` and update the line to:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...your-key-here...
+   ```
+3. The next Sunday scheduled run will pick it up automatically, or you can trigger a manual run:
+   ```
+   cd C:\Users\jamal\Desktop\Vanguard1\agents && node research-innovator.js
+   ```

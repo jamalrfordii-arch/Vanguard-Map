@@ -2576,6 +2576,10 @@
                 Surface Wind (10m)
                 <span class="lp-dot" id="dot-weather"></span>
             </div>
+            <div class="lp-row" data-layer="wind-warnings">
+                Storm Warnings (Beaufort)
+                <span class="lp-dot" id="dot-wind-warnings"></span>
+            </div>
             <div class="lp-row" data-layer="wind-low">
                 Low-Level Wind (850mb)
                 <span class="lp-dot" id="dot-wind-low"></span>
@@ -2756,6 +2760,19 @@
             <div id="vd-arc-row" style="display:none; margin-top:10px;">
                 <button id="vd-arc-toggle" class="toggle-btn" style="margin-top:0; width:100%;">⌇ SHOW PASS ARC</button>
             </div>
+
+            <!-- Equasis vessel dossier (ownership, registry, inspections) -->
+            <div id="vd-dossier-section" style="margin-top:10px; border-top:1px solid rgba(64,196,255,0.2); padding-top:8px;">
+                <div style="display:flex; gap:5px;">
+                    <input id="vd-dossier-imo" placeholder="IMO #" autocomplete="off"
+                        style="flex:1; min-width:0; background:rgba(0,0,0,0.5); border:1px solid rgba(64,196,255,0.4);
+                        color:#cfe3f1; padding:6px 8px; font-family:'Courier New',monospace; font-size:11px;
+                        letter-spacing:1px; outline:none;" />
+                    <button id="vd-dossier-btn" class="toggle-btn" style="margin:0; white-space:nowrap;">⚓ DOSSIER</button>
+                </div>
+                <div id="vd-dossier-body" style="display:none; margin-top:6px;"></div>
+            </div>
+
             <button id="vd-track" class="toggle-btn" style="margin-top:8px;">LOCK TRACK</button>
 
             <!-- ★ Add to Watchlist — shown when NOT watchlisted -->
