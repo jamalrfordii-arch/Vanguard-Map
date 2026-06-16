@@ -1,16 +1,13 @@
-# Graphics Enhancer — Run Failed
+# Graphics Enhancer — Run Error
 
-**Date:** 2026-06-12 (scheduled run: vanguard-graphics-enhancer)
+**Date:** 2026-06-15
+**Task:** Scheduled run of vanguard-graphics-enhancer
 
 ## Error
+`ANTHROPIC_API_KEY` environment variable was not set in the execution environment.
+The agent at `Vanguard1/agents/graphics-enhancer.js` requires this key to call the Claude API
+and was not run as a result.
 
-`ANTHROPIC_API_KEY` is not set in the environment, so `agents/graphics-enhancer.js` could not run. The agent was not executed; no report was generated for today.
-
-Checked:
-
-- Environment variable `ANTHROPIC_API_KEY` — not set
-- No `.env` file in `Vanguard1/agents/` (script reads the key directly from `process.env`, no dotenv)
-
-## Note
-
-This is the third consecutive failed run for this reason (see `ERROR_2026-06-05.md`, `ERROR_2026-06-06.md`). The scheduled task's shell environment does not have the key available. To fix, make the key available to the sandboxed shell environment used by the scheduled task (e.g., add a `.env` + dotenv loading to the agent, or configure the key where the task runs).
+## Next steps
+Set `ANTHROPIC_API_KEY` in the environment used to run scheduled tasks, then re-run the
+`vanguard-graphics-enhancer` scheduled task (or run manually: `cd Vanguard1/agents && node graphics-enhancer.js`).

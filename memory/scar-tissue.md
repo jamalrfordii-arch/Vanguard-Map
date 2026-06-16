@@ -29,6 +29,14 @@
 - **Mercator, not linear.** Vessel/flight coords use `lonLatToScene()` (Mercator). Terrain workers use
   linear XZ — the high-latitude mismatch is intentional. Don't "fix" it.
 
+- **The two terrain assets are in DIFFERENT projections — sample accordingly.** DEM + satellite tiles
+  (`elevation-tiles-prod/terrarium`, ArcGIS World_Imagery) are **Web Mercator** (4096² square); the
+  GEBCO bathymetry PNG is **equirectangular** (8192×4096, 2:1, linear in latitude). Scene z is
+  Web-Mercator (matches vessels). So linear `v=(z/MAP_HEIGHT+0.5)·H` is CORRECT for the Mercator DEM
+  but WRONG for GEBCO. `getGEBCOElevation` now converts z→lat (inverse Mercator)→equirectangular row.
+  Bug fixed 2026-06-14 (was ≈22° latitude error at 60° → the continent/ocean-floor "black gap" seam a
+  reviewer caught). If you add any new equirectangular asset, reproject the same way.
+
 - **simClock, not wall clock.** Anything time-of-world must call `simClock.now()`/`.date()`, never
   `Date.now()`/`new Date()`. Live mode = wall clock by default but supports pause/scrub/rate.
 

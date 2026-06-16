@@ -112,10 +112,12 @@ export const SIM = {
 export const INVARIANTS = {
     HARD_REJECT_KTS:      120,  // implied speed above this → report rejected (teleport)
     MAX_SPEED_KTS: {            // per entity class — above these → flag
-        CARGO:   35,
-        TANKER:  30,
-        PATROL:  70,            // class includes HSC/ferries (see aisTypeToClass)
-        DEFAULT: 50,
+        CARGO:     35,
+        TANKER:    30,
+        PASSENGER: 45,
+        HSC:       60,          // high-speed craft / fast ferries
+        FISHING:   25,
+        DEFAULT:   50,
     },
     SOG_MISMATCH_FACTOR:  3,    // implied speed > reported SOG × this → spoof flag
     SOG_MISMATCH_MIN_KTS: 15,   // ignore mismatches below this implied speed (noise)

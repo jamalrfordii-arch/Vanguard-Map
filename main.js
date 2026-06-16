@@ -38,7 +38,6 @@ import { quality } from './qualityManager.js';
 import { SyntheticAISSource, RecordedAISSource, AISRecorder } from './dataSource.js';
 import { initArchivePanel } from './archiveManager.js';
 import { rfIntel, initRFIntelPanel } from './rfIntelManager.js';
-import { RFEmergencyBeaconManager } from './rfEmergencyBeaconManager.js';
 import { initVesselTab } from './vesselTab.js';
 import { initWatchlist } from './watchlist.js';
 import { initAlertsManager } from './alertsManager.js';
@@ -224,11 +223,6 @@ async function init(mapData) {
     const portManager      = new PortManager(scene);
     const portMarkersGroup = portManager.group;   // backward-compat ref for setupUI
     window.portManager     = portManager;         // console access
-
-    // ── Simulated background entities ─────────────────────────────────────────
-    // Submarine trenches disabled — not real live data.
-    // Aerospace routes also removed — real flight data comes from FlightManager API.
-    // createSubmarineTrenches(scene, laneGroup, window.aisShips);
 
     // ── Day / night overlay ───────────────────────────────────────────────────
     const dayNightManager = new DayNightManager(scene);
@@ -504,6 +498,12 @@ async function init(mapData) {
             obj.userData.shadowSprite.material.dispose();
             obj.userData.shadowSprite = null;
         }
+        // Remove type icon sibling (shared texture is cached — don't dispose map)
+        if (obj.userData.typeIcon) {
+            laneGroup.remove(obj.userData.typeIcon);
+            obj.userData.typeIcon.material.dispose();
+            obj.userData.typeIcon = null;
+        }
         // Remove vessel dot
         if (obj.userData.vesselDot) {
             laneGroup.remove(obj.userData.vesselDot);
@@ -740,9 +740,7 @@ async function init(mapData) {
     const aisRecorder = new AISRecorder();
 
     // ── RF Intelligence domain (Phase 1) ──────────────────────────────────────
-    // Coordinator + feed panel + distress beacon detector. Beacons inspect every
-    // raw message, so onRawMessage multiplexes recorder tap + RF inspection.
-    const rfBeacons = new RFEmergencyBeaconManager(scene);
+    // RF INTEL feed panel. (Distress-beacon visuals + detector removed.)
     initRFIntelPanel({
         flyTo: (lat, lon) => {
             const p = lonLatToScene(lon, lat);
@@ -752,7 +750,7 @@ async function init(mapData) {
         }
     });
     const _recTap = aisRecorder.tap();
-    aisManager.onRawMessage = (msg) => { _recTap(msg); rfBeacons.inspect(msg); };
+    aisManager.onRawMessage = (msg) => { _recTap(msg); };
 
     window.vg1Scenario = {
         async load(urlOrObj) {
@@ -1224,8 +1222,6 @@ async function init(mapData) {
             return 'OPEN OCEAN';
         }
 
-        const MILITARY_SIT = new Set(['HOSTILE','FIGHTER','AWACS','DRONE','SUBMARINE']);
-
         window.gatherSceneContext = function() {
             camera.updateMatrixWorld();
             _sitProjScreen.multiplyMatrices(
@@ -1236,8 +1232,6 @@ async function init(mapData) {
             const classCounts = {};
             let totalVisible  = 0;
             let darkCount     = 0;
-            let hostileCount  = 0;
-            let militaryCount = 0;
 
             const ships = window.aisShips;
             for (let i = 0; i < ships.length; i++) {
@@ -1247,8 +1241,6 @@ async function init(mapData) {
                 const cls = s.userData?.class ?? 'UNKNOWN';
                 classCounts[cls] = (classCounts[cls] || 0) + 1;
                 if (s.userData?.isDark === true)      darkCount++;
-                if (cls === 'HOSTILE')                hostileCount++;
-                if (MILITARY_SIT.has(cls))            militaryCount++;
             }
 
             // Derive region from camera look-at target
@@ -1256,10 +1248,11 @@ async function init(mapData) {
             const region = _detectRegion(lon, lat);
 
             // Same threat ladder as _tickDynamicStatus
+            // Threat keys off AIS-dark vessels — the civilian anomaly signal.
             let threatLevel = 'LOW';
-            if (militaryCount  >= 1) threatLevel = 'MODERATE';
-            if (darkCount      >= 2) threatLevel = 'ELEVATED';
-            if (hostileCount   >= 3) threatLevel = 'CRITICAL';
+            if (darkCount      >= 1) threatLevel = 'MODERATE';
+            if (darkCount      >= 3) threatLevel = 'ELEVATED';
+            if (darkCount      >= 6) threatLevel = 'CRITICAL';
 
             return {
                 region,
@@ -1267,8 +1260,6 @@ async function init(mapData) {
                 totalAll:      ships.length,
                 classCounts,
                 darkCount,
-                hostileCount,
-                militaryCount,
                 threatLevel,
                 nearChokepoint: aiCopilot._nearChokepoint(lat, lon),
                 cameraLat:     lat,
@@ -1357,9 +1348,6 @@ async function init(mapData) {
         }
         // Ridge pulse animation clock (seconds)
         if (splatUniforms.uTime) splatUniforms.uTime.value = elapsed;
-
-        // RF distress beacons — expanding-ring animation + stale cleanup
-        rfBeacons.tick(elapsed, camera.quaternion);
 
         // Calm starfield drift + twinkle
         starField.update(elapsed, delta);
@@ -1470,7 +1458,7 @@ async function init(mapData) {
 
             // Legacy line trail (simulated entities)
             ship.userData.history.unshift(ship.position.clone());
-            const maxHist = ship.userData.class === 'FIGHTER' ? 40 : 20;
+            const maxHist = 20;
             if (ship.userData.history.length > maxHist) ship.userData.history.pop();
             if (ship.userData.history.length > 1 && ship.userData.trail) {
                 // In-place buffer update — avoids the Three.js r184 warning
@@ -1492,38 +1480,12 @@ async function init(mapData) {
             // Push into GPU trail ring-buffer
             trailManager.pushPosition(ship, ship.position.x, ship.position.y, ship.position.z);
 
-            // AWACS radar dish spin
-            const radar = ship.getObjectByName('awacs_radar');
-            if (radar) radar.rotation.y += 0.05;
-
             // Strobe blink
             const strobe = ship.getObjectByName('strobe_light');
             if (strobe) {
                 strobe.visible = (Math.floor(elapsed * 4 + ship.userData.progress * 100) % 2 === 0);
             }
 
-            // Submarine depth tether
-            if (ship.userData.class === 'SUBMARINE') {
-                if (!ship.userData.tether) {
-                    const tGeo = new THREE.BufferGeometry().setFromPoints([
-                        new THREE.Vector3(), new THREE.Vector3()
-                    ]);
-                    const tMat = new THREE.LineDashedMaterial({
-                        color: 0x00ff88, dashSize: 0.5, gapSize: 0.5,
-                        transparent: true, opacity: 0.6,
-                    });
-                    ship.userData.tether = new THREE.Line(tGeo, tMat);
-                    scene.add(ship.userData.tether);
-                }
-                const p    = ship.position;
-                const dist = Math.sqrt((p.x / MAP_WIDTH) ** 2 + (p.z / MAP_HEIGHT) ** 2);
-                const surfY = -Math.pow(dist, 2) * 20.0;
-                const tPos  = ship.userData.tether.geometry.attributes.position;
-                tPos.setXYZ(0, p.x, p.y, p.z);
-                tPos.setXYZ(1, p.x, surfY, p.z);
-                tPos.needsUpdate = true;
-                ship.userData.tether.computeLineDistances();
-            }
         });
 
         // ── Dark-vessel halo blink ────────────────────────────────────────────
@@ -1627,6 +1589,18 @@ async function init(mapData) {
                     if (showShadow) {
                         shadow.position.set(ship.position.x, 0.15, ship.position.z);
                     }
+                }
+
+                // Type icon — class silhouette, readable at map/medium zoom.
+                // Hidden up close (the 3D hull takes over), when clustered far
+                // (y>150), when class-filtered, or when dark (the red marker says it).
+                const tIcon = ship.userData.typeIcon;
+                if (tIcon) {
+                    const showIcon = ship.visible && !ship.userData._classHidden
+                        && !ship.userData.isDark
+                        && camera.position.y > 28 && camera.position.y <= 150;
+                    tIcon.visible = showIcon;
+                    if (showIcon) tIcon.position.set(ship.position.x, 1.8, ship.position.z);
                 }
 
                 const ring = ship.userData.anomalyRing;

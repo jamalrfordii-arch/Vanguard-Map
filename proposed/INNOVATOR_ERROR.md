@@ -1,26 +1,31 @@
-# Vanguard1 Research Innovator — Error Report
+# Vanguard Research Innovator — Error Report
 
-**Date:** 2026-06-14  
-**Scheduled Task:** vanguard-sunday-deep-research  
+**Date:** 2026-06-15  
+**Task:** Weekly automated run of `research-innovator.js --fast`
 
-## Error: ANTHROPIC_API_KEY Not Set
+**Note:** This is the second consecutive week this has failed for the same reason (previous failure: 2026-06-14).
 
-The weekly deep-research agent (`agents/research-innovator.js`) could not run because the `ANTHROPIC_API_KEY` environment variable is empty.
+## Error: Missing ANTHROPIC_API_KEY
 
-The `.env` file at `C:\Users\jamal\Desktop\Vanguard1\.env` contains a placeholder for the key but no value has been filled in:
+The agent could not run because `ANTHROPIC_API_KEY` is not set.
 
-```
-ANTHROPIC_API_KEY=
-```
+Checked:
+- Shell environment: key not present
+- `Vanguard1/.env`: key exists but is **blank** (`ANTHROPIC_API_KEY=`)
 
-## How to Fix
+## How to fix
 
-1. Go to https://console.anthropic.com/account/keys and copy your API key.
-2. Open `C:\Users\jamal\Desktop\Vanguard1\.env` and update the line to:
+1. Open `C:\Users\jamal\Desktop\Vanguard1\.env`
+2. Add your Anthropic API key:
    ```
    ANTHROPIC_API_KEY=sk-ant-...your-key-here...
    ```
-3. The next Sunday scheduled run will pick it up automatically, or you can trigger a manual run:
-   ```
-   cd C:\Users\jamal\Desktop\Vanguard1\agents && node research-innovator.js
-   ```
+3. Save the file — it is gitignored and won't be committed.
+
+Once the key is set, the agent can be re-run manually:
+```
+cd C:\Users\jamal\Desktop\Vanguard1\agents
+node research-innovator.js --fast
+```
+
+Or it will run automatically next Sunday evening via the scheduled task.

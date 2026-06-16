@@ -13,8 +13,26 @@ this folder holds *doctrine, decisions, scar tissue, and working relationship*.
 4. `working-with-jamal.md` — preferences, cadence, how we collaborate.
 5. `performance-load.md` — the load-time-vs-capability gap and the fix surface (open work).
 
-## Maintenance
-- Keep entries short and dated. Prune duplicates. If a fact goes stale, fix it in place.
-- New durable lesson → add to the right file AND note it here if it changes the read order.
+## Charter — what may enter the brain (read before writing here)
+
+Prevention beats cleanup. A small, accurate brain is the goal; a bloated or stale one misleads.
+The bar to get *in* is high on purpose.
+
+**Admit:** durable decisions (with the reason), hard-won gotchas / scar tissue, doctrine, and stable
+preferences — facts that will still be true and useful next session.
+
+**Reject:** transient state ("currently debugging X"), anything cheaply re-derivable from the code,
+speculative ideas not yet decided, and duplicates of something already recorded.
+
+**Rules of hygiene:**
+1. Every entry is dated.
+2. One fact lives in ONE place.
+3. On contradiction, **fix the existing entry in place — never append a rival version.**
+   (The usual rot isn't wrong facts; it's the same fact drifting into three versions.)
+4. Keep each file scannable. If a file stops being read at session start, it's failed — cut it.
+5. New durable lesson → add to the right file; update this index only if the read order changes.
+
+**Pruning:** trigger by condition, not calendar — when a file grows unwieldy or every few sessions,
+run a consolidation pass that *proposes* merges for Jamal to glance at. Never delete silently.
 
 _Last updated: 2026-06-14_

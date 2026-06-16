@@ -51,8 +51,6 @@ const STATE_COLOR = {
     closure: '#ff1744',
 };
 
-const MILITARY_CLASSES = new Set(['HOSTILE', 'FIGHTER', 'AWACS', 'DRONE', 'SUBMARINE']);
-
 // ── Mercator lon/lat → scene x/z ─────────────────────────────────────────────
 function _lonLatToScene(lon, lat) {
     const x      = (lon / 180.0) * (MAP_WIDTH  / 2.0);
@@ -63,8 +61,8 @@ function _lonLatToScene(lon, lat) {
 }
 
 // ── State classifier ──────────────────────────────────────────────────────────
-function _classifyState(count, darkCount, hostileCount, stoppedCount) {
-    if (stoppedCount > 0 || hostileCount > 0 || darkCount >= 2 || count >= CLOSURE_COUNT) {
+function _classifyState(count, darkCount, stoppedCount) {
+    if (stoppedCount > 0 || darkCount >= 2 || count >= CLOSURE_COUNT) {
         return 'closure';
     }
     if (darkCount >= 1 || count >= ALERT_COUNT) {
@@ -370,7 +368,7 @@ export class ChokepointManager {
     tick(delta, elapsed, aisShips) {
         this._landmarks.forEach(lm => {
             // ── Classify vessels in this chokepoint ──────────────────────────────
-            let count = 0, darkCount = 0, hostileCount = 0, stoppedCount = 0;
+            let count = 0, darkCount = 0, stoppedCount = 0;
 
             for (let i = 0, n = aisShips.length; i < n; i++) {
                 const ship = aisShips[i];
@@ -382,11 +380,10 @@ export class ChokepointManager {
 
                 count++;
                 if (ship.userData.isDark)                                          darkCount++;
-                if (MILITARY_CLASSES.has(ship.userData.class ?? ''))              hostileCount++;
                 if ((ship.userData.speedKts ?? 99) <= STOPPED_KTS && !ship.userData.isDark) stoppedCount++;
             }
 
-            const state    = _classifyState(count, darkCount, hostileCount, stoppedCount);
+            const state    = _classifyState(count, darkCount, stoppedCount);
             const colorStr = STATE_COLOR[state];
             const active   = state !== 'dormant';
 

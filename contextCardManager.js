@@ -10,9 +10,6 @@
 //
 // Trigger map (where each key is fired):
 //   DARK_VESSEL       → onClick when userData.isDark === true
-//   HOSTILE           → onClick when userData.class === 'HOSTILE'
-//   FIGHTER           → onClick when class is FIGHTER / AWACS / DRONE
-//   SUBMARINE         → onClick when userData.class === 'SUBMARINE'
 //   ORBITAL           → onClick when userData.class === 'ORBITAL'
 //   CLUSTER           → main.js animate loop, first frame clusters are visible
 //   ALERT_ZONE        → onClick zone placement in uiController.js
@@ -48,37 +45,6 @@ The system will alert if it reappears.`,
 <br><br>
 The red marker hovers above the beacon's reported position. This is a life-safety signal — it is always shown, regardless of which layers are active. Coverage is partial: only beacons broadcasting over AIS are detected here, not the full Cospas-Sarsat satellite network.`,
         accent: '#ff2a4d',
-    },
-
-    HOSTILE: {
-        icon:  '⬡',
-        title: 'Military or law enforcement vessel',
-        body:  `This vessel has an AIS type code of 35 (military) or 34 (law enforcement) — coast guard, navy patrol, or port authority craft. The red classification does <em>not</em> mean adversarial by default; it flags a vessel operating under a different legal framework than commercial shipping.
-<br><br>
-Watch for unusual course changes, clustering near civilian vessels, or proximity to chokepoints for operational significance.`,
-        accent: '#b02030',
-    },
-
-    FIGHTER: {
-        icon:  '✈',
-        title: 'Military aircraft in the area',
-        body:  `This track represents a military fast jet (FIGHTER), an Airborne Warning and Control aircraft (AWACS), or an unmanned drone (UAV). These are either simulated scenario entities or derived from open transponder data where available.
-<br><br>
-<strong>FIGHTER</strong> — air superiority or strike role, high speed and altitude.<br>
-<strong>AWACS</strong> — slow circular orbit is diagnostic; it is conducting wide-area radar surveillance of the region below it.<br>
-<strong>DRONE</strong> — lower and slower than manned aircraft; could be surveillance or strike-capable.`,
-        accent: '#a04010',
-    },
-
-    SUBMARINE: {
-        icon:  '▼',
-        title: 'Submarine track',
-        body:  `Submarines do not transmit AIS — they operate silently by design. This track is derived from scenario data or intelligence estimates, not a live broadcast.
-<br><br>
-The dashed vertical tether line connects the submarine's estimated position to the surface directly above it, giving you a visual sense of depth. The track history shows the most recent estimated course.
-<br><br>
-Treat submarine positions as approximate. Actual location may differ.`,
-        accent: '#207060',
     },
 
     ORBITAL: {

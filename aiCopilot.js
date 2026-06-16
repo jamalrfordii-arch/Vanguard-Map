@@ -149,7 +149,6 @@ export class AICopilot {
         let score = 50;
         if (chokepoint)              score += 30;
         if (cable)                   score += 25;
-        if (vessel.class === 'HOSTILE') score += 20;
         if ((vessel.speedKts || 0) > 12) score += 10; // fast vessel going dark is notable
 
         const raw = [
@@ -546,7 +545,7 @@ export class AICopilot {
         lines.push(`REGION: ${ctx.region || 'UNKNOWN'}`);
         lines.push(`TRACKING: ${ctx.totalVisible} of ${ctx.totalAll} entities in current view`);
 
-        const ORDER = ['CARGO','PATROL','HOSTILE','FIGHTER','AWACS','DRONE','SUBMARINE','ORBITAL'];
+        const ORDER = ['CARGO','TANKER','PASSENGER','HSC','FISHING','TUG','DREDGER','PILOT','SAILING','PLEASURE','SERVICE','OTHER','ORBITAL'];
         const breakdown = ORDER
             .filter(cls => (ctx.classCounts?.[cls] || 0) > 0)
             .map(cls => `${ctx.classCounts[cls]}× ${cls}`)
@@ -555,9 +554,6 @@ export class AICopilot {
 
         if (ctx.darkCount > 0) {
             lines.push(`⚠ ${ctx.darkCount} DARK — transponder${ctx.darkCount > 1 ? 's' : ''} silent, last known positions shown`);
-        }
-        if (ctx.hostileCount > 0) {
-            lines.push(`⬡ ${ctx.hostileCount} MILITARY / LAW ENFORCEMENT in current view`);
         }
         if (ctx.nearChokepoint) {
             lines.push(`CHOKEPOINT: ${ctx.nearChokepoint} — monitor for vessel anomalies`);

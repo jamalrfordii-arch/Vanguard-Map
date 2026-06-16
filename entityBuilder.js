@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { MAP_WIDTH, MAP_HEIGHT, prng, AIRCRAFT_TIME_SCALE } from './config.js';
 import { getTrueElevation } from './terrainBuilder.js';
+import { vesselIconTexture, VESSEL_ICON_ASPECT } from './vesselIcons.js';
 
 // ── Shared ground-shadow sprite texture ───────────────────────────────────────
 // Created once at module load; shared across every vessel shadow instance.
@@ -26,166 +27,169 @@ function _getVesselShadowTex() {
 }
 
 // --- SHARED MATERIALS ---
+const M = (color, opts = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.7, ...opts });
 const realMaterials = {
-    hullCargo:    new THREE.MeshStandardMaterial({ color: 0xa02020, roughness: 0.7 }),
-    white:        new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.5 }),
-    grey:         new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.7 }),
-    navyGrey:     new THREE.MeshStandardMaterial({ color: 0x607d8b, roughness: 0.6, metalness: 0.3 }),
-    subBlack:     new THREE.MeshStandardMaterial({ color: 0x212121, roughness: 0.8, metalness: 0.2 }),
-    hostileGreen: new THREE.MeshStandardMaterial({ color: 0x4caf50, roughness: 0.8, metalness: 0.2 }),
-    hostileDark:  new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.8 }),
-    aeroGrey:     new THREE.MeshStandardMaterial({ color: 0xb0bec5, roughness: 0.4, metalness: 0.6 }),
-    aeroDark:     new THREE.MeshStandardMaterial({ color: 0x455a64, roughness: 0.6, metalness: 0.4 })
+    white:    M(0xeeeeee, { roughness: 0.5 }),
+    grey:     M(0x555555),
+    darkGrey: M(0x37474f),
+    glass:    M(0x99bbdd, { roughness: 0.1, metalness: 0.7, transparent: true, opacity: 0.7 }),
+    // Per-class hull tints (muted — the bright marker/trail colors live in SHIP_CLASSES).
+    hullCARGO:     M(0x9c4747),
+    hullTANKER:    M(0x9c6b1f),
+    hullPASSENGER: M(0xdedede, { roughness: 0.4 }),
+    hullHSC:       M(0x1f7d8c, { metalness: 0.3 }),
+    hullFISHING:   M(0x2f6b3a),
+    hullTUG:       M(0x6a3f7a),
+    hullDREDGER:   M(0x6d5a4b),
+    hullPILOT:     M(0xb59a1f),
+    hullSAILING:   M(0x1f6b62),
+    hullPLEASURE:  M(0xf5f5f5, { roughness: 0.3 }),
+    hullSERVICE:   M(0x546e7a),
+    hullOTHER:     M(0x607d8b),
+};
+
+// --- GEOMETRY HELPERS (shared by the civilian shape builders) ---
+const box = (w, h, l, mat, x = 0, y = 0, z = 0) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), mat); m.position.set(x, y, z); return m;
+};
+const cyl = (rt, rb, h, mat, x = 0, y = 0, z = 0) => {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, 12), mat); m.position.set(x, y, z); return m;
+};
+// A hull box with a tapered bow (4-sided cone) at +Z. Returns an array of meshes.
+const hullWithBow = (w, h, l, mat) => {
+    const bow = new THREE.Mesh(new THREE.CylinderGeometry(0, Math.SQRT1_2 * w, w, 4), mat);
+    bow.rotation.x = -Math.PI / 2; bow.rotation.y = Math.PI / 4; bow.position.set(0, 0, l / 2 + w / 2);
+    return [box(w, h, l, mat), bow];
 };
 
 // --- SHAPE BUILDERS ---
 const shapeBuilders = {
+    // Container ship — long hull, aft bridge, stacked container blocks.
     CARGO: () => {
-        const group = new THREE.Group();
-        const hull   = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.8, 3.5), realMaterials.hullCargo);
-        const bridge = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.0, 0.6), realMaterials.white);
-        bridge.position.set(0, 0.9, -1.2);
-        const stack1 = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.6, 0.8), realMaterials.grey);
-        stack1.position.set(0, 0.7, 0.0);
-        const stack2 = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.6, 0.8), realMaterials.grey);
-        stack2.position.set(0, 0.7, 1.0);
-        group.add(hull, bridge, stack1, stack2);
-        return group;
+        const g = new THREE.Group();
+        g.add(...hullWithBow(1.2, 0.8, 3.4, realMaterials.hullCARGO));
+        g.add(box(1.0, 0.9, 0.6, realMaterials.white, 0, 0.85, -1.3));
+        for (let i = 0; i < 4; i++)
+            g.add(box(1.05, 0.5, 0.6, i % 2 ? realMaterials.grey : realMaterials.darkGrey, 0, 0.55, 0.9 - i * 0.62));
+        return g;
     },
-    SUBMARINE: () => {
-        const group = new THREE.Group();
-        const hull  = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 4.0, 12), realMaterials.subBlack);
-        hull.rotation.x = Math.PI / 2;
-        const sail  = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.8, 0.8), realMaterials.subBlack);
-        sail.position.set(0, 0.4, 0.5);
-        const tailH = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.4), realMaterials.subBlack);
-        tailH.position.set(0, 0, -1.8);
-        const tailV = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.2, 0.4), realMaterials.subBlack);
-        tailV.position.set(0, 0, -1.8);
-        group.add(hull, sail, tailH, tailV);
-        return group;
+    // Tanker — long low hull, deck pipeline + manifold, aft accommodation.
+    TANKER: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(1.25, 0.65, 3.9, realMaterials.hullTANKER));
+        g.add(box(0.95, 0.85, 0.7, realMaterials.white, 0, 0.7, -1.6));
+        const pipe = cyl(0.06, 0.06, 2.6, realMaterials.grey, 0, 0.4, 0.3); pipe.rotation.x = Math.PI / 2;
+        g.add(pipe);
+        g.add(box(0.5, 0.3, 0.4, realMaterials.darkGrey, 0, 0.55, 0.4));
+        return g;
     },
-    PATROL: () => {
-        const group  = new THREE.Group();
-        const hull   = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 3.0), realMaterials.navyGrey);
-        const bow    = new THREE.Mesh(new THREE.CylinderGeometry(0, 0.4, 1.0, 4), realMaterials.navyGrey);
-        bow.rotation.x = -Math.PI / 2;
-        bow.rotation.y = Math.PI / 4;
-        bow.position.set(0, 0, 2.0);
-        const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 1.2), realMaterials.navyGrey);
-        bridge.position.set(0, 0.65, -0.2);
-        const mast   = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.2, 4), realMaterials.grey);
-        mast.position.set(0, 1.4, -0.4);
-        group.add(hull, bow, bridge, mast);
-        return group;
+    // Passenger / cruise / ferry — tall multi-deck white superstructure + funnel.
+    PASSENGER: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(1.2, 0.7, 3.6, realMaterials.hullPASSENGER));
+        g.add(box(1.0, 0.5, 2.6, realMaterials.white, 0, 0.6, -0.1));
+        g.add(box(0.85, 0.45, 2.0, realMaterials.white, 0, 1.05, -0.2));
+        g.add(box(0.7, 0.4, 1.3, realMaterials.white, 0, 1.45, -0.3));
+        g.add(cyl(0.12, 0.12, 0.5, realMaterials.grey, 0, 1.8, -0.8));
+        return g;
     },
-    HOSTILE: () => {
-        const group    = new THREE.Group();
-        const hullL    = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.5, 2.5), realMaterials.hostileGreen);
-        hullL.position.set(-0.45, 0, 0);
-        const hullR    = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.5, 2.5), realMaterials.hostileGreen);
-        hullR.position.set(0.45, 0, 0);
-        const deck     = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.2, 1.5), realMaterials.hostileGreen);
-        deck.position.set(0, 0.35, -0.3);
-        const launcher = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.4, 0.8), realMaterials.hostileDark);
-        launcher.position.set(0, 0.6, 0.0);
-        const radome   = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 8), realMaterials.white);
-        radome.position.set(0, 0.6, -0.8);
-        const ringGeo  = new THREE.RingGeometry(6.0, 6.2, 32);
-        const ringMat  = new THREE.MeshBasicMaterial({ color: 0xff1744, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
-        const ring     = new THREE.Mesh(ringGeo, ringMat);
-        ring.rotation.x = -Math.PI / 2;
-        ring.position.y = -0.3;
-        group.add(hullL, hullR, deck, launcher, radome, ring);
-        return group;
+    // High-speed craft — catamaran twin hull, low cabin, sharp bow.
+    HSC: () => {
+        const g = new THREE.Group();
+        g.add(box(0.35, 0.4, 3.2, realMaterials.hullHSC, -0.45, 0, 0));
+        g.add(box(0.35, 0.4, 3.2, realMaterials.hullHSC,  0.45, 0, 0));
+        g.add(box(1.3, 0.25, 2.2, realMaterials.white, 0, 0.3, -0.1));
+        g.add(box(0.9, 0.4, 1.0, realMaterials.glass, 0, 0.6, 0.4));
+        const bow = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.8, 4), realMaterials.hullHSC);
+        bow.rotation.x = -Math.PI / 2; bow.position.set(0, 0.1, 1.9); g.add(bow);
+        return g;
     },
-    FIGHTER: () => {
-        const group    = new THREE.Group();
-        const mat      = realMaterials.aeroGrey;
-        const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.2, 2.0, 8), mat);
-        fuselage.rotation.x = Math.PI / 2;
-        const nose     = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.8, 8), mat);
-        nose.rotation.x = Math.PI / 2;
-        nose.position.set(0, 0, 1.4);
-        const wingL    = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.5), mat);
-        wingL.position.set(-0.6, 0, -0.2);
-        wingL.rotation.y = -Math.PI / 6;
-        const wingR    = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.5), mat);
-        wingR.position.set(0.6, 0, -0.2);
-        wingR.rotation.y = Math.PI / 6;
-        const fin      = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.5, 0.5), mat);
-        fin.position.set(0, 0.25, -0.8);
-        const exhaustGeo = new THREE.ConeGeometry(0.12, 0.6, 8);
-        exhaustGeo.translate(0, -0.3, 0);
-        exhaustGeo.rotateX(Math.PI / 2);
-        const exhaustMat = new THREE.MeshBasicMaterial({ color: 0xffb300, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending });
-        const exhaust  = new THREE.Mesh(exhaustGeo, exhaustMat);
-        exhaust.position.set(0, 0, -1.0);
-        const strobe   = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff1744 }));
-        strobe.position.set(0, 0.35, -0.5);
-        strobe.name = "strobe_light";
-        group.add(fuselage, nose, wingL, wingR, fin, exhaust, strobe);
-        return group;
+    // Fishing vessel — small hull, forward wheelhouse, aft gantry.
+    FISHING: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(0.9, 0.6, 2.2, realMaterials.hullFISHING));
+        g.add(box(0.7, 0.7, 0.7, realMaterials.white, 0, 0.6, 0.4));
+        g.add(cyl(0.04, 0.04, 1.0, realMaterials.grey, 0, 0.7, -0.9));
+        g.add(box(0.5, 0.05, 0.6, realMaterials.grey, 0, 1.1, -0.9));
+        return g;
     },
-    AWACS: () => {
-        const group      = new THREE.Group();
-        const mat        = realMaterials.white;
-        const fuselage   = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 4.0, 12), mat);
-        fuselage.rotation.x = Math.PI / 2;
-        const nose       = new THREE.Mesh(new THREE.SphereGeometry(0.25, 12, 12), mat);
-        nose.position.set(0, 0, 2.0);
-        const wings      = new THREE.Mesh(new THREE.BoxGeometry(4.0, 0.1, 0.8), mat);
-        wings.position.set(0, 0, 0.2);
-        const tailH      = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.1, 0.5), mat);
-        tailH.position.set(0, 0, -1.8);
-        const tailV      = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.8, 0.6), mat);
-        tailV.position.set(0, 0.4, -1.8);
-        const radomeStrut= new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.4), mat);
-        radomeStrut.position.set(0, 0.3, -0.5);
-        const radome     = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 0.1, 16), realMaterials.aeroDark);
-        radome.position.set(0, 0.5, -0.5);
-        radome.name = "awacs_radar";
-        const strobe     = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff1744 }));
-        strobe.position.set(0, 0.6, 2.0);
-        strobe.name = "strobe_light";
-        group.add(fuselage, nose, wings, tailH, tailV, radomeStrut, radome, strobe);
-        return group;
+    // Tug — short stout hull, tall wheelhouse, stack, low towing deck aft.
+    TUG: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(1.0, 0.7, 1.8, realMaterials.hullTUG));
+        g.add(box(0.8, 0.9, 0.9, realMaterials.white, 0, 0.75, 0.2));
+        g.add(cyl(0.13, 0.15, 0.6, realMaterials.darkGrey, 0, 1.0, 0.3));
+        g.add(box(0.9, 0.15, 0.6, realMaterials.grey, 0, 0.35, -0.7));
+        return g;
     },
-    DRONE: () => {
-        const group    = new THREE.Group();
-        const mat      = realMaterials.aeroGrey;
-        const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.1, 2.5, 8), mat);
-        fuselage.rotation.x = Math.PI / 2;
-        const nose     = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), mat);
-        nose.position.set(0, 0.05, 1.25);
-        const wings    = new THREE.Mesh(new THREE.BoxGeometry(5.0, 0.05, 0.3), mat);
-        wings.position.set(0, 0, 0.2);
-        const tailL    = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.05, 0.3), mat);
-        tailL.position.set(-0.25, 0.2, -1.1);
-        tailL.rotation.z = Math.PI / 4;
-        const tailR    = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.05, 0.3), mat);
-        tailR.position.set(0.25, 0.2, -1.1);
-        tailR.rotation.z = -Math.PI / 4;
-        const strobe   = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff1744 }));
-        strobe.position.set(0, 0.3, -1.0);
-        strobe.name = "strobe_light";
-        group.add(fuselage, nose, wings, tailL, tailR, strobe);
-        return group;
+    // Dredger — hull, spoil hopper, derrick tower, aft bridge.
+    DREDGER: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(1.2, 0.7, 3.0, realMaterials.hullDREDGER));
+        g.add(box(1.0, 0.5, 1.0, realMaterials.darkGrey, 0, 0.55, 0.2));
+        g.add(cyl(0.05, 0.05, 1.6, realMaterials.grey, 0, 1.0, 0.2));
+        g.add(box(0.7, 0.6, 0.7, realMaterials.white, 0, 0.65, -1.1));
+        return g;
+    },
+    // Pilot launch — small fast boat, wheelhouse, radar deck.
+    PILOT: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(0.7, 0.5, 1.8, realMaterials.hullPILOT));
+        g.add(box(0.55, 0.5, 0.8, realMaterials.white, 0, 0.45, 0.0));
+        g.add(box(0.5, 0.06, 0.5, realMaterials.darkGrey, 0, 0.78, 0.0));
+        return g;
+    },
+    // Sailing vessel — slim hull, tall mast, thin triangular sail.
+    SAILING: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(0.55, 0.45, 2.2, realMaterials.hullSAILING));
+        g.add(cyl(0.04, 0.04, 2.6, realMaterials.white, 0, 1.3, 0.0));
+        const sail = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.2, 3), realMaterials.white);
+        sail.position.set(0, 1.25, 0.1); sail.scale.set(0.18, 1, 1);
+        g.add(sail);
+        return g;
+    },
+    // Pleasure craft — small yacht, glass cabin, sun deck.
+    PLEASURE: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(0.7, 0.45, 1.9, realMaterials.hullPLEASURE));
+        g.add(box(0.55, 0.35, 1.0, realMaterials.glass, 0, 0.4, 0.1));
+        g.add(box(0.5, 0.06, 0.8, realMaterials.white, 0, 0.62, 0.1));
+        return g;
+    },
+    // Service / SAR / utility — hull, superstructure, deck crane.
+    SERVICE: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(1.0, 0.6, 2.6, realMaterials.hullSERVICE));
+        g.add(box(0.8, 0.7, 0.9, realMaterials.white, 0, 0.65, -0.7));
+        g.add(cyl(0.04, 0.04, 1.2, realMaterials.grey, 0, 0.9, 0.5));
+        g.add(box(0.05, 0.05, 1.0, realMaterials.grey, 0, 1.3, 0.9));
+        return g;
+    },
+    // Unknown / other — generic hull + simple bridge.
+    OTHER: () => {
+        const g = new THREE.Group();
+        g.add(...hullWithBow(1.0, 0.7, 2.8, realMaterials.hullOTHER));
+        g.add(box(0.8, 0.7, 0.9, realMaterials.white, 0, 0.65, -0.8));
+        return g;
     }
 };
 
 // --- CLASS REGISTRY ---
 const SHIP_CLASSES = [
     { type: "CARGO",     hex: "#ff5252", builder: shapeBuilders.CARGO },
-    { type: "PATROL",    hex: "#90caf9", builder: shapeBuilders.PATROL },
-    { type: "SUBMARINE", hex: "#bdbdbd", builder: shapeBuilders.SUBMARINE },
-    { type: "HOSTILE",   hex: "#ff6d00", builder: shapeBuilders.HOSTILE },
-    { type: "FIGHTER",   hex: "#ffb300", builder: shapeBuilders.FIGHTER },
-    { type: "AWACS",     hex: "#81d4fa", builder: shapeBuilders.AWACS },
-    { type: "DRONE",     hex: "#ccff90", builder: shapeBuilders.DRONE }
+    { type: "TANKER",    hex: "#ffab40", builder: shapeBuilders.TANKER },
+    { type: "PASSENGER", hex: "#42a5f5", builder: shapeBuilders.PASSENGER },
+    { type: "HSC",       hex: "#26c6da", builder: shapeBuilders.HSC },
+    { type: "FISHING",   hex: "#66bb6a", builder: shapeBuilders.FISHING },
+    { type: "TUG",       hex: "#ab47bc", builder: shapeBuilders.TUG },
+    { type: "DREDGER",   hex: "#8d6e63", builder: shapeBuilders.DREDGER },
+    { type: "PILOT",     hex: "#ffee58", builder: shapeBuilders.PILOT },
+    { type: "SAILING",   hex: "#26a69a", builder: shapeBuilders.SAILING },
+    { type: "PLEASURE",  hex: "#ec407a", builder: shapeBuilders.PLEASURE },
+    { type: "SERVICE",   hex: "#78909c", builder: shapeBuilders.SERVICE },
+    { type: "OTHER",     hex: "#90a4ae", builder: shapeBuilders.OTHER },
 ];
-
-const AERO_TYPES = ["FIGHTER", "AWACS", "DRONE"];
 
 // ── AIRLINER shape (real flight data) ─────────────────────────────────────────
 function buildAirliner() {
@@ -374,7 +378,7 @@ export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
     // Each shape builder places its hull at a slightly different Y offset, so
     // ships rendered side-by-side at the same scenePos.y don't actually share
     // a waterline. Compute the bounding box of the structural meshes only
-    // (skipping flat surface markers like the HOSTILE alert ring) and shift
+    // (skipping flat surface markers like alert rings) and shift
     // all children so the hull's lowest point lands at the group's origin.
     // A small "draft" submersion then seats the hull realistically in water
     // instead of perching it on top.
@@ -488,143 +492,28 @@ export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
     shipGroup.userData.pingRing    = pingRing;
     shipGroup.userData.pingRingMat = pingRingMat;
 
+    // ── Type icon sprite (map-zoom legibility) ────────────────────────────────
+    // Camera-facing 2D class silhouette — a sibling of the vessel group (placed in
+    // world space each frame like the shadow, so it ignores the 0.08 hull scale).
+    // Shown at medium/far zoom; hidden up close so the real 3D hull takes over.
+    const iconMat = new THREE.SpriteMaterial({
+        map:         vesselIconTexture(vesselData.class, shipClass.hex),
+        transparent: true, depthWrite: false, depthTest: true,
+    });
+    const typeIcon = new THREE.Sprite(iconMat);
+    typeIcon.scale.set(7, 7 / VESSEL_ICON_ASPECT, 1);   // ~7×3.5 scene units
+    typeIcon.renderOrder = 4;
+    laneGroup.add(typeIcon);
+    shipGroup.userData.typeIcon = typeIcon;
+
     laneGroup.add(shipGroup);
     return shipGroup;
 }
 
-// ── Simulated ship helper (used by submarine & aerospace spawners) ─────────────
-export function createShipOnSpline(curve, forcedClass, scene, laneGroup, aisShips) {
-    let shipClass;
-    if (forcedClass) {
-        shipClass = SHIP_CLASSES.find(c => c.type === forcedClass);
-    } else {
-        const surfaceClasses = SHIP_CLASSES.filter(c => !AERO_TYPES.includes(c.type) && c.type !== "SUBMARINE");
-        const rand = prng();
-        shipClass = surfaceClasses[0];
-        if (rand > 0.6) shipClass = surfaceClasses[1];
-        if (rand > 0.9) shipClass = surfaceClasses[2];
-    }
-
-    const shipGroup = shipClass.builder();
-    const scaleVal = AERO_TYPES.includes(shipClass.type) ? 0.35 : 0.25;
-    shipGroup.scale.set(scaleVal, scaleVal, scaleVal);
-
-    shipGroup.children.forEach(child => {
-        child.userData.baseMaterial = child.material;
-    });
-
-    let simSpeed = 0.00002 + (prng() * 0.00004);
-    let kts = Math.floor(prng() * 25 + 10);
-
-    if (shipClass.type === "FIGHTER") {
-        simSpeed = (0.001 + (prng() * 0.0005)) * AIRCRAFT_TIME_SCALE;
-        kts = Math.floor(prng() * 400 + 400);
-    } else if (shipClass.type === "AWACS") {
-        simSpeed = (0.0005 + (prng() * 0.0003)) * AIRCRAFT_TIME_SCALE;
-        kts = Math.floor(prng() * 100 + 300);
-    } else if (shipClass.type === "DRONE") {
-        simSpeed = (0.0003 + (prng() * 0.0002)) * AIRCRAFT_TIME_SCALE;
-        kts = Math.floor(prng() * 50 + 150);
-    }
-
-    const isAero = AERO_TYPES.includes(shipClass.type);
-    shipGroup.userData = {
-        id: (isAero ? "AF-" : "VSL-") + Math.floor(prng() * 9000 + 1000),
-        class: shipClass.type,
-        htmlColor: shipClass.hex,
-        speedKts: kts,
-        isRealAIS: false,
-        curve,
-        progress: prng(),
-        speed: simSpeed,
-        history: []
-    };
-
-    const trailMat = new THREE.LineBasicMaterial({
-        color: isAero ? parseInt(shipClass.hex.slice(1), 16) : 0xffffff,
-        transparent: true,
-        opacity: isAero ? 0.38 : 0.28   // bumped up from 0.25 / 0.15
-    });
-
-    // Pre-allocate trail buffer at the maximum history length so Three.js r184's
-    // setFromPoints never warns "Buffer size too small — use .dispose() and create
-    // a new geometry."  maxHist in the animate loop is 40 (FIGHTER) or 20 (others);
-    // 41 gives one element of headroom.  The draw range starts at 0 and grows as
-    // history fills; the in-place update path in main.js writes directly into this
-    // pre-sized Float32Array without allocating a new one each frame.
-    const MAX_TRAIL_PTS = 41;
-    const trailGeo = new THREE.BufferGeometry();
-    trailGeo.setAttribute('position',
-        new THREE.BufferAttribute(new Float32Array(MAX_TRAIL_PTS * 3), 3));
-    trailGeo.setDrawRange(0, 0);
-    const trailLine = new THREE.Line(trailGeo, trailMat);
-    scene.add(trailLine);
-    shipGroup.userData.trail = trailLine;
-
-    laneGroup.add(shipGroup);
-    aisShips.push(shipGroup);
-}
-
-export function createSubmarineTrenches(scene, laneGroup, aisShips) {
-    const numSubs = 25;
-    let attempts = 0, subsSpawned = 0;
-
-    while (subsSpawned < numSubs && attempts < 2000) {
-        attempts++;
-        let startX = (prng() - 0.5) * MAP_WIDTH;
-        let startZ = (prng() - 0.5) * MAP_HEIGHT;
-        if (getTrueElevation(startX, startZ) > -2000) continue;
-
-        let points = [];
-        let curX = startX, curZ = startZ;
-        let dirX = (prng() - 0.5) * 8;
-        let dirZ = (prng() - 0.5) * 8;
-        let validRoute = true;
-
-        for (let p = 0; p < 6; p++) {
-            if (getTrueElevation(curX, curZ) > -500) { validRoute = false; break; }
-            let dist = Math.sqrt((curX / MAP_WIDTH) ** 2 + (curZ / MAP_HEIGHT) ** 2);
-            let curveY = -Math.pow(dist, 2) * 20.0;
-            points.push(new THREE.Vector3(curX, -2.0 + curveY, curZ));
-            curX += dirX + (prng() - 0.5) * 3;
-            curZ += dirZ + (prng() - 0.5) * 3;
-        }
-
-        if (validRoute && points.length >= 4) {
-            const curve = new THREE.CatmullRomCurve3(points);
-            const lineMaterial = new THREE.LineBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.15 });
-            laneGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(50)), lineMaterial));
-            createShipOnSpline(curve, "SUBMARINE", scene, laneGroup, aisShips);
-            subsSpawned++;
-        }
-    }
-}
-
-export function createAerospaceRoutes(scene, laneGroup, aisShips) {
-    const flightTypes = ["FIGHTER", "AWACS", "DRONE"];
-    const flightColors = { FIGHTER: 0xffb300, AWACS: 0x81d4fa, DRONE: 0xccff90 };
-
-    for (let i = 0; i < 25; i++) {
-        const type = flightTypes[Math.floor(prng() * flightTypes.length)];
-        const startX = (prng() > 0.5 ? 1 : -1) * (MAP_WIDTH / 2) * prng();
-        const startZ = (prng() > 0.5 ? 1 : -1) * (MAP_HEIGHT / 2);
-        const endX   = (prng() > 0.5 ? 1 : -1) * (MAP_WIDTH / 2);
-        const endZ   = (prng() > 0.5 ? 1 : -1) * (MAP_HEIGHT / 2) * prng();
-        const apexHeight = type === "DRONE" ? 15 + prng() * 10 : type === "AWACS" ? 25 + prng() * 10 : 40 + prng() * 20;
-        const midX = (startX + endX) / 2;
-        const midZ = (startZ + endZ) / 2;
-
-        const curve = new THREE.QuadraticBezierCurve3(
-            new THREE.Vector3(startX, 0, startZ),
-            new THREE.Vector3(midX, apexHeight, midZ),
-            new THREE.Vector3(endX, 0, endZ)
-        );
-
-        const lineMaterial = new THREE.LineBasicMaterial({ color: flightColors[type], transparent: true, opacity: 0.15 });
-        laneGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(50)), lineMaterial));
-        createShipOnSpline(curve, type, scene, laneGroup, aisShips);
-    }
-}
+// (Removed: createShipOnSpline / createSubmarineTrenches / createAerospaceRoutes —
+//  simulated military submarine & aircraft spawners. Dead code from the old
+//  fabricated-military taxonomy; no callers. Live entities come only from real
+//  AIS and flight feeds.)
 
 // --- ORBITAL ASSET BUILDERS ---
 

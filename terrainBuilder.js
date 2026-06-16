@@ -44,9 +44,19 @@ export function getTrueElevation(x, z) {
 
 // GEBCO elevation — same Terrarium decode, reads from the GEBCO PNG.
 // Only valid for ocean pixels; do not use for land.
+//
+// PROJECTION FIX: the scene z axis is Web-Mercator-projected (to match the
+// continents + vessels, via lonLatToScene), but GEBCO is an EQUIRECTANGULAR
+// grid (8192×4096, linear in latitude). The DEM tiles are Mercator, so sampling
+// them linearly in z is correct; doing the same for GEBCO is NOT — it placed
+// bathymetry at the wrong latitude (≈22° off at 60°), the cause of the
+// continent/ocean-floor seam and black gaps. Convert z → latitude (inverse
+// Mercator, mirroring lonLatToScene) → equirectangular row before sampling.
 export function getGEBCOElevation(x, z) {
-    let u = Math.floor((x / MAP_WIDTH  + 0.5) * (_gebcoW - 1));
-    let v = Math.floor((z / MAP_HEIGHT + 0.5) * (_gebcoH - 1));
+    const mercY  = -(2.0 * Math.PI * z) / MAP_HEIGHT;          // inverse of lonLatToScene z
+    const latRad = 2.0 * Math.atan(Math.exp(mercY)) - Math.PI / 2.0;
+    let u = Math.floor((x / MAP_WIDTH + 0.5) * (_gebcoW - 1));
+    let v = Math.floor((0.5 - latRad / Math.PI) * (_gebcoH - 1));   // equirectangular: lat → row
     u = Math.max(0, Math.min(u, _gebcoW - 1));
     v = Math.max(0, Math.min(v, _gebcoH - 1));
     const idx = (v * _gebcoW + u) * 4;

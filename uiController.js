@@ -432,7 +432,7 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
     const panel = document.getElementById('vessel-detail');
     if (!panel) return;
 
-    const isAircraft  = ud.isRealFlight || ud.class === 'FIGHTER';
+    const isAircraft  = ud.isRealFlight;
     const isSatellite = ud.isRealSatellite;
 
     document.getElementById('vd-name').innerText =
@@ -1351,10 +1351,7 @@ export function onClick(event, deps) {
             const cls = stateRef.lockedShip.userData?.class ?? '';
             const isDark = stateRef.lockedShip.userData?.isDark === true;
             if      (isDark)                                          contextCards.show('DARK_VESSEL');
-            else if (cls === 'HOSTILE')                               contextCards.show('HOSTILE');
-            else if (cls === 'SUBMARINE')                             contextCards.show('SUBMARINE');
             else if (cls === 'ORBITAL')                               contextCards.show('ORBITAL');
-            else if (['FIGHTER','AWACS','DRONE'].includes(cls))       contextCards.show('FIGHTER');
 
             const ttId = document.getElementById('tt-id');
             if (ttId) ttId.innerText = '[LOCKED] ' + stateRef.hoveredShip.userData.id;
