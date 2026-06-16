@@ -2,7 +2,6 @@
 import * as THREE from 'three';
 import { MAP_WIDTH, MAP_HEIGHT, prng, AIRCRAFT_TIME_SCALE } from './config.js';
 import { getTrueElevation } from './terrainBuilder.js';
-import { vesselIconTexture, VESSEL_ICON_ASPECT } from './vesselIcons.js';
 
 // ── Shared ground-shadow sprite texture ───────────────────────────────────────
 // Created once at module load; shared across every vessel shadow instance.
@@ -34,18 +33,20 @@ const realMaterials = {
     darkGrey: M(0x37474f),
     glass:    M(0x99bbdd, { roughness: 0.1, metalness: 0.7, transparent: true, opacity: 0.7 }),
     // Per-class hull tints (muted — the bright marker/trail colors live in SHIP_CLASSES).
-    hullCARGO:     M(0x9c4747),
-    hullTANKER:    M(0x9c6b1f),
-    hullPASSENGER: M(0xdedede, { roughness: 0.4 }),
-    hullHSC:       M(0x1f7d8c, { metalness: 0.3 }),
-    hullFISHING:   M(0x2f6b3a),
-    hullTUG:       M(0x6a3f7a),
-    hullDREDGER:   M(0x6d5a4b),
-    hullPILOT:     M(0xb59a1f),
-    hullSAILING:   M(0x1f6b62),
-    hullPLEASURE:  M(0xf5f5f5, { roughness: 0.3 }),
-    hullSERVICE:   M(0x546e7a),
-    hullOTHER:     M(0x607d8b),
+    // Bright per-class hull colours (match SHIP_CLASSES.hex + the design sheet) so
+    // each vessel reads its type at a glance instead of a muted grey.
+    hullCARGO:     M(0xff5252),
+    hullTANKER:    M(0xffab40),
+    hullPASSENGER: M(0x42a5f5, { roughness: 0.4 }),
+    hullHSC:       M(0x26c6da, { metalness: 0.3 }),
+    hullFISHING:   M(0x66bb6a),
+    hullTUG:       M(0xab47bc),
+    hullDREDGER:   M(0x8d6e63),
+    hullPILOT:     M(0xffee58),
+    hullSAILING:   M(0x26a69a),
+    hullPLEASURE:  M(0xec407a, { roughness: 0.4 }),
+    hullSERVICE:   M(0x78909c),
+    hullOTHER:     M(0x90a4ae),
 };
 
 // --- GEOMETRY HELPERS (shared by the civilian shape builders) ---
@@ -491,20 +492,6 @@ export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
     laneGroup.add(pingRing);
     shipGroup.userData.pingRing    = pingRing;
     shipGroup.userData.pingRingMat = pingRingMat;
-
-    // ── Type icon sprite (map-zoom legibility) ────────────────────────────────
-    // Camera-facing 2D class silhouette — a sibling of the vessel group (placed in
-    // world space each frame like the shadow, so it ignores the 0.08 hull scale).
-    // Shown at medium/far zoom; hidden up close so the real 3D hull takes over.
-    const iconMat = new THREE.SpriteMaterial({
-        map:         vesselIconTexture(vesselData.class, shipClass.hex),
-        transparent: true, depthWrite: false, depthTest: true,
-    });
-    const typeIcon = new THREE.Sprite(iconMat);
-    typeIcon.scale.set(7, 7 / VESSEL_ICON_ASPECT, 1);   // ~7×3.5 scene units
-    typeIcon.renderOrder = 4;
-    laneGroup.add(typeIcon);
-    shipGroup.userData.typeIcon = typeIcon;
 
     laneGroup.add(shipGroup);
     return shipGroup;

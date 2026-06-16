@@ -5,7 +5,7 @@ import {
     BLOOM_STRENGTH_BASE, BLOOM_THREAT_RANGE,
     AMBIENT_INTENSITY_BASE, AMBIENT_INTENSITY_BONUS,
     DIR_LIGHT_INTENSITY_MAX,
-    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER,
+    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY,
 } from './config.js';
 import { loadAllData } from './dataLoader.js';
 import { mark as bootMark, report as bootReport } from './bootProfiler.js';   // measurement-only
@@ -16,7 +16,7 @@ import {
 import {
     initTerrainData, createHighFidelityPointCloud,
     createSolidOceanFloor, createCountryBorders,
-    loadNormalMap, updatePointCloud, createOceanBasinLabels
+    loadNormalMap, updatePointCloud, createOceanBasinLabels, getTrueElevation
 } from './terrainBuilder.js';
 import {
     createFlightObject, createAISVesselObject,
@@ -24,6 +24,7 @@ import {
 } from './entityBuilder.js';
 import { PortManager } from './portManager.js';
 import { ClusterManager } from './clusterManager.js';
+import { integrityManager, setElevationFn as setIntegrityElevation } from './integrityManager.js';
 import { FlightManager, lonLatAltToScene } from './flightManager.js';
 import {
     setupUI, setupSettingsPanel, setupSectorSearch,
@@ -358,6 +359,21 @@ async function init(mapData) {
     // ── AIS live vessel manager ───────────────────────────────────────────────
     const aisManager = new AISManager();
 
+    // AIS Integrity — evaluate every report (reuses the invariant violations) and
+    // run the periodic loiter/decay pass. Both are cheap; see integrityManager.js.
+    setIntegrityElevation(getTrueElevation);   // inject real terrain sampler
+    aisManager.onPositionEvaluated = (vessel, violations, ctx) =>
+        integrityManager.evaluate(vessel, violations, ctx);
+    setInterval(() => integrityManager.tick(), INTEGRITY.TICK_MS);
+
+    // Ship type arrived via the static message → rebuild the vessel with its real
+    // class (correct hull shape + colour) instead of the grey OTHER placeholder.
+    // Reuses the tested teardown + create paths; runs at most once per vessel.
+    aisManager.onVesselReclassify = (mmsi, vesselData) => {
+        aisManager.onVesselRemove(mmsi);
+        aisManager.onVesselNew(mmsi, vesselData);
+    };
+
     aisManager.onVesselNew = (mmsi, vesselData) => {
         const obj = createAISVesselObject(vesselData, scene, laneGroup, predGroup);
         vesselData.threeObject = obj;
@@ -488,6 +504,7 @@ async function init(mapData) {
     };
 
     aisManager.onVesselRemove = (mmsi) => {
+        integrityManager.remove(mmsi);
         const idx = window.aisShips.findIndex(s => s.userData.id === mmsi);
         if (idx === -1) return;
         const obj = window.aisShips[idx];
@@ -497,12 +514,6 @@ async function init(mapData) {
             laneGroup.remove(obj.userData.shadowSprite);
             obj.userData.shadowSprite.material.dispose();
             obj.userData.shadowSprite = null;
-        }
-        // Remove type icon sibling (shared texture is cached — don't dispose map)
-        if (obj.userData.typeIcon) {
-            laneGroup.remove(obj.userData.typeIcon);
-            obj.userData.typeIcon.material.dispose();
-            obj.userData.typeIcon = null;
         }
         // Remove vessel dot
         if (obj.userData.vesselDot) {
@@ -527,6 +538,7 @@ async function init(mapData) {
     };
 
     aisManager.onVesselDark = (mmsi, vesselData) => {
+        integrityManager.markDark(mmsi);
         // Show a dark-vessel marker at last known position
         const sp  = lonLatToScene(vesselData.lonDeg, vesselData.latDeg);
         const obj = vesselData.threeObject;
@@ -546,6 +558,7 @@ async function init(mapData) {
     };
 
     aisManager.onVesselReappear = (mmsi, vesselData) => {
+        integrityManager.markReappear(mmsi);
         const obj = vesselData.threeObject;
         if (!obj) return;
         if (obj.userData.darkMarker) {
@@ -1591,17 +1604,6 @@ async function init(mapData) {
                     }
                 }
 
-                // Type icon — class silhouette, readable at map/medium zoom.
-                // Hidden up close (the 3D hull takes over), when clustered far
-                // (y>150), when class-filtered, or when dark (the red marker says it).
-                const tIcon = ship.userData.typeIcon;
-                if (tIcon) {
-                    const showIcon = ship.visible && !ship.userData._classHidden
-                        && !ship.userData.isDark
-                        && camera.position.y > 28 && camera.position.y <= 150;
-                    tIcon.visible = showIcon;
-                    if (showIcon) tIcon.position.set(ship.position.x, 1.8, ship.position.z);
-                }
 
                 const ring = ship.userData.anomalyRing;
                 const mat  = ship.userData.anomalyRingMat;

@@ -94,6 +94,10 @@ export const AIRCRAFT_TIME_SCALE = 0.4; // visual speed multiplier (tooltip knot
 
 // ── AIS data layer ────────────────────────────────────────────────────────────
 export const AIS = {
+    // Master switch for the LIVE AIS vessel layer. false = no key prompt, no
+    // WebSocket, no live vessels on the map (reversible). The 3D vessel models +
+    // synthetic scenarios are unaffected.
+    LIVE_ENABLED: true,
     WS_URL:      'wss://stream.aisstream.io/v0/stream',
     STORAGE_KEY: 'vanguard_ais_key',
     MAX_VESSELS: 500,   // raised from 200 (2026-06-12) — GPU headroom confirmed
@@ -125,6 +129,33 @@ export const INVARIANTS = {
     MAX_EVENT_AGE_MS:     10 * 60 * 1000,  // arrival lag beyond this → STALE_EVENT
     MAX_FUTURE_SKEW_MS:   60 * 1000,       // event ahead of arrival beyond this → FUTURE_EVENT
     LEDGER_MAX:           500,  // violation ring-buffer size
+};
+
+// ── AIS Integrity / counter-spoofing scoring ────────────────────────────────
+// Per-vessel trust score = 100 − Σ(active flag weights). Flags are indicators
+// for analyst review, NOT verdicts. Engine: integrityManager.js. All tunable.
+export const INTEGRITY = {
+    // Penalty weight per flag type (points off the 100 trust score).
+    WEIGHTS: {
+        ON_LAND:          40,   // reported position is on dry land
+        IMPOSSIBLE_SPEED: 35,   // teleport-grade kinematic jump (invariants)
+        FALSE_FLAG:       25,   // Equasis flag vs MMSI-MID country mismatch (v1.5)
+        MMSI_INVALID:     20,   // malformed MMSI / unknown MID
+        SOG_MISMATCH:     20,   // implied speed vs reported SOG (invariants)
+        EXCESSIVE_SPEED:  18,   // over class max (invariants)
+        DARK:             15,   // AIS transponder gone silent
+        LOITERING:        15,   // stopped together offshore (possible STS)
+        TIME_REGRESSION:  15,   // timestamp manipulation (invariants)
+        DEFAULT:          10,   // any other invariant violation
+    },
+    TIER_TRUSTED:      80,      // score ≥ → TRUSTED (green)
+    TIER_QUESTIONABLE: 50,      // score ≥ → QUESTIONABLE (amber); below → SUSPECT (red)
+    ON_LAND_MIN_M:      5,      // terrain elevation above this (m) at vessel pos → on-land flag
+    FLAG_TTL_MS:       15 * 60 * 1000,   // soft (event) flags expire after this if not re-triggered
+    LOITER_RADIUS_NM:   0.5,    // two stopped vessels within this → rendezvous candidate
+    LOITER_MIN_KTS:     1.0,    // speed below this counts as "stopped"
+    LOITER_MIN_MS:     20 * 60 * 1000,   // sustained this long → LOITERING flag
+    TICK_MS:           4000,    // periodic loiter/decay cadence
 };
 
 // ── Camera FOV presets ────────────────────────────────────────────────────────

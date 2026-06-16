@@ -1,5 +1,33 @@
 # Decisions — standing choices and their reasons (append-only)
 
+- **2026-06-14 — Vessel classification fixed + bright hull colours + type cache.** Three linked fixes so
+  vessels show their type instead of a grey fleet: (1) static handler reads `static_.Type` → updates
+  class + rebuilds model (`onVesselReclassify`); (2) hull materials in entityBuilder use the BRIGHT
+  SHIP_CLASSES colours (were muted → everything read grey/white); (3) NEW `typeCache.js` persists learned
+  MMSI→class in localStorage (debounced, soft-capped 20k) and applies it at vessel creation, so
+  previously-seen vessels render typed instantly instead of waiting ~6 min for the next static broadcast.
+  Verified live: on reload, 19/19 cached vessels came up typed immediately; cache persists + grows.
+  Brand-new/never-seen vessels still start OTHER (grey) until their first type broadcast — honest AIS.
+
+- **2026-06-14 — Vessel type-icon sprites (vesselIcons.js) REMOVED; live AIS kept ON.** The grey/white
+  "icons" Jamal wanted gone were the 2D type-icon sprites I'd added (all grey because of the OTHER-class
+  bug). Removed them from entityBuilder + main.js. `vesselIcons.js` is now orphaned (no importers) —
+  safe to delete. NOTE: I briefly over-corrected and disabled the whole live AIS layer
+  (`AIS.LIVE_ENABLED=false`); Jamal clarified he only wanted the icons gone, so it's back to
+  `LIVE_ENABLED=true` (verified: 500 vessels render, 0 with icons). The `LIVE_ENABLED` flag still exists
+  as a reversible master switch if ever needed. The 3D vessel MODELS are the thing Jamal wants to keep
+  developing.
+
+- **2026-06-14 — AIS Integrity engine (Phase 1) BUILT + tested.** `integrityManager.js` — per-vessel
+  0–100 trust score from flags: ON_LAND (terrain cross-ref), MMSI_INVALID, kinematic (reused from
+  invariants: IMPOSSIBLE/EXCESSIVE_SPEED, SOG_MISMATCH, TIME_REGRESSION), DARK, LOITERING (STS). Tiers
+  TRUSTED≥80 / QUESTIONABLE≥50 / SUSPECT<50; weights+thresholds in `config.js` INTEGRITY. Event-driven
+  via `aisManager.onPositionEvaluated` (reuses invariant violations, O(1)/msg) + `tick()` timer for
+  loiter/decay; render loop only reads. Engine is PURE (elevation injected via `setElevationFn`, wired
+  in main.js to `getTrueElevation`) → node-testable. `tests/integrity.test.mjs` (10 cases, all pass).
+  Spec in `INTEGRITY_SPEC.md`. NEXT: UI surfaces (Phase 2-4) — card section, Vanguard Panel INTEGRITY
+  board, tier-coloured map ring, watchlist integrity column. Then Equasis false-flag cross-check (v1.5).
+
 - **2026-06-14 — VANGUARD1's north star: a REAL ANALYTICAL TOOL, not just a 3D showcase.** Jamal's
   call after public feedback. The differentiator is **AIS Integrity / counter-spoofing** built on the
   existing `invariants.js` engine (surface it, don't reinvent) + new detections that reuse assets we

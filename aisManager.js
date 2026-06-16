@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { MAP_WIDTH, MAP_HEIGHT, AIS } from './config.js';
 import { MID_TO_COUNTRY } from './aisCountries.js';
+import { typeCache } from './typeCache.js';
 import { simClock } from './simClock.js';
 import { checkPositionReport, parseEventTime } from './invariants.js';
 
@@ -194,6 +195,7 @@ export class AISManager {
         this.onVesselRemove   = null; // (mmsi) → void
         this.onVesselDark     = null; // (mmsi, vesselData) → void  — fired once when vessel goes silent
         this.onVesselReappear = null; // (mmsi, vesselData) → void  — fired when dark vessel sends again
+        this.onVesselReclassify = null; // (mmsi, vesselData) → void — ship type arrived via static; rebuild model
         this.onRawMessage     = null; // (msg) → void — every inbound message, any source (AISRecorder tap)
 
         this._sources = new Set();    // attached DataSource instances (dataSource.js)
@@ -242,6 +244,14 @@ export class AISManager {
     // or, in demo mode, skips the socket and announces vg1:demoMode so
     // main.js can load a synthetic scenario instead.
     async init() {
+        // Live AIS layer disabled via config — skip the key prompt + WebSocket so
+        // no live vessels spawn. Reversible: set AIS.LIVE_ENABLED = true in config.js.
+        if (AIS.LIVE_ENABLED === false) {
+            this._setStatus('AIS LAYER OFF');
+            import('./contextCardManager.js').then(m => m.contextCards.unblock());
+            console.info('[AIS] Live vessel layer disabled (AIS.LIVE_ENABLED=false). 3D models + scenarios unaffected.');
+            return;
+        }
         const result = await promptForAPIKey();
         // AIS key prompt dismissed — unblock context cards so they can now show.
         // Dynamic import avoids a circular dep (aisManager has no other UI imports).
@@ -323,6 +333,22 @@ export class AISManager {
                     // Fire onVesselUpdate so watchlist and vessel tab see the real name
                     if (this.onVesselUpdate) this.onVesselUpdate(mmsi, existing);
                 }
+
+                // Ship type — ONLY the static (type-5) message carries it; position
+                // reports don't, so without this every vessel stays class OTHER (grey).
+                // Upgrade away from OTHER and rebuild the model so shape + colour update.
+                const shipType = static_.Type ?? static_.ShipType;
+                if (shipType != null) {
+                    const newClass = aisTypeToClass(shipType);
+                    if (newClass !== 'OTHER') {
+                        typeCache.set(mmsi, newClass);   // remember for instant typing next time
+                        if (newClass !== existing.class) {
+                            existing.class = newClass;
+                            if (existing.threeObject) existing.threeObject.userData.class = newClass;
+                            if (this.onVesselReclassify) this.onVesselReclassify(mmsi, existing);
+                        }
+                    }
+                }
             }
             return;
         }
@@ -397,7 +423,9 @@ export class AISManager {
             const v = {
                 mmsi,
                 name,
-                class:       aisTypeToClass(shipType),
+                // Use the remembered class if we've seen this vessel before, so it
+                // renders typed immediately instead of grey until its next static msg.
+                class:       typeCache.get(mmsi) || aisTypeToClass(shipType),
                 country:     mmsiToCountry(mmsi),
                 speedKts:    Math.round(sog),
                 headingDeg:  heading,
@@ -421,6 +449,15 @@ export class AISManager {
             };
             this.vessels.set(mmsi, v);
             if (this.onVesselNew) this.onVesselNew(mmsi, v);
+        }
+
+        // ── AIS integrity evaluation (per-report, event-driven) ───────────────
+        // Wired to integrityManager.evaluate in main.js. Reuses the violations
+        // already computed by the invariant gate above — no extra physics pass.
+        if (this.onPositionEvaluated) {
+            this.onPositionEvaluated(this.vessels.get(mmsi), violations, {
+                sceneX: scenePos.x, sceneZ: scenePos.z, sogKts: sog,
+            });
         }
 
         this._updateCount();

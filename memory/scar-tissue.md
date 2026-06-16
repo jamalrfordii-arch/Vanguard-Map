@@ -40,6 +40,20 @@
 - **simClock, not wall clock.** Anything time-of-world must call `simClock.now()`/`.date()`, never
   `Date.now()`/`new Date()`. Live mode = wall clock by default but supports pause/scrub/rate.
 
+- **AIS ship TYPE only comes from the static (type-5) message — NOT position reports.** (Durable fact.)
+  Position reports have no ShipType → `aisTypeToClass(0)` → OTHER. FIXED 2026-06-14: the
+  `ShipStaticData` handler now reads `static_.Type`, and if it maps to a real class, sets
+  `existing.class` and fires `onVesselReclassify` (main.js rebuilds the vessel via the remove+new
+  paths → correct hull shape + colour). Verified live: vessels convert OTHER→typed as static arrives
+  (~every 6 min/vessel). Field is `Type` (confirmed — same AISStream schema as the working `ImoNumber`).
+  Note: `window.aisManager` is NOT a global — don't try to reach it from the console; use `aisShips`,
+  `vg1Integrity`, `vg1Scenario`, etc.
+
+- **Integrity ON_LAND false positives from coarse coastline.** With live AIS, 195/500 vessels got an
+  ON_LAND flag — the zoom-4 DEM coastline is too coarse, so near-shore/port vessels read as on-land.
+  Before shipping the integrity UI: raise `ON_LAND_MIN_M`, require a few consecutive on-land reports,
+  or sample a small neighbourhood / use GEBCO for the shoreline. Don't trust a single-sample on-land hit.
+
 - **Node require cache.** `flight-proxy.js` caches `require('./equasis-lookup.js')`. Editing the
   lookup module does nothing until the proxy process is restarted.
 
