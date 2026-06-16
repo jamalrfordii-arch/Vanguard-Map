@@ -49,10 +49,14 @@
   Note: `window.aisManager` is NOT a global — don't try to reach it from the console; use `aisShips`,
   `vg1Integrity`, `vg1Scenario`, etc.
 
-- **Integrity ON_LAND false positives from coarse coastline.** With live AIS, 195/500 vessels got an
-  ON_LAND flag — the zoom-4 DEM coastline is too coarse, so near-shore/port vessels read as on-land.
-  Before shipping the integrity UI: raise `ON_LAND_MIN_M`, require a few consecutive on-land reports,
-  or sample a small neighbourhood / use GEBCO for the shoreline. Don't trust a single-sample on-land hit.
+- **Integrity ON_LAND is a WEAK signal — tuned 2026-06-14 (was 182 false flags → 0).** The zoom-4 DEM
+  can't tell inland WATER (Rhine, Great Lakes, Danube, Detroit R., Dutch canals) from land, and coarse
+  coastlines mis-sample port vessels. Two-part fix in integrityManager/config: (1) `_isOnLand()`
+  neighborhood guard — only "inland" if centre AND all 8 neighbours at `ON_LAND_MARGIN` (~30 km) are
+  land (killed coastal noise, 195→41); (2) dropped `WEIGHTS.ON_LAND` 40→15 so a lone on-land hit stays
+  TRUSTED (the residual 41 are legit inland-waterway vessels). On-land now only matters in combination
+  with real anomalies. Lesson: validate any integrity signal against live data before trusting it —
+  most "anomalies" were legitimate traffic the coarse basemap mislabels.
 
 - **Node require cache.** `flight-proxy.js` caches `require('./equasis-lookup.js')`. Editing the
   lookup module does nothing until the proxy process is restarted.

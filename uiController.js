@@ -12,6 +12,7 @@ function _scenePosToLonLat(x, z) {
 import { getTrueElevation } from './terrainBuilder.js';
 import { CITIES } from './cityManager.js';
 import { contextCards } from './contextCardManager.js';
+import { integrityManager } from './integrityManager.js';
 
 // ── Module-level state ────────────────────────────────────────────────────────
 let _searchQuery  = '';
@@ -426,6 +427,46 @@ function wireDossierButton(ud, isNonVessel) {
     input.onkeydown = (e) => { if (e.key === 'Enter') run(); };
 }
 
+// ── AIS Integrity section ──────────────────────────────────────────────────────
+// Reads the per-vessel trust record from integrityManager and renders the score,
+// tier badge, and plain-language flags. Vessels only (hidden for aircraft/sats).
+const _TIER_COLOR = { TRUSTED: '#7ad97a', QUESTIONABLE: '#ffa726', SUSPECT: '#ff4d4f' };
+function renderIntegrity(ud, isNonVessel) {
+    const section = document.getElementById('vd-integrity-section');
+    if (!section) return;
+    if (isNonVessel || !ud || !ud.id) { section.style.display = 'none'; return; }
+    section.style.display = 'block';
+
+    const rec   = integrityManager.getRecord(ud.id);
+    const score = rec ? rec.score : 100;
+    const tier  = rec ? rec.tier  : 'TRUSTED';
+    const color = _TIER_COLOR[tier] || '#7ad97a';
+
+    const badge = document.getElementById('vd-integrity-badge');
+    if (badge) {
+        badge.textContent  = `${tier} · ${score}`;
+        badge.style.color  = color;
+        badge.style.border = `1px solid ${color}`;
+    }
+    const body = document.getElementById('vd-integrity-body');
+    if (!body) return;
+    const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    const reasons = integrityManager.reasons(ud.id);
+    body.innerHTML = reasons.length
+        ? reasons.map(r => `<div class="sys-stat"><span style="color:${color}">⚑ ${esc(r.detail)}</span><span style="color:#6b8298;">−${r.weight}</span></div>`).join('')
+        : `<div style="font-size:10px; color:#7ad97a;">No anomalies — AIS broadcast consistent.</div>`;
+}
+
+// Live refresh: the engine updates scores as reports/ticks arrive; if the card is
+// open on a vessel, keep its integrity section current.
+if (typeof window !== 'undefined') {
+    window.addEventListener('vg1:integrityChanged', () => {
+        if (_detailShip && _detailShip.userData && _detailShip.userData.isRealAIS) {
+            renderIntegrity(_detailShip.userData, false);
+        }
+    });
+}
+
 export function showVesselDetail(ship, camera, controls, stateRef) {
     _detailShip = ship;
     const ud    = ship.userData;
@@ -449,6 +490,7 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
     document.getElementById('vd-destination').innerText = ud.destination || '—';
     document.getElementById('vd-eta').innerText      = ud.eta       || '—';
 
+    renderIntegrity(ud, isAircraft || isSatellite);
     wireDossierButton(ud, isAircraft || isSatellite);
 
     const altRow = document.getElementById('vd-altitude-row');

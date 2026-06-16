@@ -1,5 +1,12 @@
 # Decisions — standing choices and their reasons (append-only)
 
+- **2026-06-14 — Integrity UI Phase 2 (vessel card) shipped + on-land detector tuned.** Card now has an
+  "AIS INTEGRITY" section (`vd-integrity-section` in index.html, `renderIntegrity` in uiController) —
+  tier badge + score + plain-language flags, refreshes live on `vg1:integrityChanged`. Verified on the
+  live map. On-land detector recalibrated (see scar-tissue): neighborhood guard + weight 40→15 → false
+  flags 182→0 on benign data, on-land now an informative weak signal. NEXT in Phase 3-4: INTEGRITY
+  triage board (Vanguard Panel tab), tier-coloured map ring, watchlist integrity column.
+
 - **2026-06-14 — Vessel classification fixed + bright hull colours + type cache.** Three linked fixes so
   vessels show their type instead of a grey fleet: (1) static handler reads `static_.Type` → updates
   class + rebuilds model (`onVesselReclassify`); (2) hull materials in entityBuilder use the BRIGHT

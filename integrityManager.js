@@ -24,6 +24,19 @@ const W = INTEGRITY.WEIGHTS;
 // pure (no THREE/terrainBuilder import) and unit-testable in plain node.
 let _elevAt = () => 0;
 
+// On-land test with a coarse-coastline guard. The zoom-4 DEM is imprecise near
+// shore, so a single sample false-flags coastal/port vessels. A vessel is only
+// "inland" if its centre is above sea level AND every neighbour at ON_LAND_MARGIN
+// is also land — coastal vessels have at least one sea neighbour and pass.
+function _isOnLand(x, z) {
+    const elev = _elevAt(x, z);
+    if (elev <= INTEGRITY.ON_LAND_MIN_M) return { onLand: false, elev };
+    const R = INTEGRITY.ON_LAND_MARGIN;
+    const ring = [[R, 0], [-R, 0], [0, R], [0, -R], [R, R], [-R, -R], [R, -R], [-R, R]];
+    for (const [dx, dz] of ring) if (_elevAt(x + dx, z + dz) <= 0) return { onLand: false, elev };
+    return { onLand: true, elev };
+}
+
 // Map an invariant violation type → integrity flag type.
 function flagTypeFor(violationType) {
     switch (violationType) {
@@ -112,9 +125,9 @@ class IntegrityManager {
             }
         }
 
-        // On-land — re-evaluated every report (condition-based).
-        const elev = _elevAt(r.sceneX, r.sceneZ);
-        if (elev > INTEGRITY.ON_LAND_MIN_M) this._setFlag(r, 'ON_LAND', `position is on land (elev ${Math.round(elev)} m)`);
+        // On-land — re-evaluated every report (condition-based, coarse-coastline-guarded).
+        const land = _isOnLand(r.sceneX, r.sceneZ);
+        if (land.onLand) this._setFlag(r, 'ON_LAND', `position is inland (elev ${Math.round(land.elev)} m)`);
         else this._clearFlag(r, 'ON_LAND');
 
         // Kinematic / timestamp violations from the invariant gate.
