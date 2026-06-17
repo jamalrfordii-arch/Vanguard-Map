@@ -31,7 +31,7 @@ import {
     onMouseMove, onDoubleClick, onClick, tickRaycasting,
     tickVesselDetail, refreshShipList, refreshFlightList,
     applySearchFilter, tickSearchVisibility, tickAlertZone,
-    showVesselDetail, hideVesselDetail
+    showVesselDetail, hideVesselDetail, initIntegrityBoard
 } from './uiController.js';
 import { AISManager, lonLatToScene } from './aisManager.js';
 import { simClock } from './simClock.js';
@@ -532,6 +532,11 @@ async function init(mapData) {
             if (obj.userData.pingRingMat) obj.userData.pingRingMat.dispose();
             obj.userData.pingRing = null;
         }
+        if (obj.userData.integrityRing) {
+            laneGroup.remove(obj.userData.integrityRing);
+            if (obj.userData.integrityRingMat) obj.userData.integrityRingMat.dispose();
+            obj.userData.integrityRing = null;
+        }
         laneGroup.remove(obj);
         scene.remove(obj);
         window.aisShips.splice(idx, 1);
@@ -762,6 +767,16 @@ async function init(mapData) {
             controls.update();
         }
     });
+    // AIS Integrity triage board — same fly-to pattern as the RF panel.
+    initIntegrityBoard({
+        flyTo: (lat, lon) => {
+            const p = lonLatToScene(lon, lat);
+            controls.target.set(p.x, 0, p.z);
+            camera.position.set(p.x, 38, p.z + 26);
+            controls.update();
+        }
+    });
+
     const _recTap = aisRecorder.tap();
     aisManager.onRawMessage = (msg) => { _recTap(msg); };
 
@@ -1604,6 +1619,20 @@ async function init(mapData) {
                     }
                 }
 
+                // Integrity ring — pulsing electric-violet halo on SUSPECT vessels only.
+                const iRing = ship.userData.integrityRing;
+                const iMat  = ship.userData.integrityRingMat;
+                if (iRing && iMat) {
+                    const suspect = ship.visible && integrityManager.tier(ship.userData.id) === 'SUSPECT';
+                    iRing.visible = suspect;
+                    if (suspect) {
+                        iRing.position.set(ship.position.x, 0.3, ship.position.z);
+                        const p = (Math.sin(elapsed * 6.0) + 1) * 0.5;   // ~1 Hz pulse
+                        iMat.opacity = 0.45 + p * 0.5;                   // 0.45 → 0.95
+                        const s = 1.0 + p * 0.15;
+                        iRing.scale.set(s, s, s);
+                    }
+                }
 
                 const ring = ship.userData.anomalyRing;
                 const mat  = ship.userData.anomalyRingMat;

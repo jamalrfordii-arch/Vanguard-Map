@@ -493,6 +493,24 @@ export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
     shipGroup.userData.pingRing    = pingRing;
     shipGroup.userData.pingRingMat = pingRingMat;
 
+    // ── Integrity ring (counter-spoofing) ────────────────────────────────────
+    // Pulsing electric-violet halo shown ONLY for SUSPECT vessels. Violet is
+    // reserved for integrity — distinct from the red dark-vessel marker, the red
+    // CARGO hull, and the amber anomaly ring — so it reads unambiguously as
+    // "this AIS broadcast can't be trusted". Driven from main.js by the tier.
+    const integRingGeo = new THREE.RingGeometry(1.8, 2.2, 48);
+    const integRingMat = new THREE.MeshBasicMaterial({
+        color: 0xd500f9, transparent: true, opacity: 0.0,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const integRing = new THREE.Mesh(integRingGeo, integRingMat);
+    integRing.rotation.x = -Math.PI / 2;
+    integRing.renderOrder = 4;
+    integRing.visible = false;
+    laneGroup.add(integRing);
+    shipGroup.userData.integrityRing    = integRing;
+    shipGroup.userData.integrityRingMat = integRingMat;
+
     laneGroup.add(shipGroup);
     return shipGroup;
 }

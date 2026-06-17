@@ -1,5 +1,30 @@
 # Decisions — standing choices and their reasons (append-only)
 
+- **2026-06-14 — AIS Integrity feature COMPLETE (engine + all 4 UI surfaces).** Watchlist integrity
+  column added (chip per row: faint green ● when TRUSTED, tier-coloured score when flagged) — verified
+  live (TRUSTED=green ●, SUSPECT=violet "40"). Unified the tier palette to ONE language everywhere:
+  TRUSTED #7ad97a / QUESTIONABLE #ffa726 / SUSPECT #d500f9 (violet) across card, board, map ring,
+  watchlist (SUSPECT was red in the panel — changed to violet to match the map ring, since red is
+  taken on the map). Full feature surfaces: (1) card AIS INTEGRITY section, (2) Vanguard Panel
+  INTEGRITY triage board, (3) pulsing violet SUSPECT map ring, (4) watchlist column. Engine =
+  integrityManager.js (event-driven scoring, on-land tuned to weak signal, tested). DONE.
+
+- **2026-06-14 — Integrity Phase 4: pulsing electric-violet map ring for SUSPECT vessels.** Reserved
+  hue **#d500f9** (NOT red — red is triple-booked: dark-vessel marker, CARGO hull, ping ring; amber =
+  tanker/anomaly). Ring shown ONLY for tier SUSPECT (QUESTIONABLE stays in card/board to keep the map
+  calm); severity reads via fast ~1 Hz pulse. Built in entityBuilder (sibling ring like ping/anomaly) +
+  driven in main.js animate loop by `integrityManager.tier()`. Verified: ring created on all vessels +
+  tier detection works; live pulse not screenshot-verified because the automation tab is backgrounded
+  (rAF paused — known gotcha) — renders on a focused tab. REMAINING: watchlist integrity column (last
+  bit of the integrity UI).
+
+- **2026-06-14 — Integrity UI Phase 3 (triage board) shipped + verified.** New "INTEGRITY" Vanguard
+  Panel tab + `#vp-integrity` pane (index.html); `initIntegrityBoard({flyTo})` in uiController (wired in
+  main.js with the RF panel's fly-to). Lists `integrityManager.flagged()` worst-first — name, tier·score,
+  class, top reason (+N), click-to-fly + opens card; tab badge = flagged count; live-updates on
+  `vg1:integrityChanged`; clean empty-state on benign data. Verified live (synthetic SUSPECT rendered).
+  Remaining Phase 4: tier-coloured map ring on flagged vessels + integrity column in the watchlist.
+
 - **2026-06-14 — Integrity UI Phase 2 (vessel card) shipped + on-land detector tuned.** Card now has an
   "AIS INTEGRITY" section (`vd-integrity-section` in index.html, `renderIntegrity` in uiController) —
   tier badge + score + plain-language flags, refreshes live on `vg1:integrityChanged`. Verified on the

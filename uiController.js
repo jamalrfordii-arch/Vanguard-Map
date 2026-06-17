@@ -430,7 +430,7 @@ function wireDossierButton(ud, isNonVessel) {
 // ── AIS Integrity section ──────────────────────────────────────────────────────
 // Reads the per-vessel trust record from integrityManager and renders the score,
 // tier badge, and plain-language flags. Vessels only (hidden for aircraft/sats).
-const _TIER_COLOR = { TRUSTED: '#7ad97a', QUESTIONABLE: '#ffa726', SUSPECT: '#ff4d4f' };
+const _TIER_COLOR = { TRUSTED: '#7ad97a', QUESTIONABLE: '#ffa726', SUSPECT: '#d500f9' };  // violet = matches map ring
 function renderIntegrity(ud, isNonVessel) {
     const section = document.getElementById('vd-integrity-section');
     if (!section) return;
@@ -465,6 +465,57 @@ if (typeof window !== 'undefined') {
             renderIntegrity(_detailShip.userData, false);
         }
     });
+}
+
+// ── INTEGRITY triage board (Vanguard Panel tab #vp-integrity) ───────────────────
+// Live list of flagged vessels (tier ≠ TRUSTED), worst-first, with click-to-fly.
+// The analyst's "what's wrong right now" view. Empty on clean data (by design).
+export function initIntegrityBoard({ flyTo } = {}) {
+    const pane   = document.getElementById('vp-integrity');
+    const tabBtn = document.querySelector('.vp-tab[data-tab="integrity"]');
+    const badge  = document.getElementById('vp-integrity-tab-badge');
+    if (!pane) { console.warn('[Integrity] #vp-integrity pane missing'); return; }
+    const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+
+    function render() {
+        const flagged = integrityManager.flagged();
+        const suspectN = flagged.filter(r => r.tier === 'SUSPECT').length;
+        if (badge)  badge.textContent = flagged.length ? String(flagged.length) : '';
+        if (tabBtn) tabBtn.classList.toggle('has-alert', suspectN > 0);
+
+        if (!flagged.length) {
+            pane.innerHTML = `<div class="vp-empty">NO INTEGRITY ANOMALIES<br>ALL TRACKED VESSELS NOMINAL<br>AIS CONSISTENCY MONITORING ACTIVE</div>`;
+            return;
+        }
+        pane.innerHTML = flagged.map(r => {
+            const color   = _TIER_COLOR[r.tier] || '#7ad97a';
+            const reasons = integrityManager.reasons(r.mmsi);
+            const top     = reasons[0] ? reasons[0].detail : '';
+            const extra   = reasons.length > 1 ? ` (+${reasons.length - 1})` : '';
+            return `<div class="vg-integ-row" data-mmsi="${esc(r.mmsi)}"
+                style="cursor:pointer; border-left:3px solid ${color}; padding:6px 9px; margin:2px 0;
+                       background:rgba(255,255,255,0.02);">
+                <div style="display:flex; justify-content:space-between; align-items:baseline;">
+                    <span style="color:#cfe3f1; font-weight:700; font-size:12px;">${esc(r.name || r.mmsi)}</span>
+                    <span style="color:${color}; font-weight:700; font-size:11px;">${r.tier} · ${r.score}</span>
+                </div>
+                <div style="font-size:10px; color:#8aabc4; margin-top:2px;">${esc(r.cls || '—')} · ${esc(top)}${extra}</div>
+            </div>`;
+        }).join('');
+
+        pane.querySelectorAll('.vg-integ-row').forEach(row => {
+            row.addEventListener('click', () => {
+                const mmsi = row.dataset.mmsi;
+                const rec  = integrityManager.getRecord(mmsi);
+                if (rec && flyTo && rec.latDeg != null) flyTo(rec.latDeg, rec.lonDeg);
+                const ship = (window.aisShips || []).find(o => String(o.userData.id) === String(mmsi));
+                if (ship && window._openVesselDetail) window._openVesselDetail(ship);
+            });
+        });
+    }
+
+    render();
+    window.addEventListener('vg1:integrityChanged', render);
 }
 
 export function showVesselDetail(ship, camera, controls, stateRef) {
@@ -1239,6 +1290,15 @@ export function onMouseMove(event, deps) {
     mouse.x = ( event.clientX / window.innerWidth)  * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
+    // Pointer over a UI panel/control? (mousemove is bound to window, so it fires
+    // over panels too.) Anything that isn't the WebGL <canvas> counts as UI —
+    // tickRaycasting reads this to suppress vessel hover beneath open windows.
+    stateRef.overUI = !!(event.target && event.target.tagName !== 'CANVAS');
+    if (stateRef.overUI) {
+        if (hoverReticle) hoverReticle.visible = false;
+        return;
+    }
+
     if (tooltipEl) {
         tooltipEl.style.left = (event.clientX + 15) + 'px';
         tooltipEl.style.top  = (event.clientY + 15) + 'px';
@@ -1549,6 +1609,15 @@ function _fillTooltip(shipGroup, stateRef) {
 export function tickRaycasting(deps) {
     const { raycaster, mouse, camera, aisShips, tooltipEl, stateRef } = deps;
     if (!aisShips || aisShips.length === 0) return;
+
+    // Pointer is over an open panel/control — treat windows as solid: don't hover
+    // or tooltip vessels sitting beneath them. (lockedShip / open card unaffected.)
+    if (stateRef.overUI) {
+        if (stateRef.hoveredShip) { resetShipHighlight(stateRef.hoveredShip); stateRef.hoveredShip = null; }
+        if (tooltipEl) tooltipEl.style.display = 'none';
+        document.body.style.cursor = '';
+        return;
+    }
 
     // ── Stage 1: Screen-space proximity / snap-to ─────────────────────────────
     const W  = window.innerWidth;

@@ -37,6 +37,12 @@
   Bug fixed 2026-06-14 (was ≈22° latitude error at 60° → the continent/ocean-floor "black gap" seam a
   reviewer caught). If you add any new equirectangular asset, reproject the same way.
 
+- **Hover (mousemove) is bound to `window`, not the canvas — gate it on `event.target`.** So it fires
+  over UI panels too, and vessel hover/tooltips leak through open windows. Fix (2026-06-14): onMouseMove
+  sets `stateRef.overUI = event.target.tagName !== 'CANVAS'`; `tickRaycasting` bails (clears hover, hides
+  tooltip) when overUI. Clicks are already canvas-only (renderer.domElement), so they were fine. Keep
+  windows "solid": any new full-screen overlay must use `pointer-events:none` or it'll block map hover.
+
 - **simClock, not wall clock.** Anything time-of-world must call `simClock.now()`/`.date()`, never
   `Date.now()`/`new Date()`. Live mode = wall clock by default but supports pause/scrub/rate.
 

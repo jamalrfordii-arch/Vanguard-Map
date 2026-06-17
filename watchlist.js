@@ -16,7 +16,10 @@
 //   .getAlerts(mmsi)         — { speed, course, dark } booleans
 //   .onCardOpen(mmsi)        — call when a vessel detail card opens
 
+import { integrityManager } from './integrityManager.js';
+
 const LS_WATCHED  = 'vg1_watchlist_mmsis';
+const _WL_TIER_COLOR = { TRUSTED: '#7ad97a', QUESTIONABLE: '#ffa726', SUSPECT: '#d500f9' };
 const LS_NOTES    = 'vg1_watchlist_notes';
 const LS_ALERTS   = 'vg1_watchlist_alerts';
 const LS_NAMECACHE = 'vg1_watchlist_namecache'; // last-known name per MMSI
@@ -314,6 +317,15 @@ export function initWatchlist(aisManager) {
 
             const darkBadge = isDark ? ` <span class="vt-dark-badge">DARK</span>` : '';
 
+            // Integrity chip — tier-coloured. TRUSTED shows a faint dot; flagged
+            // vessels show the score so the watchlist doubles as an integrity column.
+            const ig    = integrityManager.getRecord(mmsi);
+            const igTier = ig ? ig.tier : 'TRUSTED';
+            const igCol  = _WL_TIER_COLOR[igTier] || '#7ad97a';
+            const integChip = igTier === 'TRUSTED'
+                ? `<span class="wl-integ" title="AIS integrity: ${ig ? ig.score : 100}" style="color:${igCol}; opacity:0.5; font-size:9px;">●</span>`
+                : `<span class="wl-integ" title="AIS integrity: ${igTier} ${ig.score}" style="color:${igCol}; font-weight:700; font-size:10px;">${ig.score}</span>`;
+
             // Flash / alerted state — auto-expires after 5 minutes
             const flash = _flashStates[mmsi];
             const isAlerted = flash && (Date.now() - flash.ts) < 5 * 60 * 1000;
@@ -330,6 +342,7 @@ export function initWatchlist(aisManager) {
                     <div class="wl-meta">${metaStr}</div>
                 </div>
                 <div class="wl-row-actions">
+                    ${integChip}
                     <div class="wl-alert-dots">
                         <div class="wl-dot ${dotSpeed}"  title="Speed anomaly alert"></div>
                         <div class="wl-dot ${dotCourse}" title="Course change alert"></div>
@@ -410,6 +423,10 @@ export function initWatchlist(aisManager) {
         _prevUpdate?.(...a);
         _markTabDirtyIfWatched(...a);
     };
+
+    // Refresh the integrity chips when scores change (covers flag decay / dark
+    // transitions that don't come with a position update).
+    window.addEventListener('vg1:integrityChanged', () => { if (_watched.size) _tabDirty = true; });
 
     // Immediate startup scan — pick up any names already in aisManager.vessels
     // before the first interval tick fires (AIS feed may have data in <3 s).
