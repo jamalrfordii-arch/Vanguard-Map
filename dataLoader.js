@@ -93,15 +93,18 @@ export async function loadGEBCO(url = './gebco_terrarium.png') {
     });
 }
 
-export async function loadAllData(onProgress) {
-    // ── Zoom level 3 — 8×8 grid = 64 tiles = 2048×2048 source resolution ────────
-    // Up from zoom 2 (4×4 = 1024×1024).  Each tile is still 256×256 px;
-    // doubling the grid in each axis gives 4× the DEM and colour detail —
-    // sharper ridgelines, finer river valleys, crisper coastlines.
-    // Trade-off: 64 fetches vs 16 at startup.  All fetches run in parallel so
-    // wall-clock cost ≈ slowest tile, not 4× longer.
-    const ZOOM      = 4;
-    const GRID_SIZE = 16;  // 2^ZOOM tiles per axis — 256 tiles, 4096×4096 resolution
+export async function loadAllData(onProgress, opts = {}) {
+    // ── Tile resolution scales with the chosen quality tier (passed from main.js
+    // via quality.tileZoom()). This is THE load-time-vs-capability lever: a LOW
+    // machine fetches far fewer/smaller tiles instead of the full 4096² payload.
+    //   zoom 2 → 4×4 = 16 tiles/layer, 1024²   (LOW)
+    //   zoom 3 → 8×8 = 64 tiles/layer, 2048²    (MEDIUM)
+    //   zoom 4 → 16×16 = 256 tiles/layer, 4096² (HIGH / ULTRA)
+    // 256×256 px tiles; GRID_SIZE = 2^ZOOM covers the whole world. All fetches run
+    // in parallel so wall-clock ≈ slowest tile. Elevation/colour samplers read the
+    // actual stitched image dimensions, so they adapt to whatever resolution loads.
+    const ZOOM      = Math.max(2, Math.min(4, opts.zoom ?? 4));
+    const GRID_SIZE = 1 << ZOOM;   // 2^ZOOM tiles per axis
 
     const demUrls = [];
     const colorUrls = [];

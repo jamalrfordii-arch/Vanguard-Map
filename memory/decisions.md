@@ -1,5 +1,25 @@
 # Decisions — standing choices and their reasons (append-only)
 
+- **2026-06-14 — Performance step 2: pre-load PERFORMANCE screen, shown EVERY load (Jamal's call).**
+  `choosePerformanceTier()` in main.js `await`s before `loadAllData` (load gated behind it — verified).
+  Two controls: QUALITY TIER (AUTO/LOW/MED/HIGH/ULTRA) + FPS CAP (Uncapped/30/60/120) + LAUNCH button;
+  pre-selects last choice. AUTO→`resetAuto()`, manual→`setTier`; always applies `setFpsCap`. NOT
+  first-run-gated anymore — appears on every load by design. Settings also has tier+FPS selectors for
+  mid-session. Verified: every-load overlay, both controls apply (MEDIUM+60), load gated. STEP 3 DONE
+  (the real load-time payoff): `quality.tileZoom()` (LOW=2/MED=3/HIGH=ULTRA=4) → `loadAllData(opts.zoom)`,
+  GRID_SIZE=2^zoom. Verified: LOW downloads 32 tiles @1024² vs HIGH 512 @4096². Performance feature
+  (FPS cap + pre-load tier screen + tier→tiles) COMPLETE. Remaining lever: GEBCO 54MB doesn't scale with
+  tier (skip on LOW — graceful Terrarium fallback exists). See performance-load.md.
+
+- **2026-06-14 — Performance feature, step 1: FPS cap (runtime).** Frame limiter in main.js animate loop
+  driven by `quality.fpsCap()` (0=uncapped; skips frames to hold target — can't exceed display refresh).
+  Settings-panel buttons (Uncapped/30/60/120), persisted via `qualityManager` (localStorage `vg1_fps_cap`).
+  Made `quality.tick()` cap-aware: pixel-ratio auto-tune judges "slow" against the cap's frame budget
+  (×1.4 slow / ×0.85 fast) so capping FPS doesn't blur the map. Verified: button → cap value + persist +
+  active-state. Steps 2-3 NEXT: pre-load quality-TIER screen (load-time; user instinct "set before load"
+  is correct for the tier), then wire the tier into the tile download (close the load-time-vs-capability
+  gap — tile zoom currently hardcoded regardless of tier, see performance-load.md).
+
 - **2026-06-14 — AIS Integrity feature COMPLETE (engine + all 4 UI surfaces).** Watchlist integrity
   column added (chip per row: faint green ● when TRUSTED, tier-coloured score when flagged) — verified
   live (TRUSTED=green ●, SUSPECT=violet "40"). Unified the tier palette to ONE language everywhere:

@@ -2708,6 +2708,27 @@
             <button class="cfg-btn" id="owm-connect-btn">Connect</button>
             <div class="cfg-feedback" id="owm-feedback"></div>
         </div>
+
+        <!-- Performance -->
+        <div class="cfg-section">
+            <div class="cfg-section-label">Performance — FPS Cap</div>
+            <div class="cfg-row" id="fps-cap-row" style="gap:6px; flex-wrap:wrap;">
+                <button class="cfg-btn fps-cap-btn" data-fps="0">Uncapped</button>
+                <button class="cfg-btn fps-cap-btn" data-fps="30">30</button>
+                <button class="cfg-btn fps-cap-btn" data-fps="60">60</button>
+                <button class="cfg-btn fps-cap-btn" data-fps="120">120</button>
+            </div>
+            <div class="cfg-feedback" id="fps-cap-feedback">A lower cap saves battery &amp; heat; can't exceed your display's refresh rate.</div>
+
+            <div class="cfg-section-label" style="margin-top:10px;">Quality Tier</div>
+            <div class="cfg-row" id="qual-tier-row" style="gap:6px; flex-wrap:wrap;">
+                <button class="cfg-btn qual-tier-btn" data-tier="LOW">LOW</button>
+                <button class="cfg-btn qual-tier-btn" data-tier="MEDIUM">MED</button>
+                <button class="cfg-btn qual-tier-btn" data-tier="HIGH">HIGH</button>
+                <button class="cfg-btn qual-tier-btn" data-tier="ULTRA">ULTRA</button>
+            </div>
+            <div class="cfg-feedback" id="qual-tier-feedback">Reload to apply terrain-detail changes.</div>
+        </div>
     </div>
 
     <!-- AI Co-Pilot panel removed — detection engine (aiCopilot.js) remains active in main.js.

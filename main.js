@@ -103,15 +103,82 @@ function getAltColor(altM) {
     }
 }
 
+// ── Pre-load performance profile ────────────────────────────────────────────
+// Shown ONCE (first visit) before the heavy data load, so the chosen quality tier
+// governs how much terrain/tile detail loads — the load-time decision that must be
+// made up front. AUTO keeps the auto-detected tier; a manual pick is remembered.
+// Changeable later in Settings (which prompts a reload, since it's load-time).
+function choosePerformanceTier() {
+    return new Promise(resolve => {
+        const info = quality.info();
+        const det  = quality.detected;
+        let selTier = quality.auto ? 'AUTO' : quality.tier;   // pre-select last choice
+        let selFps  = quality.fpsCap();
+        const desc = {
+            AUTO:   `Auto-detected: ${det}`,
+            LOW:    'Fastest · least detail',
+            MEDIUM: 'Balanced detail and speed',
+            HIGH:   'High detail',
+            ULTRA:  'Maximum detail',
+        };
+        const overlay = document.createElement('div');
+        overlay.id = 'perf-prompt';
+        overlay.style.cssText = `position:fixed; inset:0; z-index:300; background:rgba(1,5,11,0.97);
+            display:flex; flex-direction:column; justify-content:center; align-items:center;
+            font-family:'Courier New',Courier,monospace; color:#cfe3f1;`;
+        const pill = (g, v, label) => `<button class="perf-pill" data-group="${g}" data-val="${v}">${label}</button>`;
+        overlay.innerHTML = `
+            <style>
+              #perf-prompt .perf-pill{ background:rgba(2,12,22,0.9); border:1px solid rgba(64,196,255,0.35);
+                color:#9fc0d8; padding:8px 14px; font-family:inherit; font-size:12px; letter-spacing:1px; cursor:pointer; }
+              #perf-prompt .perf-pill.sel{ border-color:#40c4ff; color:#fff; background:rgba(64,196,255,0.18);
+                box-shadow:0 0 12px rgba(64,196,255,0.25); }
+              #perf-prompt .perf-group{ display:flex; gap:6px; flex-wrap:wrap; justify-content:center; max-width:400px; }
+              #perf-prompt .perf-label{ color:#8aabc4; font-size:10px; letter-spacing:2px; margin:16px 0 6px; }
+            </style>
+            <div style="color:#fff; font-size:15px; letter-spacing:3px; font-weight:800;">PERFORMANCE PROFILE</div>
+            <div style="color:#40c4ff; font-size:10px; letter-spacing:1px; margin-top:4px; opacity:0.85;">
+                GPU: ${info.gpu || 'unknown'} · ${info.cores || '?'} cores${info.mobile ? ' · mobile' : ''}</div>
+            <div class="perf-label">QUALITY TIER</div>
+            <div class="perf-group">
+                ${pill('tier','AUTO','AUTO')}${pill('tier','LOW','LOW')}${pill('tier','MEDIUM','MED')}${pill('tier','HIGH','HIGH')}${pill('tier','ULTRA','ULTRA')}
+            </div>
+            <div id="perf-tier-desc" style="color:#6b8298; font-size:10px; margin-top:6px; height:13px;">${desc[selTier]}</div>
+            <div class="perf-label">FPS CAP</div>
+            <div class="perf-group">
+                ${pill('fps','0','Uncapped')}${pill('fps','30','30')}${pill('fps','60','60')}${pill('fps','120','120')}
+            </div>
+            <button id="perf-launch" style="margin-top:24px; background:#0a2740; border:1px solid #40c4ff; color:#fff;
+                padding:10px 32px; font-family:inherit; font-size:13px; letter-spacing:3px; font-weight:800; cursor:pointer;">LAUNCH ▸</button>`;
+        document.body.appendChild(overlay);
+        const mark = (g, v) => overlay.querySelectorAll(`.perf-pill[data-group="${g}"]`)
+            .forEach(x => x.classList.toggle('sel', x.dataset.val === String(v)));
+        mark('tier', selTier); mark('fps', selFps);
+        overlay.querySelectorAll('.perf-pill').forEach(b => b.addEventListener('click', () => {
+            const g = b.dataset.group;
+            if (g === 'tier') { selTier = b.dataset.val; const d = document.getElementById('perf-tier-desc'); if (d) d.textContent = desc[selTier]; }
+            else selFps = parseInt(b.dataset.val, 10);
+            mark(g, g === 'tier' ? selTier : selFps);
+        }));
+        overlay.querySelector('#perf-launch').addEventListener('click', () => {
+            if (selTier === 'AUTO') quality.resetAuto(); else quality.setTier(selTier);
+            quality.setFpsCap(selFps);
+            overlay.remove();
+            resolve();
+        });
+    });
+}
+
 // ── Boot sequence ─────────────────────────────────────────────────────────────
 async function start() {
     try {
         bootMark('boot start');
+        await choosePerformanceTier();   // user picks tier BEFORE the heavy load
         const mapData = await loadAllData(msg => {
             const el = document.getElementById('loading-screen');
             if (el) el.innerHTML +=
                 `<div style="font-size:10px;color:var(--cyan);margin-top:10px;">${msg}</div>`;
-        });
+        }, { zoom: quality.tileZoom() });   // tier → tile resolution
         bootMark('all data loaded');
 
         initTerrainData(mapData);
@@ -1303,9 +1370,21 @@ async function init(mapData) {
     const _fpsEl = document.getElementById('fps-counter');
     const _msEl  = document.getElementById('ms-counter');
     let _fpsFrames = 0, _fpsLast = performance.now(), _fpsValue = 0;
+    let _lastRenderMs = 0;
 
     function animate() {
         requestAnimationFrame(animate);
+
+        // ── FPS cap (runtime frame limiter) ───────────────────────────────────
+        // quality.fpsCap() = 0 means uncapped (run at display refresh). Otherwise
+        // skip frames to hold the target. Can't exceed the monitor's refresh rate.
+        const _cap = quality.fpsCap();
+        if (_cap > 0) {
+            const _nowMs = performance.now();
+            if (_nowMs - _lastRenderMs < (1000 / _cap) - 1) return;   // too soon — skip this frame
+            _lastRenderMs = _nowMs;
+        }
+
         const delta   = clock.getDelta();
         const elapsed = clock.getElapsedTime();
 

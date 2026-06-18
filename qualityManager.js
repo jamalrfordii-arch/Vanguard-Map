@@ -22,7 +22,8 @@ const TIERS = {
     ULTRA:  { label: 'ULTRA',  splatScale: 1.0,  pixelCap: 2.0,  particleScale: 1.0,  vesselDetail: true,  post: { bloom: true,  fog: true,  clouds: true,  tiltshift: true,  bokeh: true  } },
 };
 const ORDER = ['LOW', 'MEDIUM', 'HIGH', 'ULTRA'];
-const LS_KEY = 'vg1_quality';
+const LS_KEY  = 'vg1_quality';
+const FPS_KEY = 'vg1_fps_cap';
 
 function gpuString() {
     try {
@@ -72,11 +73,17 @@ class QualityManager {
         this._pr       = TIERS[this.tier].pixelCap;   // current live pixel ratio
         this._emaMs    = 16.7;                          // frame-time moving average
         this._cool     = 0;                             // frames since last change (hysteresis)
+        // User FPS cap (0 = uncapped). Runtime knob — the frame limiter lives in
+        // main.js's animate loop; this is just the persisted source of truth.
+        this._fpsCap   = (() => { try { return parseInt(localStorage.getItem(FPS_KEY) || '0', 10) || 0; } catch (_) { return 0; } })();
     }
 
     get s() { return TIERS[this.tier]; }
 
     // ── Load-time knobs ──────────────────────────────────────────────────────
+    // Tile-download resolution per tier (the load-time-vs-capability lever).
+    // zoom 2/3/4 → 1024²/2048²/4096². Read by dataLoader.loadAllData.
+    tileZoom()    { return { LOW: 2, MEDIUM: 3, HIGH: 4, ULTRA: 4 }[this.tier] ?? 4; }
     splatScale()  { return this.s.splatScale; }
     gridScale()   { return Math.sqrt(this.s.splatScale); }  // grid is 2D → sqrt for linear point count
     pixelCap()    { return Math.min(window.devicePixelRatio || 1, this.s.pixelCap); }
@@ -101,15 +108,29 @@ class QualityManager {
 
         const cap   = this.pixelCap();
         const floor = 0.6;
-        if (this._emaMs > 22 && this._pr > floor) {          // < ~45 fps → ease down
+        // Cap-aware thresholds: when the user caps FPS, frame time is INTENTIONALLY
+        // ~ (1000/cap) ms — judge "too slow" relative to that budget so we don't
+        // blur the map just because it's capped. Uncapped → original 45/66 fps gates.
+        const budget = this._fpsCap > 0 ? 1000 / this._fpsCap : 16.7;
+        const slowMs = this._fpsCap > 0 ? budget * 1.4  : 22;
+        const fastMs = this._fpsCap > 0 ? budget * 0.85 : 15;
+        if (this._emaMs > slowMs && this._pr > floor) {       // genuinely behind budget → ease down
             this._pr = Math.max(floor, this._pr - 0.1);
             this._renderer.setPixelRatio(this._pr);
             this._cool = 90;
-        } else if (this._emaMs < 15 && this._pr < cap) {     // > ~66 fps → ease up
+        } else if (this._emaMs < fastMs && this._pr < cap) {  // comfortable headroom → ease up
             this._pr = Math.min(cap, this._pr + 0.1);
             this._renderer.setPixelRatio(this._pr);
             this._cool = 120;
         }
+    }
+
+    // ── FPS cap (runtime frame limiter; the limiter itself runs in main.js) ────
+    fpsCap()        { return this._fpsCap; }
+    setFpsCap(v) {
+        this._fpsCap = Math.max(0, parseInt(v, 10) || 0);
+        try { localStorage.setItem(FPS_KEY, String(this._fpsCap)); } catch (_) {}
+        console.info('[Quality] FPS cap', this._fpsCap || 'uncapped');
     }
 
     // ── Manual override ──────────────────────────────────────────────────────

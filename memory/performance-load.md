@@ -36,4 +36,16 @@ The network breakdown reads REAL transferred bytes from the Resource Timing API 
 picker ignores network. **To get numbers:** DevTools → Network throttle "Slow 4G" (+ CPU 4–6× for
 mobile sim), hard-reload, read the dump. Best run on the actual device someone reported as slow.
 
-_Diagnosed 2026-06-14; instrumentation added; fixes pending real numbers + Jamal's go-ahead._
+_Diagnosed 2026-06-14; instrumentation added._
+
+## SHIPPED (2026-06-14)
+- **Pre-load PERFORMANCE screen** (`choosePerformanceTier` in main.js) — every load, picks quality TIER
+  + FPS CAP, gates `loadAllData`.
+- **FPS cap** — runtime frame limiter in animate loop; `quality.fpsCap()`; cap-aware pixel-ratio tune.
+- **Tier → tile download** — `quality.tileZoom()` (LOW=2/MED=3/HIGH=ULTRA=4) passed to `loadAllData`;
+  GRID_SIZE=2^zoom. Verified: LOW = 32 tiles / 1024² vs HIGH 512 tiles / 4096². THE load-time fix.
+
+## STILL OPEN
+- **GEBCO 54 MB dominates LOW now** — doesn't scale with tier. Quick win: skip GEBCO on LOW (it has a
+  graceful Terrarium fallback) and/or defer the 17 MB normal map to after first render. Biggest remaining
+  lever for weak machines.

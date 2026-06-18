@@ -13,6 +13,7 @@ import { getTrueElevation } from './terrainBuilder.js';
 import { CITIES } from './cityManager.js';
 import { contextCards } from './contextCardManager.js';
 import { integrityManager } from './integrityManager.js';
+import { quality } from './qualityManager.js';
 
 // ── Module-level state ────────────────────────────────────────────────────────
 let _searchQuery  = '';
@@ -1204,6 +1205,29 @@ export function setupSettingsPanel(weatherManager) {
         panel.classList.remove('open');
         toggle.classList.remove('active');
     });
+
+    // ── FPS cap buttons (runtime; persisted in qualityManager) ────────────────
+    const fpsBtns = panel.querySelectorAll('.fps-cap-btn');
+    const _syncFps = () => {
+        const cur = quality.fpsCap();
+        fpsBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.fps, 10) === cur));
+    };
+    fpsBtns.forEach(b => b.addEventListener('click', () => {
+        quality.setFpsCap(parseInt(b.dataset.fps, 10));
+        _syncFps();
+    }));
+    _syncFps();
+
+    // ── Quality tier buttons (load-time; reload to fully apply) ───────────────
+    const tierBtns = panel.querySelectorAll('.qual-tier-btn');
+    const _syncTier = () => tierBtns.forEach(b => b.classList.toggle('active', b.dataset.tier === quality.tier));
+    tierBtns.forEach(b => b.addEventListener('click', () => {
+        quality.setTier(b.dataset.tier);
+        _syncTier();
+        const fb = document.getElementById('qual-tier-feedback');
+        if (fb) fb.textContent = `Set to ${b.dataset.tier}. Reload to apply terrain-detail change.`;
+    }));
+    _syncTier();
 
     // Populate input with saved key on first open
     _refreshOwmState(weatherManager);
