@@ -22,6 +22,7 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { legendManager } from './legendManager.js';
 
 const KT      = 0.514444;   // m/s per knot
 const Y       = 5.2;        // render height — just above the surface wind streaks
@@ -31,10 +32,12 @@ const LAT_LIM = 84;         // Mercator pole clamp
 // Severity ramp — redundantly encoded so it reads over the busy map: heat +
 // brightness + line thickness + (hurricane only) a pulse. Hurricane is hot
 // magenta — complementary to ocean blue, so it pops where red drowned.
+// core === glow === legend swatch colour, so the rendered contour reads as the
+// exact hue shown in the MAP KEYS panel (additive core over a same-hue halo).
 const TIERS = [
-    { name: 'GALE',      kt: 34, mps: 34 * KT, beaufort: '8–9',   core: 0xeaf4ff, glow: 0x9fd0ff, w: 2.0, pulse: 0 },
-    { name: 'STORM',     kt: 48, mps: 48 * KT, beaufort: '10–11', core: 0xffe04a, glow: 0xff9e2a, w: 3.0, pulse: 0 },
-    { name: 'HURRICANE', kt: 64, mps: 64 * KT, beaufort: '12',    core: 0xff8ae8, glow: 0xff2aa0, w: 4.6, pulse: 1 },
+    { name: 'GALE',      kt: 34, mps: 34 * KT, beaufort: '8–9',   core: 0x9fd0ff, glow: 0x9fd0ff, w: 2.0, pulse: 0 },
+    { name: 'STORM',     kt: 48, mps: 48 * KT, beaufort: '10–11', core: 0xff9e2a, glow: 0xff9e2a, w: 3.0, pulse: 0 },
+    { name: 'HURRICANE', kt: 64, mps: 64 * KT, beaufort: '12',    core: 0xff2aa0, glow: 0xff2aa0, w: 4.6, pulse: 1 },
 ];
 
 function lonLatToScene(lon, lat) {
@@ -57,58 +60,24 @@ export class BeaufortWarningManager {
         this._tiers  = [];                   // { glowMat, coreMat }
         this._lastBuild = 0;
         this._fillOpacity = 1.0;             // glow strength multiplier (live-tunable)
-        this._legendEl = null;
-        this._installLegend();
     }
 
     setWindSource(windManager) { this._wind = windManager; }
 
     setVisible(on) {
         this.group.visible = !!on;
-        if (this._legendEl) this._legendEl.style.display = on ? 'flex' : 'none';
+        if (on) legendManager.show('wind-warnings', 'STORM WARNINGS · BEAUFORT', this._legendHTML());
+        else    legendManager.hide('wind-warnings');
         if (on && (Date.now() - this._lastBuild > 1000)) this.rebuild();
     }
 
-    // Legend pops up with the layer (mirrors the GFS wind legend pattern).
-    _installLegend() {
-        if (typeof document === 'undefined' || document.getElementById('beaufort-legend')) return;
-        const el = document.createElement('div');
-        el.id = 'beaufort-legend';
-        el.style.cssText = [
-            'position:fixed', 'right:18px', 'bottom:212px', 'z-index:50',
-            'display:none', 'flex-direction:column', 'gap:4px',
-            'padding:8px 10px', 'background:rgba(2,6,14,0.78)',
-            'border:1px solid rgba(120,180,220,0.28)', 'border-radius:6px',
-            'font:11px/1.3 ui-monospace,Consolas,monospace',
-            'color:#a8c5dc', 'letter-spacing:0.06em',
-            'backdrop-filter:blur(6px)', '-webkit-backdrop-filter:blur(6px)',
-            'pointer-events:none', 'user-select:none',
-        ].join(';');
-        const title = document.createElement('div');
-        title.textContent = 'STORM  WARNINGS · BEAUFORT';
-        title.style.cssText = 'color:#cfe2f3;letter-spacing:0.12em;margin-bottom:4px;font-weight:600';
-        el.appendChild(title);
-        const bands = [
-            { lbl: 'HURRICANE  64+ kt  (B12)',  hex: '#ff2aa0' },
-            { lbl: 'STORM      48–63 kt (B10–11)', hex: '#ff9e2a' },
-            { lbl: 'GALE       34–47 kt (B8–9)',  hex: '#9fd0ff' },
-        ];
-        for (const b of bands) {
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;align-items:center;gap:8px';
-            const sw = document.createElement('span');
-            sw.style.cssText = 'width:18px;height:6px;background:' + b.hex + ';border-radius:1px;box-shadow:0 0 6px ' + b.hex;
-            const txt = document.createElement('span');
-            txt.textContent = b.lbl;
-            row.appendChild(sw); row.appendChild(txt);
-            el.appendChild(row);
-        }
-        const foot = document.createElement('div');
-        foot.textContent = 'derived from GFS · non-authoritative';
-        foot.style.cssText = 'color:#4a6b84;margin-top:5px;font-size:9px;letter-spacing:0.04em';
-        el.appendChild(foot);
-        document.body.appendChild(el);
-        this._legendEl = el;
+    // Legend body for the unified MAP KEYS panel (mirrors the GFS wind pattern).
+    _legendHTML() {
+        return legendManager.constructor.swatchRows([
+            { label: 'HURRICANE · 64+ kt (B12)',   hex: '#ff2aa0' },
+            { label: 'STORM · 48–63 kt (B10–11)',  hex: '#ff9e2a' },
+            { label: 'GALE · 34–47 kt (B8–9)',     hex: '#9fd0ff' },
+        ], 'derived from GFS · non-authoritative');
     }
 
     // Live tuning from DevTools: window.vg1Warnings.setGlow(1.5)

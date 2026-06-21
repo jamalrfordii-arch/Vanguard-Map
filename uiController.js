@@ -322,6 +322,22 @@ function _renderTimeline(positions, accentColor = '#00D4FF') {
 // Fetched on demand from the local proxy (node flight-proxy.js) → /vessel/<imo>.
 const DOSSIER_PROXY = 'http://localhost:8787/vessel';
 
+// Detention → alert: when an Equasis dossier reveals PSC detention(s), raise an
+// alert in the ALERTS tab (deduped per vessel for the session). Surfaces the
+// finding beyond the card so a detained vessel registers as a flagged event.
+const _detentionAlerted = new Set();
+function _raiseDetentionAlert(ud, data) {
+    const mmsi = String(ud.id || '');
+    if (!mmsi || _detentionAlerted.has(mmsi)) return;
+    _detentionAlerted.add(mmsi);
+    const n = data.detentions;
+    window.alertsManager?.addAlert?.({
+        type: 'DETENTION', mmsi,
+        vesselName: data.name || ud.displayName || mmsi,
+        message: `${n} PSC detention${n > 1 ? 's' : ''} on record (Equasis)`,
+    });
+}
+
 function renderDossier(r) {
     if (!r || !r.ok) {
         const why = r?.error || 'unavailable';
@@ -420,7 +436,10 @@ function wireDossierButton(ud, isNonVessel) {
         if (ud.country)      p.set('flag', ud.country);
         fetch(DOSSIER_PROXY + '?' + p.toString())
             .then(res => res.json())
-            .then(r => { body.innerHTML = renderDossier(r); })
+            .then(r => {
+                body.innerHTML = renderDossier(r);
+                if (r && r.ok && r.data && r.data.detentions > 0) _raiseDetentionAlert(ud, r.data);
+            })
             .catch(() => { body.innerHTML = renderDossier({ ok: false, error: 'proxy offline' }); });
     };
     btn.disabled = false;
@@ -1228,6 +1247,20 @@ export function setupSettingsPanel(weatherManager) {
         if (fb) fb.textContent = `Set to ${b.dataset.tier}. Reload to apply terrain-detail change.`;
     }));
     _syncTier();
+
+    // ── Camera feel (OrbitControls damping; live + persisted) ─────────────────
+    const camBtns = panel.querySelectorAll('.cam-feel-btn');
+    const _syncCam = () => {
+        const cur = window.controls ? window.controls.dampingFactor : 0.12;
+        camBtns.forEach(b => b.classList.toggle('active', Math.abs(parseFloat(b.dataset.damp) - cur) < 0.001));
+    };
+    camBtns.forEach(b => b.addEventListener('click', () => {
+        const d = parseFloat(b.dataset.damp);
+        if (window.controls) window.controls.dampingFactor = d;
+        try { localStorage.setItem('vg1_cam_damping', String(d)); } catch (_) {}
+        _syncCam();
+    }));
+    _syncCam();
 
     // Populate input with saved key on first open
     _refreshOwmState(weatherManager);

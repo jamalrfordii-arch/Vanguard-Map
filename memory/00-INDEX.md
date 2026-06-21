@@ -35,4 +35,4 @@ speculative ideas not yet decided, and duplicates of something already recorded.
 **Pruning:** trigger by condition, not calendar — when a file grows unwieldy or every few sessions,
 run a consolidation pass that *proposes* merges for Jamal to glance at. Never delete silently.
 
-_Last updated: 2026-06-14_
+_Last updated: 2026-06-20_

@@ -144,6 +144,7 @@ function makeSprite(scene) {
 export class ClusterManager {
     constructor(scene) {
         this.scene         = scene;
+        this._shipsEnabled = true;   // AIS-vessels layer toggle — gates ship clustering only
         this._shipActive   = false;
         this._flightActive = false;
         this._shipClusters   = new Map(); // region → sprite state (far zoom combined)
@@ -190,9 +191,19 @@ export class ClusterManager {
         });
     }
 
+    // AIS-vessels layer on/off — gates SHIP clustering (vessels) only; aircraft untouched.
+    // When off, hides all ship/dark/active cluster sprites so the vessel layer fully disappears.
+    setShipsEnabled(on) {
+        this._shipsEnabled = !!on;
+        if (!on) {
+            [this._shipClusters, this._darkClusters, this._activeClusters].forEach(map =>
+                map.forEach(c => { c.sprite.visible = false; if (c.shadow) c.shadow.visible = false; }));
+        }
+    }
+
     // elapsed — seconds since app start (for smooth sine-wave pulse animation)
     tick(aisShips, camera, elapsed = 0) {
-        this._tickShips(aisShips, camera, elapsed);
+        if (this._shipsEnabled) this._tickShips(aisShips, camera, elapsed);
         this._tickFlights(aisShips, camera, elapsed);
     }
 

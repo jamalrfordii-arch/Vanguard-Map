@@ -31,6 +31,7 @@ import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
 import { LineGeometry }         from 'three/addons/lines/LineGeometry.js';
 import { Line2 }                from 'three/addons/lines/Line2.js';
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { legendManager } from './legendManager.js';   // unified collapsible MAP KEYS panel
 
 // Synoptic-layer (jets / cyclones / ITCZ) heights & thresholds
 const JET_Y          = 9.0;
@@ -319,7 +320,6 @@ export class GFSWindManager {
 
         for (let i = 0; i < N; i++) this._spawn(i, true);
         this._tick();
-        this._installLegend();
         this._buildPatterns();   // initial synoptic layer from synthetic field
 
         console.info(`[GFS] Initialised — ${N} streaks × ${TD-1} segments, ${LINE_WIDTH_PX}px Line2, synthetic field active. Live GFS loading…`);
@@ -330,7 +330,8 @@ export class GFSWindManager {
 
     setVisible(on) {
         this.group.visible = on;
-        if (this._legendEl) this._legendEl.style.display = on ? 'flex' : 'none';
+        if (on) legendManager.show('gfs-wind', 'GFS WIND · 10 m', this._legendHTML());
+        else    legendManager.hide('gfs-wind');
         console.info(`[GFS] Wind field layer ${on ? 'ON' : 'OFF'} — ${this._haveLiveData ? 'LIVE GFS data' : 'synthetic placeholder, GFS still loading'}`);
         if (on && !this._haveLiveData && !this._fetchInFlight) this._fetch();
     }
@@ -1226,43 +1227,22 @@ export class GFSWindManager {
         }
     }
 
-    _installLegend() {
-        if (document.getElementById('gfs-wind-legend')) return;
-        const el = document.createElement('div');
-        el.id = 'gfs-wind-legend';
-        el.style.cssText = [
-            'position:fixed', 'right:18px', 'bottom:46px', 'z-index:50',
-            'display:none', 'flex-direction:column', 'gap:4px',
-            'padding:8px 10px', 'background:rgba(2,6,14,0.78)',
-            'border:1px solid rgba(120,180,220,0.28)', 'border-radius:6px',
-            'font:11px/1.3 ui-monospace,Consolas,monospace',
-            'color:#a8c5dc', 'letter-spacing:0.06em',
-            'backdrop-filter:blur(6px)', '-webkit-backdrop-filter:blur(6px)',
-            'pointer-events:none', 'user-select:none',
-        ].join(';');
-        const title = document.createElement('div');
-        title.textContent = 'GFS  WIND  @  10 m';
-        title.style.cssText = 'color:#cfe2f3;letter-spacing:0.14em;margin-bottom:4px;font-weight:600';
-        el.appendChild(title);
+    _legendHTML() {
         const bands = [
-            { lbl: '> 30 m/s   hurricane', hex: '#ffd8ff' },
-            { lbl: '> 22 m/s   gale',      hex: '#ff528a' },
-            { lbl: '> 15 m/s   strong',    hex: '#ff9533' },
-            { lbl: '> 10 m/s   moderate',  hex: '#ffe060' },
-            { lbl: '>  5 m/s   light',     hex: '#8ce6ff' },
-            { lbl: '   calm',              hex: '#6bbfff' },
+            { lbl: '&gt; 30 m/s&nbsp;&nbsp; hurricane', hex: '#ffd8ff' },
+            { lbl: '&gt; 22 m/s&nbsp;&nbsp; gale',      hex: '#ff528a' },
+            { lbl: '&gt; 15 m/s&nbsp;&nbsp; strong',    hex: '#ff9533' },
+            { lbl: '&gt; 10 m/s&nbsp;&nbsp; moderate',  hex: '#ffe060' },
+            { lbl: '&gt;&nbsp; 5 m/s&nbsp;&nbsp; light',     hex: '#8ce6ff' },
+            { lbl: '&nbsp;&nbsp;&nbsp;calm',              hex: '#6bbfff' },
         ];
+        let html = '';
         for (const b of bands) {
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;align-items:center;gap:8px';
-            const sw  = document.createElement('span');
-            sw.style.cssText = 'width:18px;height:6px;background:' + b.hex + ';border-radius:1px;box-shadow:0 0 6px ' + b.hex;
-            const txt = document.createElement('span');
-            txt.textContent = b.lbl;
-            row.appendChild(sw); row.appendChild(txt);
-            el.appendChild(row);
+            html += `<div style="display:flex;align-items:center;gap:8px;padding:1px 0;">
+                <span style="width:18px;height:7px;border-radius:1px;flex:0 0 auto;background:${b.hex};box-shadow:0 0 6px ${b.hex};"></span>
+                <span>${b.lbl}</span></div>`;
         }
-        document.body.appendChild(el);
-        this._legendEl = el;
+        html += `<div style="color:#4a6b84;margin-top:6px;font-size:9px;letter-spacing:0.04em;">NOAA GFS · streaklines = direction + speed</div>`;
+        return html;
     }
 }

@@ -2554,6 +2554,10 @@
                 Chokepoint Labels
                 <span class="lp-dot on" id="dot-chokepoints"></span>
             </div>
+            <div class="lp-row" data-layer="sea-state">
+                Sea State (Waves)
+                <span class="lp-dot" id="dot-sea-state"></span>
+            </div>
         </div>
         <div class="lp-section">
             <div class="lp-section-label">Terrain</div>
@@ -2728,6 +2732,14 @@
                 <button class="cfg-btn qual-tier-btn" data-tier="ULTRA">ULTRA</button>
             </div>
             <div class="cfg-feedback" id="qual-tier-feedback">Reload to apply terrain-detail changes.</div>
+
+            <div class="cfg-section-label" style="margin-top:10px;">Camera Feel</div>
+            <div class="cfg-row" id="cam-feel-row" style="gap:6px; flex-wrap:wrap;">
+                <button class="cfg-btn cam-feel-btn" data-damp="0.06">Smooth</button>
+                <button class="cfg-btn cam-feel-btn" data-damp="0.12">Balanced</button>
+                <button class="cfg-btn cam-feel-btn" data-damp="0.22">Snappy</button>
+            </div>
+            <div class="cfg-feedback">Snappier = less glide / more responsive. Applies instantly.</div>
         </div>
     </div>
 

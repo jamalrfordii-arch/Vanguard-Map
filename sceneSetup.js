@@ -46,7 +46,11 @@ export function initScene() {
 export function initControls(camera, renderer, stateRef) {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.04;
+    // Higher dampingFactor = less inertial glide = more responsive. The old 0.04
+    // was very floaty ("momentum makes it feel less responsive" — feedback). 0.12
+    // tracks input closely while keeping a touch of smoothing. User-tunable via the
+    // Camera Feel control in Settings (persisted).
+    controls.dampingFactor = (() => { try { return parseFloat(localStorage.getItem('vg1_cam_damping')) || 0.12; } catch (_) { return 0.12; } })();
     controls.maxDistance = 550;
     controls.minDistance = 15;
     // Polar angle limits — prevent the two failure modes:

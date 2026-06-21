@@ -117,12 +117,14 @@ export async function loadAllData(onProgress, opts = {}) {
 
     if (onProgress) onProgress('DOWNLOADING REAL-WORLD DATA, BATHYMETRY & GEOPOLITICAL BORDERS...');
 
-    mark('loadAllData start', { zoom: ZOOM, gridTilesPerAxis: GRID_SIZE, totalTiles: GRID_SIZE * GRID_SIZE * 2 });
-    const [demObj, colorObj, worldBordersGeoJSON, gebcoObj] = await Promise.all([
-        loadAndStitchTiles(demUrls, GRID_SIZE, GRID_SIZE, 'DEM'),
-        loadAndStitchTiles(colorUrls, GRID_SIZE, GRID_SIZE, 'satellite'),
-        fetchWorldBorders().then(b => { mark('fetch world borders'); return b; }),
-        loadGEBCO()
+    mark('loadAllData start', { zoom: ZOOM, gridTilesPerAxis: GRID_SIZE, totalTiles: GRID_SIZE * GRID_SIZE * 2, skipGebco: !!opts.skipGebco });
+
+    // GEBCO is a flat ~54 MB download that doesn't scale with tier. On LOW we skip
+    // it entirely — the ocean floor falls back to the (coarser) Terrarium bathymetry
+    // via getBestElevation, same as the "not found" path. Big win for weak machines.
+    const gebcoPromise = opts.skipGebco
+        ? Promise.resolve((onProgress && onProgress('GEBCO SKIPPED (LOW TIER) — TERRARIUM OCEAN FLOOR'), null))
+        : loadGEBCO()
             .then(obj => {
                 mark('GEBCO load+decode', { bufMB: obj ? +(obj.data.byteLength / 1048576).toFixed(1) : 0 });
                 if (onProgress) onProgress('GEBCO BATHYMETRY LOADED — 8192×4096 OCEAN FLOOR ACTIVE');
@@ -132,7 +134,13 @@ export async function loadAllData(onProgress, opts = {}) {
                 console.warn('[GEBCO] gebco_terrarium.png not found or failed to load — ocean floor will use Terrarium data.', err);
                 if (onProgress) onProgress('GEBCO NOT FOUND — USING TERRARIUM OCEAN DATA');
                 return null;
-            })
+            });
+
+    const [demObj, colorObj, worldBordersGeoJSON, gebcoObj] = await Promise.all([
+        loadAndStitchTiles(demUrls, GRID_SIZE, GRID_SIZE, 'DEM'),
+        loadAndStitchTiles(colorUrls, GRID_SIZE, GRID_SIZE, 'satellite'),
+        fetchWorldBorders().then(b => { mark('fetch world borders'); return b; }),
+        gebcoPromise,
     ]);
 
     return {

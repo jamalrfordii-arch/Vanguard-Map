@@ -1,5 +1,74 @@
 # Decisions — standing choices and their reasons (append-only)
 
+- **2026-06-20 — Sea-state layer is now THREE components (total / swell / wind-wave), flat selector.**
+  Phases 1+2 of the wave-decomposition feature. `waveFieldManager` fetches `wave_height`,
+  `swell_wave_height`, `wind_wave_height` in ONE Open-Meteo Marine request (same rate cost as one);
+  stored as `_h{total,swell,wind}` + `_filled{...}`; accessors take a `comp='total'` arg
+  (`waveAt`/`waveAtFilled`/`maxHeight`). Cache key bumped **`vg1_wave_field`→`vg1_wave_field_v2`**
+  (3-array shape; old v1 ignored → one fresh fetch on upgrade). `waveFieldLayer` gained `setComponent()`
+  + a 3-button selector inside the sea-state legend card (inline onclick → `window.vg1WaveLayer`);
+  same renderer (RAMP, land mask, fades, contours) repaints from the chosen field. **Default = `total`
+  everywhere, so the tuned look is byte-identical with no interaction** (Jamal was protective of the
+  hard-won sea-state tuning — kept it untouched). Components do NOT sum linearly (Hs combine in
+  quadrature: total² ≈ swell² + wind² + secondary) — never reconstruct one from the others. Verified
+  live: total 11.2 m / swell 6.7 m / wind 10.7 m, three visibly distinct fields, same style.
+  PHASE 3 (3D "explode" anatomy) — ATTEMPTED 2026-06-20, then DELETED at Jamal's call. Built standalone
+  `wave3DLayer.js` (read waveField, never touched the flat layer; three stacked height-field sheets,
+  relief = wave height, explode pulled swell+wind downward, opaque + normal-lit relief, auto-framed low
+  oblique camera). VERDICT: didn't read. Root problem is geometric, not tuning — **stacked HORIZONTAL
+  sheets occlude each other**: from any above-horizon angle the opaque top sheet hides the two below, so
+  "all three at once" is impossible; making them translucent turns it into unreadable colour-mud (Jamal's
+  word: "mud"). The only way to show all three would be a lateral exploded-diagram fan-out, which breaks
+  the geographic alignment Jamal wanted. So the whole feature was removed (file deleted; main.js import/
+  ctor/toggle/tick + index.html row reverted). **Do not re-attempt stacked-sheet 3D.** If 3D ever
+  returns, it'd have to be ONE relief surface for the selected component (no stacking) — but not planned.
+  KEPT instead: the flat Total/Swell/Wind selector (phases 1+2 above), which delivers the decomposition.
+
+- **2026-06-20 — Unified collapsible legend ("MAP KEYS"): one panel, one card per active layer.**
+  `legendManager.js` singleton (top-left, persisted per-card collapse + master minimize; `show(id,
+  title,html)` / `hide(id)`; `swatchRows()` helper; `window.legendManager`). Replaced the old per-layer
+  floating legend divs (which overlapped). Migrated: sea-state, GFS wind, Beaufort storm-warnings
+  (id `wind-warnings`), IBTrACS cyclones (id `ibtracs`, title "CYCLONE TRACKS · SAFFIR-SIMPSON" — was
+  never given a legend before). GPS-jamming has no legend; IBTrACS hover popup is separate, untouched.
+
+- **2026-06-20 — Legend/marker colour PARITY: the map must render the exact swatch hue.** Two fixes
+  after Jamal flagged mismatches. (1) Beaufort: the `core` line colour differed from the legend
+  (`glow`) colour, and additive blending shows the core → set core===glow===legend hue per tier
+  (magenta #ff2aa0 / orange #ff9e2a / blue #9fd0ff). (2) IBTrACS tracks: `categoryColor()` applied a
+  1.4× saturation boost that SHIFTED hues (Cat-2 orange → yellow) and the track points used
+  AdditiveBlending → washed to white over bright terrain. Removed the boost; switched track points to
+  **NormalBlending** (the cyclone-spiral already did, for this reason); added `CATEGORY_HEX` as the
+  single palette both the legend and `categoryColor` draw from. GOTCHA worth remembering: **additive
+  blending over the bright base map washes colours toward white — use NormalBlending when a marker's
+  literal hue must match a key.**
+
+- **2026-06-17 — BACKLOG (Jamal's sidenote): build a real elevation map for the map.** Context: while
+  styling the sea-state contours to look like a topographic chart, Jamal noted we should build an
+  elevation map. Two reads, both worth it: (a) a land topography/relief layer with its own contour lines
+  (true topo look — the rich fine detail in a real topo map comes from high-res elevation data, which our
+  coarse 5° wave field can't mimic); (b) more broadly, a proper elevation model the map can sample
+  (we already have GEBCO bathymetry + Terrarium DEM + getTrueElevation, so the pieces exist — this would
+  be unifying/exposing them as a first-class elevation layer, possibly with contours). Not started.
+
+- **2026-06-14 — GUIDING ARCHITECTURE PRINCIPLE: "distributed autonomy under central intent."** Jamal's
+  call — build systems this way in general. Octopus model: a central reasoner holds intent + delegates;
+  semi-autonomous "arms" (managers, tools, sub-agents) handle their own domain and report back; automatic
+  "reflexes" (e.g. invariants.js) bypass the center; a "nervous system" (the `vg1:` event bus — managers
+  communicate by events, never importing each other) decouples them; memory (`memory/`) persists/grows.
+  Rationale: it stays connected to a living/changing reality. Apply to new features: prefer event-driven
+  decoupling + local autonomy over centralized micromanagement.
+- **2026-06-14 — Detention → alert.** New `DETENTION` alert type + default rule (enabled) in
+  alertsManager (⚓, WARNING, amber). uiController raises it via `window.alertsManager.addAlert` when an
+  Equasis dossier returns `detentions > 0`, deduped per MMSI for the session; click-to-focus works via
+  the existing alert→`vg1:selectVessel` path. Surfaces a PSC detention beyond the card as a flagged event.
+  Verified: rule merges in, alert renders correct meta. (Real trigger needs flight-proxy running.)
+
+- **2026-06-14 — Camera responsiveness fix (feedback: "momentum makes it feel less responsive").**
+  OrbitControls `dampingFactor` was 0.04 (very floaty/glidey). Raised default to 0.12 (responsive, light
+  smoothing) in sceneSetup `initControls`, loaded from localStorage `vg1_cam_damping`. Added a "Camera
+  Feel" control in Settings: Smooth 0.06 / Balanced 0.12 / Snappy 0.22 — live + persisted. Verified:
+  default 0.12, buttons set+persist+sync. Higher = less glide.
+
 - **2026-06-14 — Performance step 2: pre-load PERFORMANCE screen, shown EVERY load (Jamal's call).**
   `choosePerformanceTier()` in main.js `await`s before `loadAllData` (load gated behind it — verified).
   Two controls: QUALITY TIER (AUTO/LOW/MED/HIGH/ULTRA) + FPS CAP (Uncapped/30/60/120) + LAUNCH button;

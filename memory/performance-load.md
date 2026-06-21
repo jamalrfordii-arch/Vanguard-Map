@@ -45,7 +45,11 @@ _Diagnosed 2026-06-14; instrumentation added._
 - **Tier → tile download** — `quality.tileZoom()` (LOW=2/MED=3/HIGH=ULTRA=4) passed to `loadAllData`;
   GRID_SIZE=2^zoom. Verified: LOW = 32 tiles / 1024² vs HIGH 512 tiles / 4096². THE load-time fix.
 
+- **GEBCO + normal-map skip on LOW (SHIPPED 2026-06-14).** On LOW tier, `loadAllData({skipGebco:true})`
+  skips the 54 MB GEBCO (ocean floor falls back to Terrarium via getBestElevation) and main.js skips the
+  17 MB normal map (`quality.tier==='LOW' ? null : loadNormalMap`, graceful smooth-normal fallback).
+  Verified: LOW downloads neither (gebco/normals = NONE) + 32 tiles only. ~71 MB saved on LOW.
+
 ## STILL OPEN
-- **GEBCO 54 MB dominates LOW now** — doesn't scale with tier. Quick win: skip GEBCO on LOW (it has a
-  graceful Terrarium fallback) and/or defer the 17 MB normal map to after first render. Biggest remaining
-  lever for weak machines.
+- Optional: defer the normal map to AFTER first render on MEDIUM/HIGH too (currently a blocking await).
+  Low priority — only LOW skips it now.

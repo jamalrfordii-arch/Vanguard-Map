@@ -25,6 +25,8 @@ import {
 import { PortManager } from './portManager.js';
 import { ClusterManager } from './clusterManager.js';
 import { integrityManager, setElevationFn as setIntegrityElevation } from './integrityManager.js';
+import { waveField } from './waveFieldManager.js';   // global sea-state data field (Phase A; lazy fetch)
+import { WaveFieldLayer } from './waveFieldLayer.js'; // global sea-state heatmap + contour render layer
 import { FlightManager, lonLatAltToScene } from './flightManager.js';
 import {
     setupUI, setupSettingsPanel, setupSectorSearch,
@@ -178,7 +180,7 @@ async function start() {
             const el = document.getElementById('loading-screen');
             if (el) el.innerHTML +=
                 `<div style="font-size:10px;color:var(--cyan);margin-top:10px;">${msg}</div>`;
-        }, { zoom: quality.tileZoom() });   // tier → tile resolution
+        }, { zoom: quality.tileZoom(), skipGebco: quality.tier === 'LOW' });   // tier → tile res + LOW skips GEBCO
         bootMark('all data loaded');
 
         initTerrainData(mapData);
@@ -332,6 +334,12 @@ async function init(mapData) {
     // Rebuild periodically while visible (wind refreshes every 6 h; cheap resample)
     setInterval(() => { if (beaufortWarnings.group.visible) beaufortWarnings.rebuild(); }, 180000);
 
+    // Global sea-state field — significant wave height heatmap + contours.
+    // Lazy: fetches Open-Meteo Marine on first enable, repaints as data streams in.
+    const waveFieldLayer = new WaveFieldLayer(scene);
+    waveFieldLayer.setElevationFn(getTrueElevation);   // GEBCO-backed land/ocean mask
+    window.vg1WaveLayer = waveFieldLayer;
+
     // ── Upper-air wind (850mb low-level + 250mb jet stream) ──────────────────
     // Gives the scene actual vertical extent. Surface wind sits at Y=8,
     // 850mb at Y=22, jet stream at Y=65. Tilt the camera to see the
@@ -394,8 +402,10 @@ async function init(mapData) {
     // Generated once by running tools/generate_normals.py.  If the file is
     // absent, loadNormalMap() resolves to null and both systems fall back to
     // smooth vertex normals — no visual regression, just less fine detail.
-    const normalMapTex = await loadNormalMap('./terrain_normals.png');
-    bootMark('normal map loaded (BLOCKING)', { note: '17MB await — candidate to defer' });
+    // Skipped on LOW: it's a 17 MB blocking download, and LOW trades fine shading
+    // for fast load (graceful null fallback to smooth normals).
+    const normalMapTex = quality.tier === 'LOW' ? null : await loadNormalMap('./terrain_normals.png');
+    bootMark(quality.tier === 'LOW' ? 'normal map skipped (LOW)' : 'normal map loaded (BLOCKING)');
 
     // ── Global continent terrain mesh — satellite + geographic 3D character ──
     // Built in continentWorker.js off-thread; fades in at continent zoom
@@ -610,22 +620,15 @@ async function init(mapData) {
     };
 
     aisManager.onVesselDark = (mmsi, vesselData) => {
-        integrityManager.markDark(mmsi);
-        // Show a dark-vessel marker at last known position
-        const sp  = lonLatToScene(vesselData.lonDeg, vesselData.latDeg);
+        integrityManager.markDark(mmsi);          // dark = analytical signal (integrity penalty + SUSPECT ring)
+        // Dark-vessel "laser beam" markers REMOVED (2026-06-17) — visual clutter
+        // (hundreds of pink beams). The vessel stays visible and the dark state is
+        // surfaced via the integrity engine (board / watchlist / violet ring) instead.
         const obj = vesselData.threeObject;
         if (obj) {
-            const marker = createDarkVesselMarker(sp, laneGroup);
-            obj.userData.darkMarker  = marker;
+            obj.userData.darkMarker  = null;
             obj.userData.isDark      = true;
             obj.userData.darkSinceMs = vesselData.darkSince ?? Date.now();
-            obj.visible = false;
-
-            // Remove green dot immediately when vessel goes dark
-            if (obj.userData.vesselDot) {
-                laneGroup.remove(obj.userData.vesselDot);
-                obj.userData.vesselDot = null;
-            }
         }
     };
 
@@ -935,7 +938,7 @@ async function init(mapData) {
     window.addEventListener('wheel',       _markInteracted, { once: true });
     window.addEventListener('keydown',     _markInteracted, { once: true });
 
-    window.addEventListener('resize',    () => onWindowResize(camera, renderer, composer));
+    window.addEventListener('resize',    () => { onWindowResize(camera, renderer, composer); waveFieldLayer.onResize(window.innerWidth, window.innerHeight); });
     window.addEventListener('mousemove', e => onMouseMove(e, inputDeps), false);
 
     // ── Click / dblclick on the CANVAS only ──────────────────────────────────
@@ -985,10 +988,20 @@ async function init(mapData) {
             case 'wind-warnings': beaufortWarnings.setVisible(on);  break;
             case 'wind-low':     gfsUpperWindManager.setLowVisible(on); break;
             case 'wind-jet':     gfsUpperWindManager.setJetVisible(on); break;
-            case 'sea-state':    gfsWindManager.setWaveVisible(on);  break;  // deprecated, no-op
+            case 'sea-state':    waveFieldLayer.setVisible(on);       break;  // global wave-height field
             case 'storm-history': ibtracsManager.setVisible(on);     break;
             case 'gps-jamming':  gpsJammingManager.setVisible(on);   break;
             case 'fog':          window.vg1_fog_enabled   = on;       break;
+            case 'ais-vessels':
+                // Master switch for the vessel layer: hides/show all AIS vessels, their
+                // dots/rings/trails, AND the cluster glyphs — so the map can show only
+                // other features. Aircraft (aviation layer) are unaffected.
+                window._aisLayerOff = !on;
+                clusterManager.setShipsEnabled(on);
+                if (window._reapplyVesselFilter) window._reapplyVesselFilter();
+                // Chokepoint glyphs are vessel-density markers → hide them with the vessel layer.
+                if (window.chokepointManager) window.chokepointManager.setVisible(on);
+                break;
             case 'aviation':
                 window.aisShips.forEach(s => {
                     if (!s.userData?.isRealFlight) return;
@@ -1026,6 +1039,10 @@ async function init(mapData) {
                 if (filter === 'ALL')        passes = true;
                 else if (filter === 'DARK')  passes = isDark;
                 else                         passes = (ud.class === filter) && !isDark;
+
+                // Master AIS-vessels layer switch — forces all vessels hidden when off
+                // (aircraft, isRealAIS=false, are unaffected and keep their own layer).
+                if (window._aisLayerOff && ud.isRealAIS) passes = false;
 
                 // Persistent flag — the per-frame dot/visibility loops honor this
                 // so the filter isn't stomped each frame by clustering/dot logic.
@@ -1908,6 +1925,9 @@ async function init(mapData) {
 
         // ── Render ────────────────────────────────────────────────────────────
         composer.render();
+        // Sea-state contour overlay — after post-processing so the thin black isobands
+        // stay crisp. Pass `scene` so the overlay mirrors cinematic-orbit rotation.
+        waveFieldLayer.renderOverlay(renderer, camera, scene);
     }
 
     animate();

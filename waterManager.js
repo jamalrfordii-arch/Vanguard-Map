@@ -2,6 +2,11 @@
 import * as THREE from 'three';
 import { MAP_WIDTH, MAP_HEIGHT, WATER_OPACITY } from './config.js';
 
+// 1×1 transparent default so the uSeaState sampler is always valid (waveFieldLayer
+// swaps in the real equirectangular sea-state colour texture when its layer is on).
+const _seaStateDefault = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
+_seaStateDefault.needsUpdate = true;
+
 // Global uniforms — updated from the main animation loop and SkyManager
 export const waterUniforms = {
     uTime:             { value: 0.0 },
@@ -12,6 +17,9 @@ export const waterUniforms = {
     // ── Photoreal pass (2026-06-12) — live tunable, 0 disables ──────────────
     uGlitterStrength:  { value: 0.9  }, // per-pixel sun sparkle along the light path
     uSSSStrength:      { value: 0.8  }, // translucent teal glow through wave crests
+    // ── Sea-state paint (2026-06-17) — significant wave height into the surface ──
+    uSeaState:         { value: _seaStateDefault }, // equirectangular sea-state colour texture
+    uSeaStateStrength: { value: 0.0  }, // 0 = off (water unchanged); set by waveFieldLayer toggle
 };
 
 export function createDynamicSeaLevel(scene) {
@@ -47,7 +55,9 @@ export function createDynamicSeaLevel(scene) {
         shader.uniforms.uHexGridIntensity = waterUniforms.uHexGridIntensity;
         shader.uniforms.uGlitterStrength  = waterUniforms.uGlitterStrength;
         shader.uniforms.uSSSStrength      = waterUniforms.uSSSStrength;
-        
+        shader.uniforms.uSeaState         = waterUniforms.uSeaState;
+        shader.uniforms.uSeaStateStrength = waterUniforms.uSeaStateStrength;
+
         shader.vertexShader = `
             uniform float uTime;
             varying float vWaveHeight;
@@ -174,6 +184,8 @@ export function createDynamicSeaLevel(scene) {
             uniform float uHexGridIntensity;
             uniform float uGlitterStrength;
             uniform float uSSSStrength;
+            uniform sampler2D uSeaState;
+            uniform float uSeaStateStrength;
             varying float vWaveHeight;
             varying vec3  vWorldNormal;
             varying vec3  vWorldPos;
@@ -181,6 +193,22 @@ export function createDynamicSeaLevel(scene) {
         `.replace(
             `#include <dithering_fragment>`,
             `#include <dithering_fragment>
+
+            // ── Sea-state paint — significant wave height INTO the ocean ───────
+            // Recolour the base water FIRST so foam / fresnel / sun-glitter / SSS
+            // below layer on top, making the sea-state read as the water itself
+            // (not a flat overlay). Scene z is Web-Mercator (matches vessels +
+            // terrain); invert to true latitude so the equirectangular sea-state
+            // texture aligns with the coastlines. Land needs no mask — the opaque
+            // terrain occludes the water, so the coastline is pixel-perfect.
+            if (uSeaStateStrength > 0.001) {
+                float ss_lon   = (vWorldPos.x / 150.0) * 180.0;
+                float ss_mercY = -vWorldPos.z * 3.14159265 / 150.0;
+                float ss_lat   = degrees(2.0 * atan(exp(ss_mercY)) - 1.57079633);
+                vec2  ss_uv    = vec2((ss_lon + 180.0) / 360.0, (ss_lat + 90.0) / 180.0);
+                vec4  ss       = texture2D(uSeaState, ss_uv);
+                gl_FragColor.rgb = mix(gl_FragColor.rgb, ss.rgb, clamp(ss.a * uSeaStateStrength, 0.0, 1.0));
+            }
 
             // ── Crest foam ────────────────────────────────────────────────────
             float crestFoam = smoothstep(0.25, 0.65, vWaveHeight);

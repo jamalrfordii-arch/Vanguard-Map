@@ -24,6 +24,7 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { Line2 }        from 'three/addons/lines/Line2.js';
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { legendManager } from './legendManager.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const TRACK_Y           = 9.2;                  // above wind, below labels
@@ -67,13 +68,16 @@ function categoryColor(cat, out) {
     else if (cat >= 1) { out[0] = 1.00; out[1] = 0.85; out[2] = 0.32; } // yellow
     else if (cat >= 0) { out[0] = 0.45; out[1] = 0.88; out[2] = 1.00; } // cyan TS
     else               { out[0] = 0.55; out[1] = 0.65; out[2] = 0.80; } // grey TD
-    // Saturation boost — multiply channels 1.4× and clamp. Keeps the hue
-    // intact but pushes brightness so colours read clearly over bright land
-    // textures even with additive blending.
-    out[0] = Math.min(1, out[0] * 1.4);
-    out[1] = Math.min(1, out[1] * 1.4);
-    out[2] = Math.min(1, out[2] * 1.4);
+    // No saturation boost: the emitted RGB must equal the MAP KEYS swatch so the
+    // map reads as the exact category colour. (The old 1.4× boost shifted hues —
+    // e.g. Cat-2 orange drifted to yellow — and only existed to survive additive
+    // blending; track particles now use NormalBlending, so it's unnecessary.)
 }
+
+// Hex form of the same palette — single source of truth for the legend swatches.
+const CATEGORY_HEX = {
+    5: '#ff2ed9', 4: '#ff384d', 3: '#ff6626', 2: '#ff9e2e', 1: '#ffd952', 0: '#73e0ff',
+};
 
 // Build a soft radial gradient texture in the storm's category color.
 // Used for wind-field footprint discs — communicates "this whole area
@@ -361,7 +365,22 @@ export class IBTrACSManager {
     setVisible(on) {
         this.group.visible = on;
         console.info(`[IBTrACS] Layer ${on ? 'ON' : 'OFF'} — ${this._tracks.length} tracks, ${this._haveLiveData ? 'LIVE' : 'synthetic'} data`);
+        if (on) legendManager.show('ibtracs', 'CYCLONE TRACKS · SAFFIR-SIMPSON', this._legendHTML());
+        else    legendManager.hide('ibtracs');
         if (on && !this._haveLiveData && !this._fetchInFlight) this._fetch();
+    }
+
+    // Category color key for the unified MAP KEYS panel. Uses CATEGORY_HEX — the
+    // SAME palette categoryColor() emits — so swatches always match the markers.
+    _legendHTML() {
+        return legendManager.constructor.swatchRows([
+            { label: 'CAT 5 · 137+ kt',          hex: CATEGORY_HEX[5] },
+            { label: 'CAT 4 · 113–136 kt',       hex: CATEGORY_HEX[4] },
+            { label: 'CAT 3 · 96–112 kt',        hex: CATEGORY_HEX[3] },
+            { label: 'CAT 2 · 83–95 kt',         hex: CATEGORY_HEX[2] },
+            { label: 'CAT 1 · 64–82 kt',         hex: CATEGORY_HEX[1] },
+            { label: 'TROP. STORM · 34–63 kt',   hex: CATEGORY_HEX[0] },
+        ], 'IBTrACS / NHC best-track · color = peak category');
     }
 
     update(_delta) {
@@ -745,7 +764,10 @@ export class IBTrACSManager {
             opacity:        1.0,
             depthWrite:     false,
             depthTest:      false,
-            blending:       THREE.AdditiveBlending,
+            // NormalBlending (not Additive) so each particle shows its true
+            // category colour instead of washing to white over bright terrain —
+            // keeps the track legible against the MAP KEYS swatches.
+            blending:       THREE.NormalBlending,
         });
         this._trackPoints = new THREE.Points(geo, mat);
         this._trackPoints.renderOrder   = 18;

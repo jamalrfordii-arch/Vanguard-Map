@@ -21,6 +21,7 @@ const TYPE_META = {
     CHOKEPOINT:      { label: 'CHOKEPOINT',       severity: 'INFO',     icon: '◈',  color: '#40c4ff' },
     REAPPEAR:        { label: 'VESSEL REAPPEAR',  severity: 'INFO',     icon: '◎',  color: '#00e87a' },
     ZONE_BREACH:     { label: 'ZONE BREACH',      severity: 'CRITICAL', icon: '⬡',  color: '#ff1744' },
+    DETENTION:       { label: 'PSC DETENTION',    severity: 'WARNING',  icon: '⚓', color: '#ff8c00' },
     CUSTOM:          { label: 'CUSTOM',           severity: 'INFO',     icon: '◆',  color: '#40c4ff' },
 };
 
@@ -31,6 +32,7 @@ const DEFAULT_RULES = [
     { id: 'course_change',   name: 'COURSE CHANGE',    type: 'COURSE_CHANGE',   enabled: false, params: {} },
     { id: 'cable_proximity', name: 'CABLE PROXIMITY',  type: 'CABLE_PROXIMITY', enabled: false, params: {} },
     { id: 'reappear',        name: 'VESSEL REAPPEAR',  type: 'REAPPEAR',        enabled: true,  params: {} },
+    { id: 'detention',       name: 'PSC DETENTION',    type: 'DETENTION',       enabled: true,  params: {} },
     { id: 'chokepoint',      name: 'CHOKEPOINT ENTRY', type: 'CHOKEPOINT',      enabled: false, params: {} },
     // Custom speed threshold — fires when a vessel is reported above N kts
     { id: 'speed_threshold', name: 'SPEED THRESHOLD',  type: 'SPEED_ANOMALY',   enabled: false, params: { minKts: 30 }, custom: true, customLabel: 'Min speed (kts)' },

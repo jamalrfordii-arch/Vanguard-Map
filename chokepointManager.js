@@ -365,7 +365,20 @@ export class ChokepointManager {
         });
     }
 
+    // Chokepoint glyphs are coloured by VESSEL density, so they're tied to the AIS
+    // vessel layer — hidden when it's off (and raycast hits suppressed too).
+    setVisible(on) {
+        this._hidden = !on;
+        this._landmarks.forEach(lm => {
+            lm.glyphSprite.visible = on;
+            lm.nameSprite.visible  = on;
+            lm.countSprite.visible = on;
+            lm.hitMesh.visible     = on;
+        });
+    }
+
     tick(delta, elapsed, aisShips) {
+        if (this._hidden) return;
         this._landmarks.forEach(lm => {
             // ── Classify vessels in this chokepoint ──────────────────────────────
             let count = 0, darkCount = 0, stoppedCount = 0;
