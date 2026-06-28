@@ -1,5 +1,79 @@
 # Scar Tissue — gotchas that cost real time. Read before debugging.
 
+- **`altitudeDeckManager.js` existed half-built and silently dead before 2026-06-27, with no
+  record anywhere.** It was imported, instantiated, and exposed on `window` in `main.js`, but its
+  `setVisible()` was never called and its `update()` was never wired into the animation loop — so the
+  whole layer just sat invisible, permanently. It also disagreed with `config.js`'s `ALTITUDE_DECKS`
+  block (different deck lists; the manager hardcoded its own `DECKS` and never imported the config
+  export at all) and used full-map camera-tilt-based fade rather than anything selection-driven. Task
+  #46 still showed `pending`/"paused for discussion" the whole time, which was the only signal
+  anything was unfinished — `memory/` had nothing. Rebuilt from scratch 2026-06-27 (see decisions.md)
+  rather than patched, since the design itself (full-map, camera-tilt) didn't match what was wanted.
+  **Lesson: a manager being imported + instantiated + exposed on `window` is not evidence a feature
+  is live — check whether `update()`/`setVisible()` are actually called from the render loop before
+  assuming a half-finished module reflects current behavior.**
+
+- **The sandbox bash mount of Vanguard1 (`mcp__workspace__bash`, `/sessions/.../mnt/Vanguard1/`) can
+  lag behind real edits made with the Read/Edit/Write tools — confirmed 2026-06-21.** After editing
+  `config.js` with the Edit tool, `bash`'s own `wc -l`/`git diff`/`node --check` on the mounted path
+  showed the file truncated mid-array (missing ~30 lines that exist on the real file, e.g. the
+  `REGIONS` tail + `mulberry32`), and a `node --input-type=module -e "import('./config.js')"` in
+  bash threw `Unexpected end of input` — looked like the Edit had corrupted the file. It hadn't: the
+  Read tool (which goes through the real file path, not the mount) showed the file complete and
+  syntactically valid the whole time. The mount is a stale snapshot for files edited mid-session; it
+  doesn't refresh on access (`sync`+`sleep` didn't help). **Don't trust bash-based syntax/diff checks
+  against the mount right after editing a file with Edit/Write — re-`Read` the file directly to
+  confirm, and if you need `node --check` or a live unit test, copy the *content you have in context*
+  into `/tmp` inside the sandbox and run it there instead of pointing at the mounted path.**
+
+- **Toggling `obj.visible=false` to isolate a culprit in the live scene doesn't work for anything
+  governed by the LOD code (point cloud, continent mesh) — it gets stomped back to `true` on the
+  very next frame by the per-frame LOD update in main.js's animation loop, before your screenshot
+  ever captures the change.** This burned a round trip while binary-searching the Antarctica
+  grey-shape bug: hiding the splat cloud via `.visible=false` produced an unchanged screenshot,
+  which looked like "this isn't the culprit" but was actually "the toggle never stuck." Fix: use
+  `geometry.setDrawRange(0, 0)` instead (and restore with `setDrawRange(0, originalCount)`) — draw
+  range isn't touched by the LOD code, so the override survives the next frame.
+
+- **Chrome freezes `requestAnimationFrame` in non-foreground tabs — confirmed again 2026-06-21.**
+  Driving the live VANGUARD tab via Claude in Chrome MCP while it wasn't the foregrounded tab
+  produced three different-looking failures in a row (a host-permission error on screenshot, then a
+  CDP `clip.scale` deserialization error after a forced reload, then a `zoom` call reporting a 0x0
+  viewport) plus `javascript_tool` reporting `window.scene`/`window.controls` as `undefined` despite
+  `document.readyState==='complete'`. All three are the same root cause, not three bugs — bringing
+  the tab to the foreground fixed every one of them immediately. The 0x0 viewport from `zoom` is the
+  fastest tell if you're not sure which symptom you're looking at.
+
+- **The boot sequence has a blocking PERFORMANCE PROFILE / quality-tier picker screen that must be
+  clicked through (LAUNCH button) before `window.scene` exists.** A page reload alone won't get you
+  back into the live scene — `window.scene && window.controls && scene.children.length > 5` will sit
+  false indefinitely with `document.readyState` already `'complete'` until LAUNCH is clicked.
+
+- **Gemini free-tier quota exhausts fast once /ai-discover, /ai-query, and /ai-assess are all live.**
+  All three endpoints (plus the phase-2 tool-use round trip, which is a SECOND call per request)
+  share one API key, so testing the DISCOVERY console for a few minutes can burn through the
+  free-tier quota and every subsequent call returns a 502 with a Gemini "you exceeded your current
+  quota" body. No Anthropic key / no billing on this project (2026-06-21 decision) — so the fix had
+  to work within the free tier rather than switching providers. Fixed by adding a shared call-budget
+  wrapper around `callLLM()`: ~8s minimum interval between ANY LLM call (all three endpoints share
+  one clock), a 60s response cache keyed on `(systemPrompt, userMsg)` so repeating the same question
+  against an unchanged snapshot doesn't spend a new call, and a 5min cooldown that kicks in the
+  moment a quota-exhausted error is seen (so failed calls stop compounding the problem — a failed
+  request can itself count against quota). If queries start returning "AI quota exhausted — cooling
+  down Ns," that's the breaker tripped, not a new bug — wait it out.
+
+- **flight-proxy.js POST endpoints silently CORS-failing → browser fetch() throws "Failed to fetch"
+  with ZERO proxy-side log line.** `Access-Control-Allow-Methods` was hardcoded to `'GET, OPTIONS'`
+  (no POST) and there was no `Access-Control-Allow-Headers` for `Content-Type` — any POST request
+  with a JSON body (`/ai-discover`, `/ai-query`, `/ai-assess`) triggers a browser CORS preflight
+  that the server's OPTIONS response then fails, so the browser never even sends the real request.
+  Symptom is misleading: looks exactly like "proxy isn't running," but the terminal shows the proxy
+  alive and serving other (GET) endpoints fine, just never logging the failed POST at all — the
+  request died in the browser before reaching the server. Fixed 2026-06-21: `Access-Control-Allow-
+  Methods` → `'GET, POST, OPTIONS'`, added `Access-Control-Allow-Headers: Content-Type`. If a POST
+  endpoint "does nothing" with no server-side trace, check this first before suspecting the handler
+  logic.
+
 - **Mount-sync lag (sandbox bash).** The Linux bash mount frequently serves a stale/truncated
   copy of files just written via Edit/Write → false `node --check` "Unexpected end of input"
   syntax errors (e.g. equasis-lookup.js showed 139 lines in bash vs 207 real). The Read/Edit/Write

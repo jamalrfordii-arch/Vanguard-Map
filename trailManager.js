@@ -88,9 +88,15 @@ const TRAIL_VERT = /* glsl */`
         float t = sid / max(fillCount - 1.0, 1.0);   // 0 = newest, 1 = oldest
         vAlpha  = (1.0 - t) * (1.0 - t) * 0.72;
 
-        // ── Entity colour ─────────────────────────────────────────────────────
-        vec2 colorUv = vec2((eid + 0.5) / uMaxEntities, 0.5);
-        vColor       = texture2D(tColors, colorUv).rgb;
+        // ── Entity colour + per-entity visibility ──────────────────────────────
+        // The colour texture's alpha channel doubles as a visibility flag (see
+        // TrailManager.setVisible) — entities registered invisible (e.g. the
+        // mass of unselected aircraft) sample alpha 0 here and contribute
+        // nothing, without needing a separate uniform/texture.
+        vec2 colorUv      = vec2((eid + 0.5) / uMaxEntities, 0.5);
+        vec4 colorSample  = texture2D(tColors, colorUv);
+        vColor            = colorSample.rgb;
+        vAlpha           *= colorSample.a;
 
         // ── Screen-space point size scales with view distance ─────────────────
         vec4  mvPos  = modelViewMatrix * vec4(samp.xyz, 1.0);
@@ -217,7 +223,11 @@ export class TrailManager {
     // ── register ──────────────────────────────────────────────────────────────
     // Call once when an entity enters the scene.
     // color: CSS string '#rrggbb' or numeric 0xRRGGBB.
-    register(entity, color) {
+    // visible: whether the trail renders immediately (default true, matching
+    // old behavior for vessels). Aircraft register with visible=false — at
+    // hundreds/thousands of live aircraft, drawing every contrail at once is
+    // unreadable clutter; see setVisible() for selectively turning one back on.
+    register(entity, color, visible = true) {
         if (this._entityMap.has(entity)) return;
         if (this._freeSlots.length === 0) {
             console.warn('[TrailManager] no free entity slots');
@@ -229,13 +239,13 @@ export class TrailManager {
         this._headPtrs[idx]   = 0;
         this._fillCounts[idx] = 0;
 
-        // Colour
+        // Colour (alpha channel doubles as the visibility flag — see vertex shader)
         const c  = new THREE.Color(color);
         const ci = idx * 4;
         this._colorData[ci]   = c.r;
         this._colorData[ci+1] = c.g;
         this._colorData[ci+2] = c.b;
-        this._colorData[ci+3] = 1.0;
+        this._colorData[ci+3] = visible ? 1.0 : 0.0;
         this._colorTex.needsUpdate = true;
 
         // Clear any stale ring-buffer data for this slot
@@ -245,6 +255,18 @@ export class TrailManager {
         this._headData[hi] = this._headData[hi+1] = 0;
         this._trailTex.needsUpdate = true;
         this._headTex.needsUpdate  = true;
+    }
+
+    // ── setVisible ────────────────────────────────────────────────────────────
+    // Toggle an already-registered entity's trail on/off without touching its
+    // accumulated ring-buffer history — used to show only the currently
+    // selected aircraft's trail while everything else keeps recording silently
+    // in the background (so its trail is ready instantly if later selected).
+    setVisible(entity, visible) {
+        const idx = this._entityMap.get(entity);
+        if (idx === undefined) return;
+        this._colorData[idx * 4 + 3] = visible ? 1.0 : 0.0;
+        this._colorTex.needsUpdate = true;
     }
 
     // ── unregister ────────────────────────────────────────────────────────────

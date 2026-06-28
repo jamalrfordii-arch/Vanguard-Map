@@ -25,6 +25,28 @@ function _getVesselShadowTex() {
     return _vesselShadowTex;
 }
 
+// ── Shared altitude-glow sprite texture ───────────────────────────────────────
+// Created once at module load; shared across every aircraft's altitude glow.
+// Soft white radial falloff — tinted per-aircraft via SpriteMaterial.color,
+// additive blended so it reads as a glow rather than a flat dot.
+let _altGlowTex = null;
+function _getAltitudeGlowTexture() {
+    if (_altGlowTex) return _altGlowTex;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 64;
+    const ctx  = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+    grad.addColorStop(0.4, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(32, 32, 32, 0, Math.PI * 2);
+    ctx.fill();
+    _altGlowTex = new THREE.CanvasTexture(canvas);
+    return _altGlowTex;
+}
+
 // --- SHARED MATERIALS ---
 const M = (color, opts = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.7, ...opts });
 const realMaterials = {
@@ -177,7 +199,11 @@ const shapeBuilders = {
 };
 
 // --- CLASS REGISTRY ---
-const SHIP_CLASSES = [
+// Exported so shipInstancer.js can harvest each class's parts (geometry +
+// material + local transform) ONCE at startup, the same pattern used for
+// AIRCRAFT_CLASSES_VISUAL — instead of every individual vessel calling
+// shipClass.builder() and allocating its own fresh meshes/materials.
+export const SHIP_CLASSES = [
     { type: "CARGO",     hex: "#ff5252", builder: shapeBuilders.CARGO },
     { type: "TANKER",    hex: "#ffab40", builder: shapeBuilders.TANKER },
     { type: "PASSENGER", hex: "#42a5f5", builder: shapeBuilders.PASSENGER },
@@ -306,50 +332,314 @@ function buildAirliner() {
     return group;
 }
 
-// ── createFlightObject ─────────────────────────────────────────────────────────
-// Builds a Three.js Group for a real OpenSky aircraft.
-export function createFlightObject(aircraftData, scene, laneGroup) {
-    const group = buildAirliner();
-    group.scale.set(0.13, 0.13, 0.13);
+// Shared nav-light + strobe rig — every powered aircraft carries red/green
+// wingtip lights and a white tail strobe; only the mount points differ.
+function _navLights(group, halfSpan, tailZ, tailY = 0.5) {
+    const navL = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+    navL.position.set(-halfSpan, 0, 0.1);
+    navL.name = 'nav_red';
+    const navR = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 6), new THREE.MeshBasicMaterial({ color: 0x22ff44 }));
+    navR.position.set(halfSpan, 0, 0.1);
+    navR.name = 'nav_green';
+    const tailStrobe = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    tailStrobe.position.set(0, tailY, tailZ);
+    tailStrobe.name = 'strobe_tail';
+    group.add(navL, navR, tailStrobe);
+    group.userData._navRed     = navL;
+    group.userData._navGreen   = navR;
+    group.userData._tailStrobe = tailStrobe;
+}
 
-    // Store base materials for hover reset
-    group.children.forEach(child => {
-        child.userData.baseMaterial = child.material;
+// Engine pod + additive exhaust glow cone, mounted under a wing.
+function _engineWithGlow(x, y, z, mat, scale = 1, glowColor = 0xff9900) {
+    const eng = new THREE.Mesh(new THREE.CylinderGeometry(0.17 * scale, 0.14 * scale, 0.95 * scale, 10), mat);
+    eng.rotation.x = Math.PI / 2;
+    eng.position.set(x, y, z);
+    const glowMat = new THREE.MeshBasicMaterial({
+        color: glowColor, transparent: true, opacity: 0.55,
+        blending: THREE.AdditiveBlending, depthWrite: false,
     });
+    const glow = new THREE.Mesh(new THREE.ConeGeometry(0.12 * scale, 0.55 * scale, 8), glowMat);
+    glow.rotation.x = -Math.PI / 2;
+    glow.position.set(x, y, z - 0.75 * scale);
+    return [eng, glow];
+}
+
+// ── CARGO shape — boxier fuselage, no winglets, twin engines, amber livery ───
+function buildCargoFreighter() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffab40, roughness: 0.4, metalness: 0.5 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x334455, roughness: 0.5, metalness: 0.4 });
+
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.22, 5.4, 12), bodyMat);
+    fuselage.rotation.x = Math.PI / 2;
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.27, 0.8, 12), bodyMat);
+    nose.rotation.x = Math.PI / 2;
+    nose.position.z = 3.3;
+
+    const wingL = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.07, 1.0), bodyMat);
+    wingL.position.set(-1.8, -0.08, 0.1); wingL.rotation.y = Math.PI / 11;
+    const wingR = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.07, 1.0), bodyMat);
+    wingR.position.set(1.8, -0.08, 0.1); wingR.rotation.y = -Math.PI / 11;
+
+    const stabH = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.05, 0.55), bodyMat);
+    stabH.position.set(0, 0.05, -2.5); stabH.rotation.y = Math.PI / 14;
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, 0.8), bodyMat);
+    stabV.position.set(0, 0.55, -2.4);
+
+    const [eng1, glow1] = _engineWithGlow(-1.5, -0.32, 0.4, darkMat, 1.1);
+    const [eng2, glow2] = _engineWithGlow(1.5, -0.32, 0.4, darkMat, 1.1);
+
+    const bodyParts = [fuselage, nose, wingL, wingR, stabH, stabV];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+
+    group.add(fuselage, nose, wingL, wingR, stabH, stabV, eng1, eng2, glow1, glow2);
+    _navLights(group, 3.5, -2.4, 0.95);
+    return group;
+}
+
+// ── MILITARY shape — slim fuselage, swept delta wings, twin tails, afterburner glow ──
+function buildMilitaryJet() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x6b7a5e, roughness: 0.55, metalness: 0.45 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x263238, roughness: 0.5, metalness: 0.5 });
+    const glassMat= new THREE.MeshStandardMaterial({ color: 0x4a5a66, roughness: 0.1, metalness: 0.8, transparent: true, opacity: 0.75 });
+
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.10, 3.6, 10), bodyMat);
+    fuselage.rotation.x = Math.PI / 2;
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.13, 1.1, 10), bodyMat);
+    nose.rotation.x = Math.PI / 2; nose.position.z = 2.35;
+    const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.10, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), glassMat);
+    cockpit.position.set(0, 0.10, 1.5);
+
+    // Swept delta wings, set well aft
+    const wingL = new THREE.Mesh(new THREE.ConeGeometry(0.95, 2.4, 3), bodyMat);
+    wingL.rotation.z = Math.PI / 2; wingL.rotation.y = Math.PI / 2.2;
+    wingL.position.set(-0.9, -0.02, -0.5); wingL.scale.set(1, 1, 0.16);
+    const wingR = new THREE.Mesh(new THREE.ConeGeometry(0.95, 2.4, 3), bodyMat);
+    wingR.rotation.z = -Math.PI / 2; wingR.rotation.y = -Math.PI / 2.2;
+    wingR.position.set(0.9, -0.02, -0.5); wingR.scale.set(1, 1, 0.16);
+
+    // Twin canted vertical tails
+    const tailL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.65, 0.55), darkMat);
+    tailL.position.set(-0.18, 0.35, -1.55); tailL.rotation.z = Math.PI / 10;
+    const tailR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.65, 0.55), darkMat);
+    tailR.position.set(0.18, 0.35, -1.55); tailR.rotation.z = -Math.PI / 10;
+
+    const [eng, glow] = _engineWithGlow(0, -0.05, -1.7, darkMat, 1.3, 0xff5500);
+
+    const bodyParts = [fuselage, nose, wingL, wingR, tailL, tailR];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+
+    group.add(fuselage, nose, cockpit, wingL, wingR, tailL, tailR, eng, glow);
+    _navLights(group, 1.0, -1.55, 0.6);
+    return group;
+}
+
+// ── HELICOPTER shape — boxy cabin, tail boom, spinning main + tail rotor ─────
+function buildHelicopter() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x40c4ff, roughness: 0.4, metalness: 0.5 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x263238, roughness: 0.5, metalness: 0.4 });
+    const glassMat= new THREE.MeshStandardMaterial({ color: 0x99bbdd, roughness: 0.1, metalness: 0.7, transparent: true, opacity: 0.7 });
+
+    const cabin = new THREE.Mesh(new THREE.SphereGeometry(0.4, 12, 10), bodyMat);
+    cabin.scale.set(1, 0.85, 1.3);
+    cabin.position.set(0, 0, 0.3);
+    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 8, 0, Math.PI * 2, 0, Math.PI / 1.6), glassMat);
+    nose.position.set(0, -0.02, 0.75);
+
+    const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.03, 1.7, 8), bodyMat);
+    boom.rotation.x = Math.PI / 2; boom.position.set(0, 0.05, -1.05);
+
+    const tailFin = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.45, 0.35), darkMat);
+    tailFin.position.set(0, 0.25, -1.85);
+
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.3, 8), darkMat);
+    mast.position.set(0, 0.5, 0.1);
+
+    const rotorMat = new THREE.MeshBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
+    const mainRotor = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.02, 0.12), rotorMat);
+    mainRotor.position.set(0, 0.66, 0.1);
+    mainRotor.name = 'main_rotor'; // spun in main.js animation loop
+
+    const tailRotor = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.02, 0.03), rotorMat);
+    tailRotor.position.set(0.05, 0.25, -1.85);
+    tailRotor.rotation.z = Math.PI / 2;
+    tailRotor.name = 'tail_rotor';
+
+    const skidMat = new THREE.MeshStandardMaterial({ color: 0x37474f, roughness: 0.6 });
+    const skidL = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.3, 6), skidMat);
+    skidL.rotation.z = Math.PI / 2; skidL.position.set(-0.35, -0.42, 0.1);
+    const skidR = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.3, 6), skidMat);
+    skidR.rotation.z = Math.PI / 2; skidR.position.set(0.35, -0.42, 0.1);
+
+    const bodyParts = [cabin, boom, tailFin];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+    group.userData._mainRotor = mainRotor;
+    group.userData._tailRotor = tailRotor;
+
+    group.add(cabin, nose, boom, tailFin, mast, mainRotor, tailRotor, skidL, skidR);
+    _navLights(group, 0.45, -1.85, 0.3);
+    return group;
+}
+
+// ── GA shape — small single-engine prop, straight wings, no jet glow ────────
+function buildGA() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd9b3ff, roughness: 0.4, metalness: 0.3 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x37474f, roughness: 0.6 });
+    const glassMat= new THREE.MeshStandardMaterial({ color: 0x99bbdd, roughness: 0.1, metalness: 0.6, transparent: true, opacity: 0.7 });
+
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.08, 1.9, 10), bodyMat);
+    fuselage.rotation.x = Math.PI / 2;
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.10, 0.35, 10), bodyMat);
+    nose.rotation.x = Math.PI / 2; nose.position.z = 1.05;
+    const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), glassMat);
+    canopy.position.set(0, 0.10, 0.55);
+
+    // Straight, unswept high wing
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.025, 0.32), bodyMat);
+    wing.position.set(0, 0.10, 0.05);
+
+    const stabH = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.02, 0.2), bodyMat);
+    stabH.position.set(0, 0.02, -0.9);
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.32, 0.24), bodyMat);
+    stabV.position.set(0, 0.18, -0.9);
+
+    // Spinning prop disc — translucent like the helicopter's rotor
+    const propMat = new THREE.MeshBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.45, side: THREE.DoubleSide });
+    const prop = new THREE.Mesh(new THREE.CircleGeometry(0.18, 16), propMat);
+    prop.position.set(0, 0, 1.22);
+    prop.name = 'prop_disc';
+
+    const spinner = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.1, 8), darkMat);
+    spinner.rotation.x = Math.PI / 2; spinner.position.set(0, 0, 1.25);
+
+    const bodyParts = [fuselage, nose, wing, stabH, stabV];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+    group.userData._propDisc  = prop;
+
+    group.add(fuselage, nose, canopy, wing, stabH, stabV, prop, spinner);
+    _navLights(group, 0.95, -0.9, 0.25);
+    return group;
+}
+
+// --- AIRCRAFT CLASS REGISTRY (mirrors SHIP_CLASSES) ──────────────────────────
+// Exported so aircraftInstancer.js can harvest each class's parts (geometry +
+// material + local transform) ONCE at startup, instead of every individual
+// aircraft calling cls.builder() and allocating its own fresh meshes/materials.
+export const AIRCRAFT_CLASSES_VISUAL = {
+    COMMERCIAL: { hex: '#e0f0ff', scale: 0.13, builder: buildAirliner },
+    CARGO:      { hex: '#ffab40', scale: 0.15, builder: buildCargoFreighter },
+    MILITARY:   { hex: '#8aff80', scale: 0.10, builder: buildMilitaryJet },
+    HELICOPTER: { hex: '#40c4ff', scale: 0.11, builder: buildHelicopter },
+    GA:         { hex: '#d9b3ff', scale: 0.08, builder: buildGA },
+};
+
+// ── createFlightObject ─────────────────────────────────────────────────────────
+// Builds a Three.js Group for a real airplanes.live aircraft. Picks a visual
+// model from aircraftData.aircraftClass (set in flightManager.js from ADS-B
+// category/dbFlags/callsign) — falls back to the commercial airliner shape
+// for anything unclassified, matching the old single-model behavior.
+export function createFlightObject(aircraftData, scene, laneGroup) {
+    const cls = AIRCRAFT_CLASSES_VISUAL[aircraftData.aircraftClass] || AIRCRAFT_CLASSES_VISUAL.COMMERCIAL;
+
+    // `group` is now a lightweight anchor only — NOT the visual airframe.
+    // The actual airplane shape (fuselage/wings/engines/etc.) is drawn by
+    // aircraftInstancer.js via one shared InstancedMesh per part per class,
+    // keyed off this anchor's position/rotation every frame. Building a full
+    // multi-mesh Group per aircraft (as the old cls.builder() call did here)
+    // meant ~10-16 draw calls and ~3-4 brand-new Material allocations PER
+    // AIRCRAFT — with ~300 live aircraft that was the single biggest cost in
+    // the whole render loop. The anchor still does real work: it's what
+    // selection/hover/tooltip/cluster-visibility/watchlist code in
+    // uiController.js and clusterManager.js operates on (all of that is
+    // already position- and userData-driven, not geometry-driven — see
+    // uiController.js tickRaycasting Stage 1 — so removing the body meshes
+    // doesn't break any of it). main.js spawns this aircraft's instancer slot
+    // separately (aircraftInstancer.spawn(aircraftClass)) and stores the
+    // handle on group.userData.instanceHandle.
+    const group = new THREE.Group();
 
     // Contrail — white, semi-transparent
     const trailMat  = new THREE.LineBasicMaterial({ color: 0xd0e8ff, transparent: true, opacity: 0.40 });
     const trailLine = new THREE.Line(new THREE.BufferGeometry(), trailMat);
     scene.add(trailLine);
 
-    // Heading vector line — cyan, additive blending so it burns over terrain
-    const hdgLineMat = new THREE.LineBasicMaterial({
-        color: 0x40c4ff, transparent: true, opacity: 0.90, depthWrite: false,
-        blending: THREE.AdditiveBlending,
+    // Altitude glow — small additive halo centered on the aircraft,
+    // colour-coded by altitude tier. Replaces the old directional heading
+    // line: same altitude-colour cue, no streak across the map. Added
+    // directly to laneGroup as a sibling, NOT a child of `group` — `group`
+    // is scaled down by cls.scale (0.08-0.15) for the aircraft model, so a
+    // child sprite would inherit that shrink and render at a fraction of
+    // its intended size (this was tried and made the glow invisible).
+    // Mirrors the vessel shadowSprite pattern (see _getVesselShadowTex
+    // usage above): absolute world-space size, position synced manually
+    // each frame in main.js / the animation loop, at the same y as the
+    // aircraft itself so the glow's center sits on the plane, not above it.
+    //
+    // MLAT vs ADS-B: a multilaterated position (no direct ADS-B fix, just
+    // timing triangulation from ground receivers) is materially less
+    // precise. Rather than add new geometry per-aircraft (cost — see
+    // CLAUDE.md perf rules), MLAT aircraft reuse this same sprite but
+    // bigger and dimmer, reading as "fuzzy/uncertain" instead of a clean
+    // point fix. ADS-B keeps the original tight, brighter halo.
+    const isMlat = aircraftData.positionSource === 'MLAT';
+    const altGlowMat = new THREE.SpriteMaterial({
+        map: _getAltitudeGlowTexture(), color: 0x40c4ff, transparent: true,
+        opacity: 0.05, depthWrite: false, blending: THREE.AdditiveBlending,
     });
-    const hdgLineGeo = new THREE.BufferGeometry();
-    hdgLineGeo.setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1)]);
-    const headingLine = new THREE.Line(hdgLineGeo, hdgLineMat);
-    headingLine.visible = false; // hidden by default — clutters map in clusters
-    scene.add(headingLine);
+    const altitudeGlow = new THREE.Sprite(altGlowMat);
+    const glowScale = isMlat ? 1.2 : 1.1;
+    altitudeGlow.scale.set(glowScale, glowScale, 1);
+    altitudeGlow.renderOrder = 9;
+    laneGroup.add(altitudeGlow);
+
+    // Emergency ring — pulsing red halo, mirrors the AIS anomalyRing/
+    // integrityRing pattern (entityBuilder.js createAISVesselObject).
+    // Sibling of `group` for the same scale-inheritance reason as the
+    // altitude glow above. Driven visible/invisible + pulsed from main.js
+    // off flightIntegrityManager's EMERGENCY flag (squawk 7500/7600/7700
+    // or ADS-B emergency field) — never set directly here.
+    const emergencyRingGeo = new THREE.RingGeometry(1.6, 2.1, 40);
+    const emergencyRingMat = new THREE.MeshBasicMaterial({
+        color: 0xff1744, transparent: true, opacity: 0.0,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const emergencyRing = new THREE.Mesh(emergencyRingGeo, emergencyRingMat);
+    emergencyRing.rotation.x = -Math.PI / 2;
+    emergencyRing.renderOrder = 10;
+    emergencyRing.visible = false;
+    laneGroup.add(emergencyRing);
 
     group.userData = {
         id:          aircraftData.icao24,
         displayName: aircraftData.callsign,
-        class:       'AIRLINER',
-        htmlColor:   '#e0f0ff',
+        class:       aircraftData.aircraftClass || 'COMMERCIAL',
+        htmlColor:   cls.hex,
         speedKts:    aircraftData.speedKts,
         headingDeg:  aircraftData.headingDeg,
         latDeg:      aircraftData.latDeg,
         lonDeg:      aircraftData.lonDeg,
         altMeters:   aircraftData.altMeters,
         country:     aircraftData.country,
+        positionSource: aircraftData.positionSource || 'ADSB',
+        registration: aircraftData.registration || null,
+        typeCode:     aircraftData.typeCode || null,
+        operator:     aircraftData.operator || null,
         destination: null,
         eta:         null,
         isRealAIS:    false,
         isRealFlight: true,
         trail:        trailLine,
-        headingLine:  headingLine,
+        altitudeGlow: altitudeGlow,
+        emergencyRing:    emergencyRing,
+        emergencyRingMat: emergencyRingMat,
         history:      [],
         curve: null, progress: 0, speed: 0  // no-ops so existing loops don't crash
     };
@@ -373,51 +663,56 @@ function lonLatToVec3(lon, lat, y = 0) {
 // The caller (main.js) is responsible for setting vesselData.threeObject.
 export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
     const shipClass = SHIP_CLASSES.find(c => c.type === vesselData.class) || SHIP_CLASSES[0];
-    const shipGroup = shipClass.builder();
 
-    // ── Normalise the hull to the waterline ─────────────────────────────────
-    // Each shape builder places its hull at a slightly different Y offset, so
-    // ships rendered side-by-side at the same scenePos.y don't actually share
-    // a waterline. Compute the bounding box of the structural meshes only
-    // (skipping flat surface markers like alert rings) and shift
-    // all children so the hull's lowest point lands at the group's origin.
-    // A small "draft" submersion then seats the hull realistically in water
-    // instead of perching it on top.
-    const hullBox = new THREE.Box3();
-    let measured = false;
-    shipGroup.children.forEach(c => {
-        if (c.geometry instanceof THREE.RingGeometry) return; // alert ring, etc.
-        hullBox.expandByObject(c);
-        measured = true;
-    });
-    if (measured && isFinite(hullBox.min.y)) {
-        const hullHeight = Math.max(0.01, hullBox.max.y - hullBox.min.y);
-        const draftFrac  = 0.25;            // ~25% of hull below waterline
-        const lift       = -hullBox.min.y - hullHeight * draftFrac;
-        shipGroup.children.forEach(child => { child.position.y += lift; });
-    }
-
-    shipGroup.scale.set(0.08, 0.08, 0.08);
-
-    // Store base materials for hover-highlight reset
-    shipGroup.children.forEach(child => {
-        child.userData.baseMaterial = child.material;
-    });
+    // `shipGroup` is now a lightweight anchor only — NOT the visual hull.
+    // The actual ship shape (hull/bridge/containers/etc.) is drawn by
+    // shipInstancer.js via one shared InstancedMesh per part per class,
+    // keyed off this anchor's position every frame. This eliminates ~3-9
+    // fresh Mesh + Material allocations and draw calls per vessel (up to
+    // ~500 live vessels × ~9 meshes ≈ 4500 draw calls before this change).
+    // The waterline-lift normalisation that used to run here (shifting each
+    // ship's children so the hull's lowest point sits on the waterline) is
+    // now baked into shipInstancer.js's harvest step — it's deterministic
+    // per class (same geometry every time), so computing it once per class
+    // at init is identical to computing it once per vessel here.
+    // uiController.js's Stage 1 raycasting is position-driven, not
+    // geometry-driven (see tickRaycasting "Screen-space proximity"), so
+    // removing the body meshes does not break selection/hover/tooltips —
+    // confirmed by the same pattern already applied to real-flight aircraft.
+    const shipGroup = new THREE.Group();
 
     // Trail line
     const trailMat  = new THREE.LineBasicMaterial({ color: parseInt(shipClass.hex.slice(1), 16), transparent: true, opacity: 0.38 });
     const trailLine = new THREE.Line(new THREE.BufferGeometry(), trailMat);
     scene.add(trailLine);
 
-    // Prediction line — dashed orange, projects forward along heading
-    // Added to predGroup so the layer toggle can hide/show all at once.
+    // Prediction line — dashed orange, projects forward along heading.
+    // Visibility is gated in main.js to the selected vessel (and, when the
+    // watchlist dead-reckoning mode is on, watchlisted vessels) — see
+    // _syncPredictionVisual(). Added to predGroup so the old class-filter-wide
+    // toggle still works as a master kill switch.
     const predMat  = new THREE.LineDashedMaterial({
         color: 0xffa726, transparent: true, opacity: 0.85,
         dashSize: 0.35, gapSize: 0.2
     });
     const predLine = new THREE.Line(new THREE.BufferGeometry(), predMat);
+    predLine.visible = false; // selection-gated now, not always-on
     if (predGroup) predGroup.add(predLine);
     else scene.add(predLine);
+
+    // Projected-point marker — small ring sitting at the dead-reckoning
+    // line's far end, same orange as the line. Added 2026-06-26.
+    const predMarkerGeo = new THREE.RingGeometry(0.10, 0.17, 20);
+    predMarkerGeo.rotateX(-Math.PI / 2);
+    const predMarkerMat = new THREE.MeshBasicMaterial({
+        color: 0xffa726, transparent: true, opacity: 0.90,
+        depthWrite: false, side: THREE.DoubleSide,
+    });
+    const predMarker = new THREE.Mesh(predMarkerGeo, predMarkerMat);
+    predMarker.visible = false;
+    predMarker.renderOrder = 4;
+    if (predGroup) predGroup.add(predMarker);
+    else scene.add(predMarker);
 
     // userData matches the shape expected by main.js animation loop and uiController
     shipGroup.userData = {
@@ -429,6 +724,7 @@ export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
         isRealAIS:      true,   // ← flag tells animation loop to use lerp, not spline
         trail:          trailLine,
         predictionLine: predLine,
+        predictionMarker: predMarker,
         isDark:         false,  // set true by onVesselDark callback in main.js
         darkSinceMs:    null,   // epoch ms when declared dark
         darkRing:       null,   // Three.js group created on dark event

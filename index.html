@@ -61,10 +61,22 @@
         .status { font-size: 10px; color: var(--cyan); margin-bottom: 12px; opacity: 0.8; }
 
         .sys-stat {
-            display: flex; justify-content: space-between;
+            display: flex; justify-content: space-between; align-items: baseline;
+            gap: 8px;
             font-size: 10px; color: #fff; margin-bottom: 5px;
             border-bottom: 1px dotted rgba(255,255,255,0.1);
             padding-bottom: 3px;
+        }
+        /* Label: never shrinks or wraps — it's always short, known text.
+           Value: takes remaining space, right-aligned, wraps onto a second
+           line instead of overlapping the label when long (e.g. REGION
+           rows like "NORTH AMERICA · COASTAL / INLAND WATERWAY"). */
+        .sys-stat > span:first-child {
+            flex-shrink: 0; white-space: nowrap;
+        }
+        .sys-stat > span:last-child {
+            flex: 1 1 auto; min-width: 0; text-align: right;
+            white-space: normal; word-break: break-word; overflow-wrap: break-word;
         }
 
         /* ── Status readout zone — read-only telemetry ───────────────────────── */
@@ -364,6 +376,37 @@
             transition: background 0.15s, border-color 0.15s;
         }
         .lp-dot.on { background: var(--cyan); border-color: var(--cyan); }
+
+        /* ── Altitude Watch panel ────────────────────────────────────────────── */
+        #altitude-watch-toggle.active { background: rgba(25, 65, 85, 0.85); color: var(--cyan); border-color: rgba(64,196,255,0.4); }
+        #altitude-watch-panel {
+            position: absolute; top: 20px; right: 700px;
+            width: 320px; max-height: 80vh; overflow-y: auto;
+            background: var(--ui-panel); border: 1px solid rgba(64,196,255,0.2);
+            border-left: 3px solid var(--cyan); backdrop-filter: blur(14px);
+            z-index: 10; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            display: none;
+        }
+        #altitude-watch-panel::-webkit-scrollbar { width: 3px; }
+        #altitude-watch-panel::-webkit-scrollbar-thumb { background: rgba(64,196,255,0.2); }
+        #aw-header {
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(64,196,255,0.14);
+            background: rgba(1,10,20,0.97);
+            display: flex; justify-content: space-between; align-items: center;
+            position: sticky; top: 0; z-index: 1;
+        }
+        #aw-title { font-size: 9px; letter-spacing: 2px; color: #fff; font-weight: 800; text-transform: uppercase; }
+        #aw-close { background: none; border: none; color: #4a6b84; cursor: pointer; font-size: 16px; padding: 0; line-height: 1; }
+        #aw-close:hover { color: var(--cyan); }
+        #aw-legend { padding: 8px 14px; border-bottom: 1px solid rgba(64,196,255,0.14); }
+        .aw-legend-row {
+            border-left: 3px solid #40c4ff; padding: 4px 8px; margin: 4px 0;
+            background: rgba(255,255,255,0.02);
+        }
+        .aw-legend-fl { display: block; font-size: 10px; font-weight: 800; letter-spacing: 1px; color: #cfe3f1; }
+        .aw-legend-text { display: block; font-size: 9px; color: #8aabc4; line-height: 1.5; margin-top: 2px; }
+        #aw-body { padding: 0; }
 
         /* ── Camera controls panel ───────────────────────────────────────────── */
         #camera-panel {
@@ -1273,7 +1316,7 @@
             background: radial-gradient(
                 ellipse 30% 30% at var(--vessel-x, 50%) var(--vessel-y, 50%),
                 transparent 0%,
-                rgba(6, 12, 20, 0.80) 100%
+                rgba(6, 12, 20, 0.30) 100%
             );
         }
         #vessel-vignette.active { opacity: 1; }
@@ -1282,46 +1325,6 @@
            Radial red vignette that strengthens as threat level rises.
            Opacity is driven by main.js (_currentThreatIntensity × 0.80).
            Pointer-events none ensures it never blocks mouse interaction.          */
-        /* ── Vessel class filter bar ─────────────────────────────────────────── */
-        #vessel-filter-bar {
-            position: fixed;
-            top: 14px;
-            left: 50%;
-            transform: translateX(-50%);
-            display: flex;
-            gap: 5px;
-            z-index: 15;
-            pointer-events: auto;
-            user-select: none;
-        }
-        .vf-btn {
-            background: rgba(1, 10, 20, 0.80);
-            border: 1px solid rgba(64, 196, 255, 0.25);
-            color: #4a6b84;
-            font-family: 'Courier New', monospace;
-            font-size: 9px;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            padding: 5px 10px;
-            cursor: pointer;
-            border-radius: 2px;
-            transition: all 0.15s;
-            backdrop-filter: blur(8px);
-        }
-        .vf-btn:hover {
-            border-color: var(--cyan);
-            color: var(--cyan);
-            background: rgba(64, 196, 255, 0.08);
-        }
-        .vf-btn.active {
-            border-color: var(--cyan);
-            color: var(--cyan);
-            background: rgba(64, 196, 255, 0.14);
-            box-shadow: 0 0 8px rgba(64, 196, 255, 0.20);
-        }
-        .vf-dark { border-color: rgba(255, 23, 68, 0.35) !important; color: #884455 !important; }
-        .vf-dark:hover, .vf-dark.active { border-color: #ff1744 !important; color: #ff1744 !important; background: rgba(255,23,68,0.10) !important; box-shadow: 0 0 8px rgba(255,23,68,0.20) !important; }
-
         /* ── Port detail panel ───────────────────────────────────────────────── */
         #port-detail-panel {
             position: fixed;
@@ -1443,6 +1446,18 @@
             border-bottom: 1px solid rgba(64,196,255,0.1);
             margin-bottom: 6px;
         }
+
+        .vt-dr-toggle {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 9px; letter-spacing: 0.5px; color: #8aa8bc;
+            text-transform: uppercase; padding: 6px 0 8px 0;
+            border-bottom: 1px solid rgba(64,196,255,0.1);
+            margin-bottom: 6px; cursor: pointer; user-select: none;
+        }
+        .vt-dr-toggle input[type="checkbox"] {
+            accent-color: #ffa726; width: 11px; height: 11px; cursor: pointer;
+        }
+        .vt-dr-toggle:hover { color: #c8dcea; }
 
         /* ── Region group ────────────────────────────────────────────────────── */
         .vt-region { margin-bottom: 2px; }
@@ -2127,6 +2142,89 @@
             line-height: 2.4;
         }
 
+        /* ── Discovery console (terminal-style log of every AI discovery pass) ── */
+        #vp-discovery.vp-active {
+            display: flex !important;
+            flex-direction: column;
+            padding: 0;
+            background: #060a08;
+        }
+        #vp-discovery-log {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 10px;
+            font-family: 'Consolas', 'SF Mono', Menlo, monospace;
+            font-size: 10.5px;
+            line-height: 1.55;
+        }
+        #vp-discovery-log::-webkit-scrollbar { width: 3px; }
+        #vp-discovery-log::-webkit-scrollbar-thumb { background: rgba(179,136,255,0.25); }
+        /* Rolling stats bar — added 2026-06-21 so an analyst watching the map
+           gets a health check at a glance: how many passes the rule engine
+           has handled alone vs. escalated, and whether Claude calls are
+           erroring out. Backed by discoveryManager.stats (in-memory; see
+           getStatsSummary()), refreshed on every console event. */
+        #vp-discovery-stats {
+            flex: 0 0 auto;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 5px 10px;
+            border-bottom: 1px solid rgba(179,136,255,0.15);
+            font-family: 'Consolas', 'SF Mono', Menlo, monospace;
+            font-size: 9px;
+            letter-spacing: 0.3px;
+            color: #5a7a8f;
+        }
+        #vp-discovery-stats .ds-val { color: #cfe3f1; font-weight: 600; }
+        #vp-discovery-stats .ds-good { color: #6fe0a0; }
+        #vp-discovery-stats .ds-bad  { color: #ff8a8a; }
+        .disc-line { white-space: pre-wrap; word-break: break-word; margin: 0 0 2px; }
+        .disc-line .disc-ts     { color: #4a6b84; }
+        .disc-line.disc-scan    { color: #5a7a8f; }
+        .disc-line.disc-finding { color: #d8c4ff; }
+        .disc-line.disc-finding .disc-tag { color: #b388ff; font-weight: 700; }
+        .disc-line.disc-rule    { color: #e0c468; }
+        .disc-line.disc-rule .disc-tag { color: #f2d479; font-weight: 700; }
+        .disc-line.disc-action  { color: #6fe0a0; }
+        .disc-line.disc-error   { color: #ff8a8a; }
+        .disc-line.disc-query   { color: #7fd4ff; font-weight: 600; }
+        #vp-discovery-inputrow {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-top: 1px solid rgba(179,136,255,0.15);
+            font-family: 'Consolas', 'SF Mono', Menlo, monospace;
+            font-size: 10.5px;
+        }
+        #vp-discovery-run {
+            flex: 0 0 auto;
+            background: rgba(179,136,255,0.12);
+            border: 1px solid rgba(179,136,255,0.4);
+            color: #d8c4ff;
+            font-family: inherit;
+            font-size: 9.5px;
+            letter-spacing: 1px;
+            padding: 4px 8px;
+            cursor: pointer;
+            border-radius: 2px;
+        }
+        #vp-discovery-run:hover { background: rgba(179,136,255,0.25); }
+        #vp-discovery-prompt { color: #b388ff; flex: 0 0 auto; }
+        #vp-discovery-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: #cfe3f1;
+            font-family: inherit;
+            font-size: 10.5px;
+            caret-color: #b388ff;
+        }
+        #vp-discovery-input::placeholder { color: #3a5468; }
+        @keyframes disc-blink { 50% { opacity: 0; } }
+
         /* ── System Status panel (Operational Theatre) ───────────────────────── */
         /* Accessible via ⊙ button in right toolbar. Inherits hud-panel style.    */
         #ui-layer { display: none; } /* hidden by default — opened by toolbar btn */
@@ -2417,17 +2515,21 @@
             <button id="present-mode" class="toggle-btn">CINEMATIC ORBIT: OFF</button>
             <button id="toggle-mouse-mode" class="toggle-btn">LEFT-CLICK MODE: PAN MAP</button>
 
+            <!-- Always-visible — moved out of the collapsed legend drawer below
+                 (2026-06-27) because it was getting missed entirely buried in
+                 there. Pools ships AND aircraft (matches callsign/MMSI/
+                 ICAO24/country/class — see applySearchFilter in uiController.js). -->
+            <div id="search-panel">
+                <span id="search-label">ASSET SEARCH (SHIPS + AIRCRAFT)</span>
+                <input id="search-input" type="text" placeholder="callsign · MMSI · country · class" autocomplete="off" spellcheck="false">
+                <div id="search-match-count"></div>
+            </div>
+
             <div class="legend-header" id="legend-toggle-btn">
                 <span>◈ ASSET CLASSIFICATION KEY</span>
                 <span class="panel-chevron" id="legend-chevron" style="transform:rotate(-90deg)">▼</span>
             </div>
             <div id="legend-body">
-            <div id="search-panel">
-                <span id="search-label">ASSET SEARCH</span>
-                <input id="search-input" type="text" placeholder="callsign · MMSI · country · class" autocomplete="off" spellcheck="false">
-                <div id="search-match-count"></div>
-            </div>
-
             <div style="font-size:9px; color:#4a6b84; letter-spacing:1px; text-transform:uppercase; margin-bottom:6px;">INFRASTRUCTURE // STATIC</div>
             <div class="legend-item">
                 <div style="width:24px; height:3px; background: linear-gradient(90deg, #d0302d, #3b82f6, #22c55e, #a855f7); border-radius:1px; flex-shrink:0;"></div>
@@ -2518,6 +2620,7 @@
         <button class="sector-btn" id="btn-eu"   title="Jump to Europe / Atlantic"><span class="sb-icon">◎</span>EU</button>
         <button class="sector-btn" id="btn-as"   title="Jump to Pacific / Asia"><span class="sb-icon">◎</span>PAC</button>
         <button class="sector-btn" id="btn-home" title="Reset to global overview" style="grid-column:1/-1;letter-spacing:2px;">⌂ HOME</button>
+        <button class="sector-btn" id="altitude-watch-toggle" title="Altitude Watch" style="grid-column:1/-1;letter-spacing:2px;">✈ ALT. WATCH</button>
 
         <!-- Row 3: Map tools -->
         <button id="layers-toggle"        title="Map Layers">⊞</button>
@@ -2592,10 +2695,6 @@
                 Jet Stream (250mb)
                 <span class="lp-dot" id="dot-wind-jet"></span>
             </div>
-            <div class="lp-row" data-layer="altitude-decks">
-                Altitude Decks
-                <span class="lp-dot" id="dot-altitude-decks"></span>
-            </div>
             <div class="lp-row" data-layer="storm-history">
                 IBTrACS Cyclones
                 <span class="lp-dot" id="dot-storm-history"></span>
@@ -2606,10 +2705,6 @@
             <div class="lp-row" data-layer="gps-jamming">
                 GPS Jamming
                 <span class="lp-dot" id="dot-gps-jamming"></span>
-            </div>
-            <div class="lp-row" data-layer="aviation">
-                Aviation
-                <span class="lp-dot" id="dot-aviation"></span>
             </div>
         </div>
         <div class="lp-section">
@@ -2664,6 +2759,47 @@
             <button id="city-list-close" style="background:none; border:none; color:#8aabc4; cursor:pointer; font-size:18px; padding:0; line-height:1;">×</button>
         </div>
         <div id="city-list-body"></div>
+    </div>
+
+    <!-- Altitude Watch — standalone panel (next to HOME on the right toolbar),
+         not a Vanguard Panel tab. Occupancy by flight-level band + aircraft
+         actively transitioning between bands, with ETA. See initAltitudeWatch
+         in uiController.js. -->
+    <div id="altitude-watch-panel">
+        <div id="aw-header">
+            <span id="aw-title">✈ Altitude Watch</span>
+            <button id="aw-close">×</button>
+        </div>
+        <div id="aw-legend">
+            <div class="aw-legend-row" style="border-left-color:#40c4ff;">
+                <span class="aw-legend-fl">FL180</span>
+                <span class="aw-legend-text">18,000 ft — U.S. transition altitude. Below this, aircraft fly local-altimeter (QNH) altitudes; above it, everyone flies standard-pressure flight levels.</span>
+            </div>
+            <div class="aw-legend-row" style="border-left-color:#ffab40;">
+                <span class="aw-legend-fl">FL290</span>
+                <span class="aw-legend-text">29,000 ft — RVSM floor. Hemispheric rule begins: eastbound traffic gets odd flight levels, westbound gets even ones.</span>
+            </div>
+            <div class="aw-legend-row" style="border-left-color:#d9b3ff;">
+                <span class="aw-legend-fl">FL410</span>
+                <span class="aw-legend-text">41,000 ft — RVSM ceiling. Traffic thins out fast above this — mostly long-range business jets.</span>
+            </div>
+        </div>
+        <div id="aw-body">
+            <div class="vp-empty">
+                LOADING ALTITUDE WATCH<br>
+                OCCUPANCY · TRANSITIONS<br>
+                FL180 · FL290 · FL410
+            </div>
+        </div>
+        <!-- Aviation news — task #13. Separate from #aw-body's own render loop
+             (initAltitudeWatch in uiController.js); populated by
+             initAviationNewsManager in aviationNewsManager.js. -->
+        <div id="aw-news-header" style="font-size:9px; color:#4a6b84; letter-spacing:1px; text-transform:uppercase; padding:8px 9px 4px; border-top:1px solid rgba(64,196,255,0.15);">
+            ◈ AVIATION NEWS
+        </div>
+        <div id="aw-news-list" style="padding:0 9px 9px;">
+            <div class="vp-empty">LOADING…</div>
+        </div>
     </div>
 
 
@@ -2769,8 +2905,21 @@
             <div class="sys-stat"><span>LON</span><span id="vd-lon" style="color:var(--cyan)">—</span></div>
             <div class="sys-stat"><span>REGION</span><span id="vd-region" style="color:var(--orange)">—</span></div>
             <div class="sys-stat"><span>FLAG</span><span id="vd-country" style="color:var(--cyan)">—</span></div>
-            <div class="sys-stat"><span>DESTINATION</span><span id="vd-destination" style="color:var(--cyan)">—</span></div>
-            <div class="sys-stat"><span>ETA</span><span id="vd-eta" style="color:var(--cyan)">—</span></div>
+
+            <!-- Aircraft intel — registration/type/operator (instant, off the wire),
+                 origin/destination (adsbdb.com lookup) and photo (planespotters.net
+                 lookup), both fetched on demand when the card opens. Aircraft only. -->
+            <div id="vd-aircraft-section" style="display:none; margin-top:6px; border-top:1px solid rgba(64,196,255,0.2); padding-top:6px;">
+                <div class="sys-stat"><span>REGISTRATION</span><span id="vd-registration" style="color:var(--cyan)">—</span></div>
+                <div class="sys-stat"><span>TYPE</span><span id="vd-type" style="color:var(--cyan)">—</span></div>
+                <div class="sys-stat"><span>OPERATOR</span><span id="vd-operator" style="color:var(--cyan)">—</span></div>
+                <div class="sys-stat"><span>ORIGIN</span><span id="vd-origin" style="color:var(--cyan)">—</span></div>
+                <div class="sys-stat"><span>DESTINATION</span><span id="vd-destination" style="color:var(--cyan)">—</span></div>
+                <div id="vd-photo-wrap" style="display:none; margin-top:6px;">
+                    <img id="vd-photo-img" style="width:100%; display:block; border-radius:3px; border:1px solid rgba(64,196,255,0.3);" />
+                    <div id="vd-photo-credit" style="font-size:8px; color:#4a6b84; margin-top:2px; text-align:right;"></div>
+                </div>
+            </div>
             <div class="sys-stat" id="vd-dark-row" style="display:none; border-top:1px solid rgba(255,94,0,0.3); margin-top:6px; padding-top:6px;">
                 <span style="color:var(--orange)">⚠ LAST CONTACT</span>
                 <span id="vd-last-contact" style="color:var(--orange); font-weight:bold;">—</span>
@@ -2869,6 +3018,7 @@
             <button class="vp-tab"        data-tab="sitrep">SITREP</button>
             <button class="vp-tab"        data-tab="rf">RF<span class="vp-badge" id="vp-rf-badge"></span></button>
             <button class="vp-tab"        data-tab="integrity">INTEGRITY<span class="vp-badge" id="vp-integrity-tab-badge"></span></button>
+            <button class="vp-tab"        data-tab="discovery">DISCOVERY</button>
         </div>
 
         <!-- Tab content area -->
@@ -2928,6 +3078,16 @@
                     SPOOFING · DARK · LOITERING
                 </div>
             </div>
+
+            <div class="vp-pane" id="vp-discovery">
+                <div id="vp-discovery-stats"></div>
+                <div id="vp-discovery-log"></div>
+                <div id="vp-discovery-inputrow">
+                    <button id="vp-discovery-run" type="button" title="Run a discovery pass right now">RUN NOW</button>
+                    <span id="vp-discovery-prompt">vanguard@discovery:~$</span>
+                    <input id="vp-discovery-input" type="text" placeholder="ask the discoverer…" autocomplete="off" />
+                </div>
+            </div>
         </div>
     </div>
 
@@ -2977,16 +3137,6 @@
     <!-- Sector bookmark buttons moved to #zoom-controls column (top-right) -->
 
     <div id="canvas-container"></div>
-
-    <!-- Vessel class filter bar — floating pill strip at top-center of canvas -->
-    <div id="vessel-filter-bar">
-        <button class="vf-btn active" data-class="ALL">ALL</button>
-        <button class="vf-btn" data-class="CARGO">CARGO</button>
-        <button class="vf-btn" data-class="TANKER">TANKER</button>
-        <button class="vf-btn" data-class="PASSENGER">PASSENGER</button>
-        <button class="vf-btn" data-class="FISHING">FISHING</button>
-        <button class="vf-btn vf-dark" data-class="DARK">◉ DARK</button>
-    </div>
 
     <!-- Port detail panel — shown on port label click -->
     <div id="port-detail-panel" style="display:none;">
@@ -3330,8 +3480,9 @@
             panel.querySelectorAll('.lp-row[data-layer]').forEach(row => {
                 const key = row.dataset.layer;
                 const dot = row.querySelector('.lp-dot');
-                // Initialise from dot's starting class
+                // Initialise from dot's starting class.
                 window.layerStates[key] = dot?.classList.contains('on') ?? true;
+                dot?.classList.toggle('on', window.layerStates[key]);
 
                 row.addEventListener('click', () => {
                     const on = !window.layerStates[key];

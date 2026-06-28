@@ -33,6 +33,27 @@ export function highlightShip(shipGroup) {
             child.material = highlightMat;
         }
     });
+    // Real-flight aircraft no longer carry their own body meshes (the
+    // airframe is drawn by aircraftInstancer.js's shared InstancedMesh set —
+    // see entityBuilder.js createFlightObject), so the material-swap above is
+    // a no-op for them. NOTE: per Jamal, the altitude-glow brighten/enlarge
+    // hover cue is intentionally disabled (2026-06-28) — leaving the block
+    // here, commented, in case it's wanted back later.
+    // if (shipGroup.userData.isRealFlight && shipGroup.userData.altitudeGlow) {
+    //     const glow = shipGroup.userData.altitudeGlow;
+    //     glow.userData._baseScale = glow.userData._baseScale || glow.scale.x;
+    //     glow.scale.setScalar(glow.userData._baseScale * 1.8);
+    //     glow.material.opacity = 1.0;
+    // }
+    // Real AIS vessels no longer carry body meshes either (the hull is drawn
+    // by shipInstancer.js's shared InstancedMesh set — see entityBuilder.js
+    // createAISVesselObject), so the material-swap above is a no-op for them
+    // too. The waterline dot is a real per-vessel object whose color/opacity
+    // are already driven every frame by main.js's dark/live sync loop, so
+    // only SCALE is safe to use here as the hover cue (nothing else touches it).
+    if (shipGroup.userData.isRealAIS && shipGroup.userData.vesselDot) {
+        shipGroup.userData.vesselDot.scale.setScalar(1.8);
+    }
 }
 
 export function resetShipHighlight(shipGroup) {
@@ -41,6 +62,14 @@ export function resetShipHighlight(shipGroup) {
             child.material = child.userData.baseMaterial;
         }
     });
+    // if (shipGroup.userData.isRealFlight && shipGroup.userData.altitudeGlow) {
+    //     const glow = shipGroup.userData.altitudeGlow;
+    //     if (glow.userData._baseScale) glow.scale.setScalar(glow.userData._baseScale);
+    //     glow.material.opacity = 0.85;
+    // }
+    if (shipGroup.userData.isRealAIS && shipGroup.userData.vesselDot) {
+        shipGroup.userData.vesselDot.scale.setScalar(1.0);
+    }
 }
 
 // ── Coordinate / region helpers ───────────────────────────────────────────────
@@ -322,6 +351,124 @@ function _renderTimeline(positions, accentColor = '#00D4FF') {
 // Fetched on demand from the local proxy (node flight-proxy.js) → /vessel/<imo>.
 const DOSSIER_PROXY = 'http://localhost:8787/vessel';
 
+// ── Aircraft route / photo lookups ────────────────────────────────────────────
+// Fetched on demand when a card opens (flight-proxy.js already caches both
+// server-side — see ROUTE_CACHE_TTL_MS/PHOTO_CACHE_TTL_MS), mirrored in a tiny
+// client-side cache too so re-opening the same aircraft's card this session
+// doesn't even hit the local proxy a second time.
+const ROUTE_PROXY = 'http://localhost:8787/flight-route';
+const PHOTO_PROXY = 'http://localhost:8787/aircraft-photo';
+const REG_PROXY   = 'http://localhost:8787/aircraft-reg';
+const _routeCache  = new Map(); // callsign -> result
+const _photoCache  = new Map(); // registration -> result
+const _regCache    = new Map(); // icao24 hex -> result
+
+async function _fetchFlightRoute(callsign) {
+    if (!callsign) return null;
+    if (_routeCache.has(callsign)) return _routeCache.get(callsign);
+    try {
+        const res = await fetch(`${ROUTE_PROXY}?callsign=${encodeURIComponent(callsign)}`);
+        const data = await res.json();
+        _routeCache.set(callsign, data);
+        return data;
+    } catch (_) { return null; }
+}
+
+async function _fetchAircraftPhoto(registration) {
+    if (!registration) return null;
+    if (_photoCache.has(registration)) return _photoCache.get(registration);
+    try {
+        const res = await fetch(`${PHOTO_PROXY}?reg=${encodeURIComponent(registration)}`);
+        const data = await res.json();
+        _photoCache.set(registration, data);
+        return data;
+    } catch (_) { return null; }
+}
+
+// Fallback for when the active flight source is OpenSky: its state vector
+// has no registration/type fields at all (see flight-proxy.js's
+// fetchOpenSkyStates and the /aircraft-reg comment), so ud.registration is
+// null even though the aircraft is real and a hex/icao24 exists. hexdb.io
+// resolves registration/type/owner from just the hex, independent of feed.
+async function _fetchAircraftReg(hex) {
+    if (!hex) return null;
+    if (_regCache.has(hex)) return _regCache.get(hex);
+    try {
+        const res = await fetch(`${REG_PROXY}?hex=${encodeURIComponent(hex)}`);
+        const data = await res.json();
+        _regCache.set(hex, data);
+        return data;
+    } catch (_) { return null; }
+}
+
+// Guards against a slower-than-expected lookup landing after the operator has
+// already clicked to a different aircraft — same race the dossier code below
+// has to handle (compares against _detailShip, not a captured local).
+function _wireAircraftIntel(ship, ud) {
+    const callsign = ud.displayName;
+    const hex       = ud.id; // icao24 — present regardless of feed source
+
+    const originEl = document.getElementById('vd-origin');
+    const destEl   = document.getElementById('vd-destination');
+    if (originEl) originEl.innerText = '…';
+    if (destEl)   destEl.innerText   = '…';
+    _fetchFlightRoute(callsign).then(r => {
+        if (_detailShip !== ship) return; // user moved on — drop the result
+        if (originEl) originEl.innerText = r?.ok ? (r.originName || r.origin || '—') : '—';
+        if (destEl)   destEl.innerText   = r?.ok ? (r.destName   || r.destination || '—') : '—';
+    });
+
+    const photoWrap   = document.getElementById('vd-photo-wrap');
+    const photoImg    = document.getElementById('vd-photo-img');
+    const photoCredit = document.getElementById('vd-photo-credit');
+    if (photoWrap) photoWrap.style.display = 'none';
+
+    // ud.registration comes free on ADS-B-derived feeds (airplanes.live/
+    // adsb.lol) but is null when OpenSky is the active source — its
+    // /states/all schema has no registration/type field. Resolve it via
+    // hexdb.io by icao24 hex in that case before giving up on the photo.
+    const regPromise = ud.registration
+        ? Promise.resolve({ ok: true, registration: ud.registration, typeCode: ud.typeCode, operator: ud.operator })
+        : _fetchAircraftReg(hex);
+
+    regPromise.then(r => {
+        if (_detailShip !== ship) return;
+        const registration = r?.ok ? (r.registration || ud.registration) : ud.registration;
+        // Backfill REGISTRATION/TYPE/OPERATOR on the card if the live feed
+        // didn't have them but the hexdb.io fallback did.
+        if (r?.ok) {
+            const regEl = document.getElementById('vd-registration');
+            const typeEl = document.getElementById('vd-type');
+            const opEl   = document.getElementById('vd-operator');
+            if (regEl && !ud.registration && r.registration) regEl.innerText = r.registration;
+            if (typeEl && !ud.typeCode && r.typeCode)         typeEl.innerText = r.typeCode;
+            if (opEl   && !ud.operator  && r.operator)        opEl.innerText   = r.operator;
+        }
+        if (!registration) return;
+        return _fetchAircraftPhoto(registration).then(p => {
+            if (_detailShip !== ship) return;
+            if (!photoWrap || !photoImg) return;
+            // Diagnostic: surface exactly why no photo appeared, directly on the
+            // card, instead of silently staying hidden (2026-06-27 — chasing the
+            // missing-photo bug without needing DevTools open).
+            if (!p?.ok || !p.thumbnail) {
+                if (photoCredit) photoCredit.innerText = `[no photo: ${p?.error || 'empty/failed response'}]`;
+                photoWrap.style.display = '';
+                return;
+            }
+            photoImg.src = p.thumbnail;
+            if (photoCredit) {
+                photoCredit.innerText = p.photographer ? `© ${p.photographer} · planespotters.net` : 'planespotters.net';
+            }
+            photoWrap.style.display = '';
+        }).catch(err => {
+            if (_detailShip !== ship) return;
+            if (photoWrap) photoWrap.style.display = '';
+            if (photoCredit) photoCredit.innerText = `[photo fetch threw: ${err.message}]`;
+        });
+    });
+}
+
 // Detention → alert: when an Equasis dossier reveals PSC detention(s), raise an
 // alert in the ALERTS tab (deduped per vessel for the session). Surfaces the
 // finding beyond the card so a detained vessel registers as a flagged event.
@@ -538,6 +685,191 @@ export function initIntegrityBoard({ flyTo } = {}) {
     window.addEventListener('vg1:integrityChanged', render);
 }
 
+// ── ALTITUDE WATCH (standalone panel — #altitude-watch-panel, toggled from
+//    #altitude-watch-toggle next to HOME in #right-toolbar; NOT a Vanguard
+//    Panel tab) ──────────────────────────────────────────────────────────────
+// Replaces the removed full-map altitude-deck grid (see altitudeDeckManager.js
+// header, 2026-06-27) — that tried to show "who's near which flight level"
+// spatially and failed because the actual Y-separation between levels is too
+// small to read at the zoom needed to see the whole map. This gives the same
+// information as a list instead: occupancy per band right now, plus which
+// aircraft are actively climbing/descending into the next one, with an ETA.
+//
+// Reads window.aisShips directly (filtered to userData.isRealFlight) — no
+// flightManager reference of its own, consistent with how every other panel
+// here reads live aircraft/vessel state. verticalRateMs is synced onto
+// userData in main.js's onAircraftUpdate; see the comment there.
+//
+// Flight-level boundaries duplicated from DECKS in altitudeDeckManager.js
+// (deliberately not imported — uiController.js shouldn't depend on the 3D
+// rendering module for three numbers). Keep these in sync if the real-world
+// levels ever change.
+const ALT_DECKS = [
+    { id: 'fl180', altFt: 18000, label: 'FL180', color: '#40c4ff' },
+    { id: 'fl290', altFt: 29000, label: 'FL290', color: '#ffab40' },
+    { id: 'fl410', altFt: 41000, label: 'FL410', color: '#d9b3ff' },
+];
+const ALT_FT_TO_M   = 0.3048;
+const ALT_MIN_RATE_MS = 0.5;       // ~100 fpm floor — below this, treat as level (cruise jitter, not a real climb/descent)
+const ALT_MAX_ETA_SEC = 5 * 60;    // only surface transitions expected within 5 minutes — "about to happen," not a long-range forecast
+
+function _altBandFor(altFt) {
+    if (altFt < ALT_DECKS[0].altFt) return { label: 'Below FL180', color: '#7ad9d9' };
+    if (altFt < ALT_DECKS[1].altFt) return { label: 'FL180–FL290', color: ALT_DECKS[0].color };
+    if (altFt < ALT_DECKS[2].altFt) return { label: 'FL290–FL410', color: ALT_DECKS[1].color };
+    return { label: 'Above FL410', color: ALT_DECKS[2].color };
+}
+
+export function initAltitudeWatch({ flyTo } = {}) {
+    const pane = document.getElementById('aw-body');
+    if (!pane) { console.warn('[AltWatch] #aw-body pane missing'); return; }
+    const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+
+    function render() {
+        const flights = (window.aisShips || []).filter(o => o.userData?.isRealFlight && o.visible);
+
+        // ── Occupancy by band ────────────────────────────────────────────────
+        const bandOrder = ['Below FL180', 'FL180–FL290', 'FL290–FL410', 'Above FL410'];
+        const counts = new Map(bandOrder.map(l => [l, 0]));
+        for (const f of flights) {
+            const altFt = (f.userData.altMeters ?? 0) / ALT_FT_TO_M;
+            const band = _altBandFor(altFt);
+            counts.set(band.label, (counts.get(band.label) || 0) + 1);
+        }
+        const occupancyHTML = `<div style="display:flex; gap:6px; padding:6px 9px; flex-wrap:wrap;">
+            ${bandOrder.map(label => {
+                const color = _altBandFor(label === 'Below FL180' ? 0 : label === 'FL180–FL290' ? ALT_DECKS[0].altFt : label === 'FL290–FL410' ? ALT_DECKS[1].altFt : ALT_DECKS[2].altFt).color;
+                return `<div style="flex:1 1 auto; min-width:72px; border-left:3px solid ${color}; padding:4px 7px; background:rgba(255,255,255,0.02);">
+                    <div style="font-size:9px; color:#8aabc4;">${label}</div>
+                    <div style="font-size:15px; font-weight:700; color:${color};">${counts.get(label)}</div>
+                </div>`;
+            }).join('')}
+        </div>`;
+
+        // ── Transitions — climbing/descending toward the next boundary ───────
+        const transitions = [];
+        for (const f of flights) {
+            const rate = f.userData.verticalRateMs ?? 0;
+            if (Math.abs(rate) < ALT_MIN_RATE_MS) continue;
+            const altFt = (f.userData.altMeters ?? 0) / ALT_FT_TO_M;
+            let target = null;
+            if (rate > 0) {
+                for (const d of ALT_DECKS) { if (d.altFt > altFt) { target = d; break; } }
+            } else {
+                for (let i = ALT_DECKS.length - 1; i >= 0; i--) { if (ALT_DECKS[i].altFt < altFt) { target = ALT_DECKS[i]; break; } }
+            }
+            if (!target) continue;
+            const deltaFt = Math.abs(target.altFt - altFt);
+            const etaSec  = (deltaFt * ALT_FT_TO_M) / Math.abs(rate);
+            if (etaSec > ALT_MAX_ETA_SEC) continue;
+            transitions.push({ f, altFt, rate, target, etaSec });
+        }
+        transitions.sort((a, b) => a.etaSec - b.etaSec);
+
+        const transitionsHTML = transitions.length
+            ? transitions.slice(0, 8).map(t => {
+                const ud    = t.f.userData;
+                const arrow = t.rate > 0 ? '↑' : '↓';
+                const mins  = Math.floor(t.etaSec / 60), secs = Math.round(t.etaSec % 60);
+                const etaLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                const fpm = Math.round((t.rate / ALT_FT_TO_M) * 60);
+                return `<div class="vg-alt-row" data-id="${esc(ud.id ?? '')}"
+                    style="cursor:pointer; border-left:3px solid ${t.target.color}; padding:6px 9px; margin:2px 0;
+                           background:rgba(255,255,255,0.02);">
+                    <div style="display:flex; justify-content:space-between; align-items:baseline;">
+                        <span style="color:#cfe3f1; font-weight:700; font-size:12px;">${esc(ud.displayName || 'UNKNOWN')}</span>
+                        <span style="color:${t.target.color}; font-weight:700; font-size:11px;">${arrow} ${t.target.label} in ${etaLabel}</span>
+                    </div>
+                    <div style="font-size:10px; color:#8aabc4; margin-top:2px;">FL${Math.round(t.altFt / 100)} · ${fpm > 0 ? '+' : ''}${fpm} fpm</div>
+                </div>`;
+            }).join('')
+            : `<div class="vp-empty" style="margin-top:4px;">NO AIRCRAFT CURRENTLY<br>TRANSITIONING BETWEEN<br>FLIGHT LEVELS</div>`;
+
+        pane.innerHTML = occupancyHTML + transitionsHTML;
+
+        pane.querySelectorAll('.vg-alt-row').forEach(row => {
+            row.addEventListener('click', () => {
+                const id  = row.dataset.id;
+                const obj = flights.find(f => String(f.userData.id) === id);
+                if (obj && flyTo && obj.userData.latDeg != null) flyTo(obj.userData.latDeg, obj.userData.lonDeg);
+            });
+        });
+    }
+
+    render();
+    setInterval(render, 2000);
+}
+
+/** Discovery console — terminal-style live log of every AI Discovery pass
+ *  (scans, findings, actions, errors), not just the moments something is
+ *  found. Append-only, capped, auto-scrolls unless the user scrolled up to
+ *  read history. Subscribes directly to discoveryManager.onEvent() — no new
+ *  event bus needed, matches how alertsManager.js already consumes it. */
+export function initDiscoveryConsole(discoveryManager) {
+    const log = document.getElementById('vp-discovery-log');
+    if (!log) { console.warn('[Discovery] #vp-discovery-log pane missing'); return; }
+    if (!discoveryManager) return;
+
+    const MAX_LINES = 300;
+    const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    // DISCOVERY_RULE is the local rule-engine's own line (see discoveryRules.js)
+    // — kept visually distinct from DISCOVERY (an actual Claude assessment) so
+    // an analyst never mistakes a $0 template for an AI judgment call.
+    const PREFIX = { DISCOVERY_SCAN: '', DISCOVERY: '◈ ', DISCOVERY_RULE: '◆ ', DISCOVERY_ACTION: '', DISCOVERY_ERROR: '! ', DISCOVERY_QUERY: '' };
+    const CLASS  = { DISCOVERY_SCAN: 'disc-scan', DISCOVERY: 'disc-finding', DISCOVERY_RULE: 'disc-rule', DISCOVERY_ACTION: 'disc-action', DISCOVERY_ERROR: 'disc-error', DISCOVERY_QUERY: 'disc-query' };
+
+    log.innerHTML = `<div class="disc-line disc-scan"><span class="disc-ts">[boot]</span> discovery console attached — waiting for first pass… (RUN NOW to trigger one, or ask a question below)</div>`;
+
+    // ── Rolling stats bar — see discoveryManager.getStatsSummary() ───────────
+    // Renders from in-memory counters on every event; the durable cross-session
+    // record lives server-side in ruleEngine.jsonl (GET /memory/rule-stats).
+    const statsBar = document.getElementById('vp-discovery-stats');
+    function renderStats() {
+        if (!statsBar || typeof discoveryManager.getStatsSummary !== 'function') return;
+        const s = discoveryManager.getStatsSummary();
+        const errCls = s.claudeErrors > 0 ? 'ds-bad' : 'ds-good';
+        statsBar.innerHTML = `
+            <span>TICKS <span class="ds-val">${s.ticks}</span></span>
+            <span>RULE FINDINGS <span class="ds-val">${s.ruleFindings}</span></span>
+            <span>RULE-ONLY SAVES <span class="ds-val ds-good">${s.ruleOnlySaves}</span></span>
+            <span>ESCALATIONS <span class="ds-val">${s.escalations}</span></span>
+            <span>CLAUDE OK <span class="ds-val">${s.claudeCalls}</span></span>
+            <span>CLAUDE ERR <span class="ds-val ${errCls}">${s.claudeErrors}</span></span>
+        `;
+    }
+    renderStats();
+    setInterval(renderStats, 5000);
+
+    discoveryManager.onEvent(evt => {
+        renderStats();
+        const isNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+
+        const ts   = new Date(evt.timestamp || Date.now()).toLocaleTimeString();
+        const cls  = CLASS[evt.type] || 'disc-scan';
+        const tag  = evt.type === 'DISCOVERY' ? '<span class="disc-tag">FINDING</span> '
+            : evt.type === 'DISCOVERY_RULE' ? '<span class="disc-tag">RULE</span> ' : '';
+        const line = document.createElement('div');
+        line.className = `disc-line ${cls}`;
+        line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX[evt.type] || ''}${esc(evt.body)}`;
+        log.appendChild(line);
+
+        while (log.children.length > MAX_LINES) log.removeChild(log.firstChild);
+        if (isNearBottom) log.scrollTop = log.scrollHeight;
+    });
+
+    // ── Manual controls — RUN NOW button + freeform query input ───────────────
+    const runBtn = document.getElementById('vp-discovery-run');
+    const input  = document.getElementById('vp-discovery-input');
+    runBtn?.addEventListener('click', () => discoveryManager.forcePass());
+    input?.addEventListener('keydown', e => {
+        if (e.key !== 'Enter') return;
+        const q = input.value.trim();
+        if (!q) return;
+        input.value = '';
+        discoveryManager.query(q);
+    });
+}
+
 export function showVesselDetail(ship, camera, controls, stateRef) {
     _detailShip = ship;
     const ud    = ship.userData;
@@ -558,8 +890,24 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
     document.getElementById('vd-heading').innerText  = ud.headingDeg != null
         ? Math.round(ud.headingDeg) + '°' : '—';
     document.getElementById('vd-country').innerText  = ud.country   || '—';
-    document.getElementById('vd-destination').innerText = ud.destination || '—';
-    document.getElementById('vd-eta').innerText      = ud.eta       || '—';
+
+    const aircraftSection = document.getElementById('vd-aircraft-section');
+    if (aircraftSection) {
+        aircraftSection.style.display = isAircraft ? '' : 'none';
+        if (isAircraft) {
+            document.getElementById('vd-registration').innerText = ud.registration || '—';
+            document.getElementById('vd-type').innerText         = ud.typeCode     || '—';
+            document.getElementById('vd-operator').innerText     = ud.operator     || '—';
+            try {
+                _wireAircraftIntel(ship, ud);
+            } catch (e) {
+                // Surface the error directly on the card — avoids needing DevTools open.
+                console.error('[vd] _wireAircraftIntel threw:', e);
+                const originEl = document.getElementById('vd-origin');
+                if (originEl) originEl.innerText = 'ERR: ' + e.message;
+            }
+        }
+    }
 
     renderIntegrity(ud, isAircraft || isSatellite);
     wireDossierButton(ud, isAircraft || isSatellite);
@@ -809,10 +1157,15 @@ export function refreshFlightList(aisShips, stateRef, camera, controls) {
             cursor:pointer; font-size:10px;
         `;
         const alt = ud.altMeters != null ? Math.round(ud.altMeters / 100) * 100 + ' M' : '—';
+        // Row colors by aircraft class (set in entityBuilder.js from ADS-B
+        // category/dbFlags/callsign classification) so the list reads the
+        // same way the 3D models do — commercial/cargo/military/etc each
+        // get their own color instead of one flat orange for every aircraft.
         row.innerHTML = `
-            <span style="color:var(--orange); font-weight:bold;">
+            <span style="color:${ud.htmlColor ?? 'var(--orange)'}; font-weight:bold;">
                 ${ud.displayName || ud.id || 'UNKNOWN'}
             </span>
+            <span style="color:#8aabc4;">${ud.class || '—'}</span>
             <span style="color:#8aabc4;">${alt}</span>
             <span style="color:#fff;">${ud.speedKts != null ? ud.speedKts.toFixed(0) + ' KTS' : '—'}</span>
         `;
@@ -1187,6 +1540,29 @@ export function setupUI(deps) {
         cityListClose.onclick = () => {
             cityListPanel.style.display = 'none';
             if (cityListToggle) cityListToggle.classList.remove('active');
+        };
+    }
+
+    // ── Altitude Watch panel — standalone toggle next to HOME, not a Vanguard
+    // Panel tab. Render logic (initAltitudeWatch) runs its own setInterval and
+    // writes into #aw-body regardless of visibility, same as the rest of this
+    // file's panels; this block only owns show/hide + the toggle button's
+    // active state.
+    const altitudeWatchToggle = document.getElementById('altitude-watch-toggle');
+    const altitudeWatchPanel  = document.getElementById('altitude-watch-panel');
+    const altitudeWatchClose  = document.getElementById('aw-close');
+
+    if (altitudeWatchToggle && altitudeWatchPanel) {
+        altitudeWatchToggle.onclick = () => {
+            const visible = altitudeWatchPanel.style.display === 'block';
+            altitudeWatchPanel.style.display = visible ? 'none' : 'block';
+            altitudeWatchToggle.classList.toggle('active', !visible);
+        };
+    }
+    if (altitudeWatchClose && altitudeWatchPanel) {
+        altitudeWatchClose.onclick = () => {
+            altitudeWatchPanel.style.display = 'none';
+            if (altitudeWatchToggle) altitudeWatchToggle.classList.remove('active');
         };
     }
 

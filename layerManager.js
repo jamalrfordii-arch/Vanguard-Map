@@ -152,7 +152,6 @@ layerManager
     .register({ id: 'weather',        category: 'atmosphere',  label: 'Surface Wind (10m)',   color: '#64a0ff', defaultOn: false })
     .register({ id: 'wind-low',       category: 'atmosphere',  label: 'Low-Level (850mb)',    color: '#8ab8ff', defaultOn: false })
     .register({ id: 'wind-jet',       category: 'atmosphere',  label: 'Jet Stream (250mb)',   color: '#b8d8ff', defaultOn: false })
-    .register({ id: 'altitude-decks', category: 'atmosphere',  label: 'Altitude Decks',       color: '#9cc8ff', defaultOn: false })
     .register({ id: 'storm-history',  category: 'atmosphere',  label: 'IBTrACS Cyclones',     color: '#ff8c5a', defaultOn: false })
     .register({ id: 'lightning',      category: 'atmosphere',  label: 'Lightning',            color: '#64a0ff', defaultOn: false, reserved: true })
     .register({ id: 'precipitation',  category: 'atmosphere',  label: 'Precipitation',        color: '#64a0ff', defaultOn: false, reserved: true });

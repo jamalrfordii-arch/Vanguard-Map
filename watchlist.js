@@ -23,6 +23,7 @@ const _WL_TIER_COLOR = { TRUSTED: '#7ad97a', QUESTIONABLE: '#ffa726', SUSPECT: '
 const LS_NOTES    = 'vg1_watchlist_notes';
 const LS_ALERTS   = 'vg1_watchlist_alerts';
 const LS_NAMECACHE = 'vg1_watchlist_namecache'; // last-known name per MMSI
+const LS_DR_MODE   = 'vg1_dr_watchlist_mode';   // dead-reckoning watchlist-extension toggle (shared key with main.js)
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
 function _loadSet()       { try { return new Set(JSON.parse(localStorage.getItem(LS_WATCHED)   || '[]')); } catch { return new Set(); } }
@@ -33,6 +34,8 @@ function _loadAlerts()    { try { return JSON.parse(localStorage.getItem(LS_ALER
 function _saveAlerts(a)   { localStorage.setItem(LS_ALERTS,    JSON.stringify(a)); }
 function _loadNameCache()  { try { return JSON.parse(localStorage.getItem(LS_NAMECACHE) || '{}'); } catch { return {}; } }
 function _saveNameCache(c) { localStorage.setItem(LS_NAMECACHE, JSON.stringify(c)); }
+function _loadDRMode()     { try { return localStorage.getItem(LS_DR_MODE) === '1'; } catch { return false; } }
+function _saveDRMode(on)   { try { localStorage.setItem(LS_DR_MODE, on ? '1' : '0'); } catch {} }
 const _defaultAlerts = () => ({ speed: false, course: false, dark: false });
 
 // ── ISO 3166-1 alpha-3 → alpha-2 for flag emoji ───────────────────────────────
@@ -273,6 +276,24 @@ export function initWatchlist(aisManager) {
     });
 
     // ── Watchlist tab renderer ────────────────────────────────────────────────
+    // Dead-reckoning watchlist-extension toggle — persisted checkbox markup,
+    // shared across both the empty and populated render branches below.
+    function _drToggleHtml() {
+        const checked = _loadDRMode() ? 'checked' : '';
+        return `<label class="vt-dr-toggle" title="Show the dead-reckoning line + projected-point marker for every watched vessel, not just the selected one">
+            <input type="checkbox" id="vt-dr-checkbox" ${checked}>
+            Show projected track for watched vessels
+        </label>`;
+    }
+
+    function _wireDRToggle(pane) {
+        pane.querySelector('#vt-dr-checkbox')?.addEventListener('change', e => {
+            const on = !!e.target.checked;
+            _saveDRMode(on);
+            window.dispatchEvent(new CustomEvent('vg1:drWatchlistModeChanged', { detail: { on } }));
+        });
+    }
+
     function _renderWatchlistTab() {
         const pane = document.getElementById('vp-watchlist');
         if (!pane) return;
@@ -280,15 +301,16 @@ export function initWatchlist(aisManager) {
         const mmsis = [..._watched];
 
         if (mmsis.length === 0) {
-            pane.innerHTML = `<div class="vp-empty">
+            pane.innerHTML = `${_drToggleHtml()}<div class="vp-empty">
                 NO VESSELS WATCHED<br>
                 CLICK A VESSEL ON MAP<br>
                 THEN ADD TO WATCHLIST
             </div>`;
+            _wireDRToggle(pane);
             return;
         }
 
-        let html = `<div class="vt-summary">${mmsis.length} VESSEL${mmsis.length !== 1 ? 'S' : ''} WATCHED</div>`;
+        let html = `${_drToggleHtml()}<div class="vt-summary">${mmsis.length} VESSEL${mmsis.length !== 1 ? 'S' : ''} WATCHED</div>`;
 
         for (const mmsi of mmsis) {
             const v       = aisManager.vessels.get(mmsi);
@@ -354,6 +376,7 @@ export function initWatchlist(aisManager) {
         }
 
         pane.innerHTML = html;
+        _wireDRToggle(pane);
 
         // Trigger pulse animation on newly-alerted rows.
         // We force a reflow before adding the class so the animation

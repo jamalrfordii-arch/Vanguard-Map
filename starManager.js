@@ -17,6 +17,10 @@ const RADIUS_MIN  = 700;    // beyond the sky dome (550) and aquarium
 const RADIUS_MAX  = 1100;
 const DRIFT_RATE  = 0.0008; // radians/sec — barely-there rotation
 
+// Brightness/size bumped up 2026-06-28 per Jamal (wanted a more noticeable
+// starfield) — was 0.35-0.80 brightness / 1.3px-1.3px size / 6% brighter
+// anchors at 2.4px. Still safely under the 0.95 bloom threshold.
+
 export class StarManager {
     constructor(scene) {
         this.group = new THREE.Group();
@@ -54,12 +58,12 @@ export class StarManager {
             const c = palette[(Math.random() * palette.length) | 0];
             // Vary brightness so the field has depth; keep the ceiling low so
             // nothing rivals the map (and stays under the 0.95 bloom threshold).
-            const b = 0.35 + Math.random() * 0.45;
+            const b = 0.55 + Math.random() * 0.45;
             col[i * 3]     = c[0] * b;
             col[i * 3 + 1] = c[1] * b;
             col[i * 3 + 2] = c[2] * b;
 
-            sizes[i] = Math.random() < 0.06 ? 2.4 : 1.3;  // a few brighter anchors
+            sizes[i] = Math.random() < 0.12 ? 3.2 : 1.8;  // a few brighter anchors
         }
 
         const geo = new THREE.BufferGeometry();

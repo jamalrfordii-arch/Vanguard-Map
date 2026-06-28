@@ -5,7 +5,7 @@ import {
     BLOOM_STRENGTH_BASE, BLOOM_THREAT_RANGE,
     AMBIENT_INTENSITY_BASE, AMBIENT_INTENSITY_BONUS,
     DIR_LIGHT_INTENSITY_MAX,
-    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY,
+    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY, FLIGHT_INTEGRITY, CONFLICT,
 } from './config.js';
 import { loadAllData } from './dataLoader.js';
 import { mark as bootMark, report as bootReport } from './bootProfiler.js';   // measurement-only
@@ -25,15 +25,18 @@ import {
 import { PortManager } from './portManager.js';
 import { ClusterManager } from './clusterManager.js';
 import { integrityManager, setElevationFn as setIntegrityElevation } from './integrityManager.js';
+import { flightIntegrityManager } from './flightIntegrityManager.js';
 import { waveField } from './waveFieldManager.js';   // global sea-state data field (Phase A; lazy fetch)
 import { WaveFieldLayer } from './waveFieldLayer.js'; // global sea-state heatmap + contour render layer
 import { FlightManager, lonLatAltToScene } from './flightManager.js';
+import { aircraftInstancer } from './aircraftInstancer.js';
+import { shipInstancer } from './shipInstancer.js';
 import {
     setupUI, setupSettingsPanel, setupSectorSearch,
     onMouseMove, onDoubleClick, onClick, tickRaycasting,
     tickVesselDetail, refreshShipList, refreshFlightList,
     applySearchFilter, tickSearchVisibility, tickAlertZone,
-    showVesselDetail, hideVesselDetail, initIntegrityBoard
+    showVesselDetail, hideVesselDetail, initIntegrityBoard, initDiscoveryConsole, initAltitudeWatch
 } from './uiController.js';
 import { AISManager, lonLatToScene } from './aisManager.js';
 import { simClock } from './simClock.js';
@@ -45,6 +48,7 @@ import { initVesselTab } from './vesselTab.js';
 import { initWatchlist } from './watchlist.js';
 import { initAlertsManager } from './alertsManager.js';
 import { initFeedManager } from './feedManager.js';
+import { initAviationNewsManager } from './aviationNewsManager.js';
 import { initSitrepManager } from './sitrepManager.js';
 import { initSelectionRing } from './selectionRing.js';
 import { DayNightManager } from './dayNightManager.js';
@@ -53,6 +57,7 @@ import { GFSWindManager }  from './gfsWindManager.js';
 import { BeaufortWarningManager } from './beaufortWarningManager.js';
 import { GFSUpperWindManager } from './gfsUpperWindManager.js';
 import { AltitudeDeckManager } from './altitudeDeckManager.js';
+import { ConflictManager } from './conflictManager.js';
 import { SkyManager }    from './skyManager.js';
 import { FogManager }    from './fogManager.js';
 import { TrailManager }  from './trailManager.js';
@@ -61,6 +66,7 @@ import { CityManager } from './cityManager.js';
 import { ContinentMesh } from './continentMesh.js';
 import * as terrainHeight from './terrainHeightSampler.js';
 import { AICopilot, CHOKEPOINTS } from './aiCopilot.js';
+import { DiscoveryManager } from './discoveryManager.js';
 import { ChokepointManager } from './chokepointManager.js';
 import { NavLightManager } from './navLightManager.js';
 import { TileStreamManager } from './tileStreamManager.js';
@@ -212,6 +218,95 @@ async function init(mapData) {
     // ── Selection ring ────────────────────────────────────────────────────────
     const selectionRing = initSelectionRing(scene);
 
+    // ── Dead-reckoning visibility (prediction line + projected-point marker) ──
+    // Added 2026-06-26. The line/marker themselves are built once per vessel in
+    // entityBuilder.js (always exist, start hidden); this just decides who gets
+    // to show theirs each moment. Default scope: selected vessel only. The
+    // watchlist-mode toggle (WATCHLIST tab checkbox, watchlist.js) additionally
+    // shows it for every watchlisted vessel regardless of selection.
+    const LS_DR_WATCHLIST_MODE = 'vg1_dr_watchlist_mode';
+    let _drWatchlistMode = (() => {
+        try { return localStorage.getItem(LS_DR_WATCHLIST_MODE) === '1'; } catch { return false; }
+    })();
+
+    function _predictionEligible(obj) {
+        if (!obj) return false;
+        if (selectionRing.target === obj) return true;
+        if (_drWatchlistMode && window.watchlist?.isWatched(String(obj.userData?.id))) return true;
+        return false;
+    }
+
+    // Recomputes one vessel's prediction line + marker from its current
+    // userData (speedKts/headingDeg) and live eligibility. Safe to call any
+    // time — on AIS update, on selection change, on watchlist change.
+    function _syncPredictionVisual(obj) {
+        if (!obj) return;
+        const ud   = obj.userData;
+        const line = ud.predictionLine;
+        if (!line) return;
+        const marker = ud.predictionMarker;
+
+        if (!_predictionEligible(obj) || ud.isDark) {
+            line.visible = false;
+            if (marker) marker.visible = false;
+            return;
+        }
+
+        const speedKts = ud.speedKts ?? 0;
+        const len = Math.min(speedKts * 0.12, 7);
+        if (len > 0.15 && ud.headingDeg != null) {
+            const hdgRad = ud.headingDeg * (Math.PI / 180);
+            const dx = Math.sin(hdgRad) * len;
+            const dz = -Math.cos(hdgRad) * len;
+            const sp = obj.position;
+            line.geometry.setFromPoints([
+                new THREE.Vector3(sp.x, sp.y, sp.z),
+                new THREE.Vector3(sp.x + dx, sp.y, sp.z + dz),
+            ]);
+            line.computeLineDistances();
+            line.visible = true;
+            if (marker) {
+                marker.position.set(sp.x + dx, sp.y + 0.02, sp.z + dz);
+                marker.visible = true;
+            }
+        } else {
+            line.visible = false;
+            if (marker) marker.visible = false;
+        }
+    }
+    window._syncPredictionVisual = _syncPredictionVisual;
+
+    // Re-syncs every live vessel — used when the watchlist-mode toggle flips,
+    // since eligibility just changed for a whole set of vessels at once.
+    function _syncAllPredictionVisuals() {
+        window.aisShips.forEach(_syncPredictionVisual);
+    }
+    window._syncAllPredictionVisuals = _syncAllPredictionVisuals;
+
+    window.addEventListener('vg1:drWatchlistModeChanged', e => {
+        _drWatchlistMode = !!e.detail?.on;
+        try { localStorage.setItem(LS_DR_WATCHLIST_MODE, _drWatchlistMode ? '1' : '0'); } catch {}
+        _syncAllPredictionVisuals();
+    });
+
+    // Wrappers around selectionRing.select()/.clear() that also resync the
+    // dead-reckoning line/marker for the outgoing and incoming selection —
+    // selection changes happen between AIS polls, so the next onVesselUpdate
+    // alone isn't fast enough to feel responsive.
+    function _selectVesselRing(obj, color) {
+        const prevTarget = selectionRing.target;
+        selectionRing.select(obj, color);
+        if (prevTarget && prevTarget !== obj) _syncPredictionVisual(prevTarget);
+        _syncPredictionVisual(obj);
+    }
+    function _clearVesselRing() {
+        const prevTarget = selectionRing.target;
+        selectionRing.clear();
+        if (prevTarget) _syncPredictionVisual(prevTarget);
+    }
+    window._selectVesselRing = _selectVesselRing;
+    window._clearVesselRing  = _clearVesselRing;
+
     // ── Vessel card opener — single entry point for all code paths ────────────
     // Wraps uiController.showVesselDetail so the selection ring and watchlist
     // card state stay in sync whether the card is opened from the Vanguard Panel
@@ -226,7 +321,7 @@ async function init(mapData) {
             const ringColor = window.watchlist?.isWatched(mmsi)
                 ? selectionRing.COLOR_WATCHLIST
                 : selectionRing.COLOR_DEFAULT;
-            selectionRing.select(obj, ringColor);
+            _selectVesselRing(obj, ringColor);
         }
 
         // Watchlist card state — always update, even if vessel dropped off live feed.
@@ -347,12 +442,27 @@ async function init(mapData) {
     const gfsUpperWindManager = new GFSUpperWindManager(scene);
     window.gfsUpperWindManager = gfsUpperWindManager;
 
-    // ── Altitude decks — stratified altitude reference layer ─────────────────
-    // Renders translucent wireframe grids at each registered Y altitude with
-    // edge labels naming them. Visible only when camera tilts, so top-down
-    // operational view stays clean and tilted view reveals the 3D structure.
-    const altitudeDeckManager = new AltitudeDeckManager(scene, camera);
+    // ── Altitude decks — flight-level reference grid ──────────────────────────
+    // A small wireframe grid patch at real-world flight levels (FL180/FL290/
+    // FL410), anchored under whichever aircraft is currently selected/clicked,
+    // hidden the rest of the time. A full-map variant (toggled via a
+    // layerManager.js layer) was tried and removed 2026-06-27 — at the zoom
+    // level needed to see the whole map, the ~12-scene-unit spread between
+    // flight levels is visually negligible (controls.maxDistance is 550), so
+    // aircraft just looked like they were floating at one indistinct height
+    // regardless of deck. Per-aircraft patches anchor the grid right where
+    // you're already looking, which sidesteps that problem entirely; see the
+    // Altitude Watch panel for the cross-aircraft picture full-map mode was
+    // trying (and failing) to give.
+    const altitudeDeckManager = new AltitudeDeckManager(scene);
     window.altitudeDeckManager = altitudeDeckManager;
+
+    // ── Aerial conflict / proximity detection — TCAS-style CPA check across
+    // every live aircraft pair. See conflictManager.js header for the math;
+    // wiring (evaluate() timer + updateVisuals() per frame + alert hookup) is
+    // further down, near the other live-data ticks.
+    const conflictManager = new ConflictManager(scene);
+    window.conflictManager = conflictManager;
     // Keep the legacy global name so any console scripts / settings panel
     // built against `window.weatherManager` continue to work — the new manager
     // exposes the same setVisible / setKey / isConnected / getStormData API.
@@ -433,8 +543,22 @@ async function init(mapData) {
     // Expose so the copilot-panel inline script can call requestSitrep()
     window.aiCopilot = aiCopilot;
 
+    // ── AI Discovery — cross-domain pattern-finding, separate budget/cadence
+    // from the per-event copilot above. Reads aiCopilot's event stream for
+    // per-vessel narrative memory; acts back on the scene only through the
+    // existing vg1:selectVessel bus event (see discoveryManager.js header).
+    const discoveryManager = new DiscoveryManager();
+    discoveryManager.bindCopilot(aiCopilot);
+    window.vg1Discovery = discoveryManager; // console: vg1Discovery.stats
+
     // ── AIS live vessel manager ───────────────────────────────────────────────
     const aisManager = new AISManager();
+
+    // One-time: harvests each ship class's parts from entityBuilder.js and
+    // builds the shared InstancedMesh set. Must happen before any vessel
+    // spawn. See shipInstancer.js header comment for the full rationale —
+    // same pattern as aircraftInstancer.init() below.
+    shipInstancer.init(scene);
 
     // AIS Integrity — evaluate every report (reuses the invariant violations) and
     // run the periodic loiter/decay pass. Both are cheap; see integrityManager.js.
@@ -442,6 +566,23 @@ async function init(mapData) {
     aisManager.onPositionEvaluated = (vessel, violations, ctx) =>
         integrityManager.evaluate(vessel, violations, ctx);
     setInterval(() => integrityManager.tick(), INTEGRITY.TICK_MS);
+    setInterval(() => flightIntegrityManager.tick(), FLIGHT_INTEGRITY.TICK_MS);
+
+    // Aerial conflict detection — O(n²) CPA pairwise check, run on its own
+    // timer (not every frame; see conflictManager.js). evaluate() returns
+    // only the pairs that just became active so we fire one alert per
+    // conflict, not one per tick for as long as it stays flagged.
+    setInterval(() => {
+        const newPairs = conflictManager.evaluate([...flightManager.aircraft.values()]);
+        for (const rec of newPairs) {
+            const labelA = rec.callsignA || rec.a;
+            const labelB = rec.callsignB || rec.b;
+            window.alertsManager?.addAlert({
+                type: 'AIRCRAFT_CONFLICT', mmsi: rec.a, vesselName: labelA,
+                message: `${labelA} / ${labelB} — CPA ${rec.horizontalNm.toFixed(1)}nm / ${Math.round(rec.verticalFt)}ft in ${Math.round(rec.etaSec)}s`,
+            });
+        }
+    }, CONFLICT.TICK_MS);
 
     // Ship type arrived via the static message → rebuild the vessel with its real
     // class (correct hull shape + colour) instead of the grey OTHER placeholder.
@@ -468,6 +609,13 @@ async function init(mapData) {
         const curveY = -(dN * dN) * 20.0;
         sp.y = curveY;
         obj.position.set(sp.x, sp.y, sp.z);
+
+        // Reserves this vessel an instanced-rendering slot for its class.
+        // The hull/bridge/etc. is drawn entirely by shipInstancer.js's
+        // shared InstancedMesh set; this writes the initial transform so
+        // there's no one-frame flash at the origin (slots start zero-scaled).
+        obj.userData.instanceHandle = shipInstancer.spawn(vesselData.class);
+        shipInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible);
 
         // Shadow sits just above the curved splat so it reads as touching
         // the water rather than the flat water plane below it.
@@ -521,30 +669,17 @@ async function init(mapData) {
 
         // Fixed sideways profile — all vessel figures face east so the hull
         // length is always visible to the viewer rather than bow-on or stern-on.
+        // (shipInstancer.js bakes this same fixed orientation into its shared
+        // quaternion — this line is now a harmless no-op on the anchor itself,
+        // kept so obj.rotation still reads correctly if anything inspects it.)
         obj.rotation.y = Math.PI / 2;
 
-        // ── Speed vector arrow ────────────────────────────────────────────────
-        // Solid line from vessel position in heading direction.
-        // Length = speed (kts) × 0.12 scene units, capped at 7 units (~60 kts).
-        // Gives an instant read on who is fast/slow/stopped without clicking.
-        if (obj.userData.predictionLine) {
-            const speedKts = vesselData.speedKts ?? 0;
-            const len = Math.min(speedKts * 0.12, 7);
-            if (len > 0.15 && vesselData.headingDeg != null) {
-                const hdgRad = vesselData.headingDeg * (Math.PI / 180);
-                // In scene space: X = east (+), Z = south (+), so north = -Z
-                const dx = Math.sin(hdgRad) * len;
-                const dz = -Math.cos(hdgRad) * len;
-                obj.userData.predictionLine.geometry.setFromPoints([
-                    new THREE.Vector3(sp.x, sp.y, sp.z),
-                    new THREE.Vector3(sp.x + dx, sp.y, sp.z + dz),
-                ]);
-                obj.userData.predictionLine.computeLineDistances();
-                obj.userData.predictionLine.visible = true;
-            } else {
-                obj.userData.predictionLine.visible = false;
-            }
-        }
+        // Writes the fresh position into this vessel's instanced hull slot.
+        // The per-frame sync loop below also calls this every frame (to catch
+        // clusterManager/filter visibility changes that don't go through
+        // onVesselUpdate), so this call just avoids a one-frame lag on
+        // position when a fresh AIS report lands.
+        shipInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible);
 
         // Push trail sample
         trailManager.pushPosition(obj, sp.x, sp.y, sp.z);
@@ -558,6 +693,13 @@ async function init(mapData) {
         obj.userData.destination  = vesselData.destination;
         obj.userData.eta          = vesselData.eta;
         obj.userData.imo          = vesselData.imo;
+
+        // ── Dead-reckoning line + projected-point marker ─────────────────────
+        // Geometry/visibility recomputed from the fresh position + userData
+        // above. Eligibility (selected vessel, or watchlisted vessel when
+        // watchlist-mode is on) is decided inside _syncPredictionVisual —
+        // see definition near initSelectionRing().
+        _syncPredictionVisual(obj);
 
         // Plan 04 — throttled position log: record every 30 min, cap at 48 entries (24 h)
         if (vesselData.latDeg != null && vesselData.lonDeg != null) {
@@ -586,6 +728,10 @@ async function init(mapData) {
         if (idx === -1) return;
         const obj = window.aisShips[idx];
         trailManager.unregister(obj);
+        // Releases this vessel's instanced-rendering slot — without this an
+        // unused slot would sit degenerate-scaled forever (leaked) instead
+        // of being recycled by the next spawn() of this class.
+        shipInstancer.free(obj.userData.instanceHandle);
         // Remove ground shadow sibling
         if (obj.userData.shadowSprite) {
             laneGroup.remove(obj.userData.shadowSprite);
@@ -654,6 +800,40 @@ async function init(mapData) {
     // ── Flight live manager ───────────────────────────────────────────────────
     const flightManager = new FlightManager();
 
+    // One-time: harvests each aircraft class's parts from entityBuilder.js and
+    // builds the shared InstancedMesh set. Must happen before any aircraft
+    // spawn. See aircraftInstancer.js header comment for the full rationale.
+    aircraftInstancer.init(scene);
+
+    // Every parsed ADS-B state, new or existing, before scene mutation —
+    // see flightIntegrityManager.js (trust scoring, sibling of integrityManager
+    // for AIS). Cheap, local, no fetch — runs on every poll for every aircraft.
+    flightManager.onPositionEvaluated = (report) => flightIntegrityManager.evaluate(report);
+
+    // Tracks which aircraft currently have an active EMERGENCY flag so the
+    // alert fires once on onset, not every frame the flag stays set (the
+    // ring/alert split mirrors the AIS DARK_VESSEL/REAPPEAR pattern: an
+    // alert is an event, not a continuous state). Cleared when the flag
+    // drops (cancelled squawk) or the aircraft is removed/landed.
+    const emergencyAlerted = new Set();
+
+    // Shared per-aircraft Three.js cleanup — used by reclassification (old
+    // object), onAircraftLanded, and onAircraftRemove, so the emergency
+    // ring doesn't have to be remembered/disposed in three separate places.
+    function _disposeFlightObject(obj) {
+        trailManager.unregister(obj);
+        laneGroup.remove(obj);
+        aircraftInstancer.free(obj.userData.instanceHandle);
+        if (obj.userData.altitudeGlow) {
+            laneGroup.remove(obj.userData.altitudeGlow);
+            obj.userData.altitudeGlow.material.dispose();
+        }
+        if (obj.userData.emergencyRing) {
+            laneGroup.remove(obj.userData.emergencyRing);
+            obj.userData.emergencyRingMat.dispose();
+        }
+    }
+
     flightManager.onAircraftNew = (icao24, data) => {
         const obj = createFlightObject(data, scene, laneGroup);
         data.threeObject = obj;
@@ -662,29 +842,102 @@ async function init(mapData) {
         const sp = lonLatAltToScene(data.lonDeg, data.latDeg, data.altMeters);
         obj.position.set(sp.x, sp.y, sp.z);
 
+        // Reserves this aircraft an instanced-rendering slot for its class.
+        // The per-frame sync loop below writes the actual transform every
+        // frame; this initial update avoids a one-frame flash at the origin
+        // (instancer slots start zero-scaled/invisible until first written).
+        obj.userData.instanceHandle = aircraftInstancer.spawn(data.aircraftClass);
+        aircraftInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible,
+            data.currentHeadingDeg, data.bankDeg, data.pitchDeg, data.spawnEase);
+
+        // Registered invisible — with hundreds/thousands of live aircraft,
+        // drawing every contrail at once is unreadable clutter (the long
+        // streaks seen across the ocean at zoomed-out views). Position
+        // history still accumulates silently; the trail is revealed only for
+        // whichever aircraft is currently selected, synced once per frame
+        // below in the animation loop.
         const col = getAltColor(data.altMeters ?? 0);
-        trailManager.register(obj, `#${col.getHexString()}`);
+        trailManager.register(obj, `#${col.getHexString()}`, false);
+        // Altitude glow is a sibling sprite in laneGroup (not a child of
+        // obj — obj's own scale would shrink it), so position is seeded
+        // here and kept in sync every frame in the animation loop below.
+        if (obj.userData.altitudeGlow) {
+            obj.userData.altitudeGlow.material.color.copy(col);
+            obj.userData.altitudeGlow.position.set(sp.x, sp.y, sp.z);
+        }
     };
 
     flightManager.onAircraftUpdate = (icao24, data) => {
-        const obj = data.threeObject;
+        let obj = data.threeObject;
         if (!obj) return;
 
+        // Re-classification — the first ADS-B report for an aircraft often
+        // lacks category/dbFlags (MLAT-derived or partial decode), so it gets
+        // classified COMMERCIAL by default; a later poll can reveal it's
+        // actually MILITARY/CARGO/etc. flightManager.js already re-runs
+        // classifyAircraft() on every update, but the 3D model is normally
+        // built once at creation — without this check the wrong shape/color
+        // would stick forever. Only fires on an actual class change, so the
+        // rebuild cost is paid rarely, not on every poll.
+        if (obj.userData.class !== data.aircraftClass) {
+            // Releases the old instanced-rendering slot, trail, altitude
+            // glow, and emergency ring — see _disposeFlightObject above.
+            _disposeFlightObject(obj);
+            const idx = window.aisShips.indexOf(obj);
+            if (idx !== -1) window.aisShips.splice(idx, 1);
+
+            obj = createFlightObject(data, scene, laneGroup);
+            data.threeObject = obj;
+            window.aisShips.push(obj);
+            obj.userData.instanceHandle = aircraftInstancer.spawn(data.aircraftClass);
+            aircraftInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible,
+                data.currentHeadingDeg, data.bankDeg, data.pitchDeg, data.spawnEase);
+
+            const col = getAltColor(data.altMeters ?? 0);
+            // Registers hidden, same as onAircraftNew — this rebuilds a fresh
+            // Object3D, so even if this aircraft was the selected one, the
+            // per-frame lockedShip sync below will catch the new object on
+            // the very next frame and re-show its trail (rare edge case:
+            // reclassification happening on the one currently-selected aircraft).
+            trailManager.register(obj, `#${col.getHexString()}`, false);
+            if (obj.userData.altitudeGlow) obj.userData.altitudeGlow.material.color.copy(col);
+        }
+
         const sp = lonLatAltToScene(data.lonDeg, data.latDeg, data.altMeters);
-        obj.position.set(sp.x, sp.y, sp.z);
+        // Position is NOT set here anymore — flightManager.tick()'s
+        // currentPos (lerp toward this poll's target, then dead-reckoning
+        // extrapolation from speed/heading) drives obj.position every frame
+        // in the animation loop. Snapping straight to sp here would fight
+        // that lerp: the object would jump to the new report immediately,
+        // then the per-frame sync would yank it back toward the
+        // still-in-progress currentPos, producing a visible stutter.
 
-        // Fixed sideways profile — aircraft figures are locked east-facing
-        // so the fuselage and wings are always readable from above.
-        obj.rotation.y = Math.PI / 2;
+        // obj.rotation is NOT used for the visible airframe — the instanced
+        // mesh's orientation is driven entirely by aircraftInstancer.update()'s
+        // headingDeg/bankDeg/pitchDeg args (see flightManager.js tick()).
+        // Aircraft used to be locked to a fixed east-facing yaw here for
+        // silhouette readability; per Jamal's call (2026-06-26) they now yaw
+        // to real heading with bank/pitch layered on top. obj.rotation itself
+        // is left at identity since nothing reads it for aircraft anymore.
 
-        // Heading vector line — computed directly from headingDeg so it still
-        // points in the true travel direction even though the model is fixed.
-        if (obj.userData.headingLine) {
-            const hdgRad = -(data.headingDeg ?? 0) * (Math.PI / 180);
-            const fwd = new THREE.Vector3(0, 0, -8)
-                .applyEuler(new THREE.Euler(0, hdgRad, 0))
-                .add(sp);
-            obj.userData.headingLine.geometry.setFromPoints([sp, fwd]);
+        // Altitude glow colour — only needs to change when altitude changes,
+        // which happens at most once per poll. The glow is a sibling sprite
+        // (not a child of obj), so its position is kept in sync separately
+        // every frame in the animation loop, alongside obj.position.
+        if (obj.userData.altitudeGlow) {
+            obj.userData.altitudeGlow.material.color.copy(getAltColor(data.altMeters ?? 0));
+            // MLAT/ADS-B can flip poll-to-poll (e.g. an aircraft moves into
+            // ground-receiver range and gets a direct fix again) — re-apply
+            // the fuzzy/dim-vs-tight/bright look set at creation in
+            // entityBuilder.js rather than letting it stick to whichever
+            // source the aircraft started on.
+            if (obj.userData.positionSource !== data.positionSource) {
+                obj.userData.positionSource = data.positionSource;
+                const isMlat = data.positionSource === 'MLAT';
+                obj.userData.altitudeGlow.material.opacity = isMlat ? 0.16 : 0.28;
+                const s = isMlat ? 1.6 : 1.1;
+                obj.userData.altitudeGlow.scale.set(s, s, 1);
+            }
         }
 
         trailManager.pushPosition(obj, sp.x, sp.y, sp.z);
@@ -695,15 +948,57 @@ async function init(mapData) {
         obj.userData.altMeters = data.altMeters;
         obj.userData.speedKts  = data.speedKts;
         obj.userData.headingDeg = data.headingDeg;
+        // verticalRateMs (climb/descent, m/s) — flightManager.js computes this
+        // from the altitude delta since the last poll (see _handleData). Mirrored
+        // into userData so other modules (Altitude Watch panel, uiController.js)
+        // can read it off window.aisShips without needing a flightManager
+        // reference of their own — same pattern as every other aircraft field here.
+        obj.userData.verticalRateMs = data.verticalRateMs;
+        // Registration/type/operator are effectively static per-aircraft, but
+        // cheap to re-sync every poll since flightManager.js may decode them
+        // late (a registration/type field arriving on a later report than the
+        // first one seen) — same reasoning as the re-classification check above.
+        obj.userData.registration = data.registration;
+        obj.userData.typeCode     = data.typeCode;
+        obj.userData.operator     = data.operator;
     };
 
     flightManager.onAircraftRemove = (icao24) => {
+        // This path only fires after FLIGHT.STALE_MS of total silence with
+        // no ground report ever seen — flightManager.js now intercepts
+        // explicit landings separately (onAircraftLanded below), so by the
+        // time we get here it's a genuine "the transponder/feed went dark
+        // mid-flight" event, not a normal landing.
+        flightIntegrityManager.markDark(icao24); // analytical signal, not a verdict
+        emergencyAlerted.delete(icao24);
         const idx = window.aisShips.findIndex(s => s.userData.id === icao24);
         if (idx === -1) return;
         const obj = window.aisShips[idx];
-        trailManager.unregister(obj);
-        if (obj.userData.headingLine) scene.remove(obj.userData.headingLine);
-        laneGroup.remove(obj);
+        const callsign = obj.userData.displayName || icao24;
+        window.alertsManager?.addAlert({
+            type: 'AIRCRAFT_LOST_SIGNAL', mmsi: icao24, vesselName: callsign,
+            message: `${callsign} signal lost mid-flight (no ground report)`,
+        });
+        _disposeFlightObject(obj);
+        window.aisShips.splice(idx, 1);
+    };
+
+    // Fires when the feed explicitly reports the aircraft on the ground —
+    // a real landing, not silence. Kept separate from onAircraftRemove so a
+    // routine landing doesn't get logged/scored identically to losing the
+    // signal mid-flight (see flightManager.js onAircraftLanded comment).
+    flightManager.onAircraftLanded = (icao24, data) => {
+        flightIntegrityManager.remove(icao24); // landed cleanly — no DARK penalty, just drop the record
+        emergencyAlerted.delete(icao24);
+        const idx = window.aisShips.findIndex(s => s.userData.id === icao24);
+        if (idx === -1) return;
+        const obj = window.aisShips[idx];
+        const callsign = obj.userData.displayName || icao24;
+        window.alertsManager?.addAlert({
+            type: 'AIRCRAFT_LANDED', mmsi: icao24, vesselName: callsign,
+            message: `${callsign} landed`,
+        });
+        _disposeFlightObject(obj);
         window.aisShips.splice(idx, 1);
     };
 
@@ -718,7 +1013,10 @@ async function init(mapData) {
     initWatchlist(aisManager);
 
     // ── Alerts — must run after aiCopilot is constructed and bound to AIS
-    initAlertsManager(aiCopilot, aisManager);
+    initAlertsManager(aiCopilot, aisManager, discoveryManager);
+
+    // ── Discovery console — live terminal log of every AI Discovery pass
+    initDiscoveryConsole(discoveryManager);
 
     // ── Feed — RSS aggregation, two-section layout, tag/search filtering
     initFeedManager();
@@ -750,7 +1048,7 @@ async function init(mapData) {
             const ringColor = window.watchlist?.isWatched(mmsi)
                 ? selectionRing.COLOR_WATCHLIST
                 : selectionRing.COLOR_DEFAULT;
-            selectionRing.select(obj, ringColor);
+            _selectVesselRing(obj, ringColor);
         }
 
         // Stats card — only on double-click (openCard: true).
@@ -796,19 +1094,27 @@ async function init(mapData) {
 
     // ── Watchlist add/remove → update ring colour while vessel is selected ────
     window.addEventListener('vg1:watchlistChanged', e => {
-        if (!selectionRing.target) return;
-        const selectedMmsi = String(selectionRing.target.userData?.id || '');
-        if (selectedMmsi !== String(e.detail.mmsi)) return;
-        const color = e.detail.type === 'add'
-            ? selectionRing.COLOR_WATCHLIST
-            : selectionRing.COLOR_DEFAULT;
-        selectionRing.setColor(color);
+        if (selectionRing.target) {
+            const selectedMmsi = String(selectionRing.target.userData?.id || '');
+            if (selectedMmsi === String(e.detail.mmsi)) {
+                const color = e.detail.type === 'add'
+                    ? selectionRing.COLOR_WATCHLIST
+                    : selectionRing.COLOR_DEFAULT;
+                selectionRing.setColor(color);
+            }
+        }
+
+        // Dead-reckoning eligibility for this vessel just changed (added to or
+        // removed from the watchlist) — resync its line/marker if it has a
+        // live 3D object, regardless of whether it's currently selected.
+        const changedObj = window.aisShips.find(s => String(s.userData.id) === String(e.detail.mmsi));
+        if (changedObj) _syncPredictionVisual(changedObj);
     });
 
     // ── Clear ring + card when vessel detail close button is clicked ──────────
     document.getElementById('vd-close')?.addEventListener('click', () => {
         hideVesselDetail();
-        selectionRing.clear();
+        _clearVesselRing();
     });
 
     // ── Start async data streams ───────────────────────────────────────────────
@@ -846,6 +1152,21 @@ async function init(mapData) {
             controls.update();
         }
     });
+    // Altitude Watch — replaces the removed full-map altitude-deck grid.
+    // Same fly-to pattern as Integrity/RF; reads window.aisShips on its own
+    // 2s interval, no flightManager reference needed.
+    initAltitudeWatch({
+        flyTo: (lat, lon) => {
+            const p = lonLatToScene(lon, lat);
+            controls.target.set(p.x, 0, p.z);
+            camera.position.set(p.x, 38, p.z + 26);
+            controls.update();
+        }
+    });
+    // Aviation news feed inside the same panel — task #13. Independent init,
+    // independent poll loop (see aviationNewsManager.js) — no shared state
+    // with the occupancy/transitions render loop above.
+    initAviationNewsManager();
 
     const _recTap = aisRecorder.tap();
     aisManager.onRawMessage = (msg) => { _recTap(msg); };
@@ -917,6 +1238,10 @@ async function init(mapData) {
     // All copilot events (anomalies, dark vessels, SITREPs) flow through the
     // global window.vanguardCopilotEvent handler defined in index.html.
     aiCopilot.onEvent(evt => window.vanguardCopilotEvent?.(evt));
+
+    // Discovery findings use the SAME stream/handler — one feed, one place to
+    // look, regardless of which layer (per-event vs cross-domain) produced it.
+    discoveryManager.onEvent(evt => window.vanguardCopilotEvent?.(evt));
 
     // ── Input events ──────────────────────────────────────────────────────────
     const inputDeps = {
@@ -1002,32 +1327,18 @@ async function init(mapData) {
                 // Chokepoint glyphs are vessel-density markers → hide them with the vessel layer.
                 if (window.chokepointManager) window.chokepointManager.setVisible(on);
                 break;
-            case 'aviation':
-                window.aisShips.forEach(s => {
-                    if (!s.userData?.isRealFlight) return;
-                    s.visible = on;
-                    if (s.userData.headingLine) s.userData.headingLine.visible = on;
-                });
-                window._aviationLayerOn = on;
-                break;
         }
     });
 
-    // ── Vessel class filter bar ───────────────────────────────────────────────
-    // Clicking a class button filters window.aisShips visibility.
-    // 'DARK' is a special filter — matches vessels with isDark:true regardless of class.
-    // Filtered-out vessels stay in the aisShips array so data/alerts still work.
+    // ── Vessel class filter ────────────────────────────────────────────────────
+    // The clickable class-button bar (ALL/CARGO/TANKER/PASSENGER/FISHING/DARK)
+    // was removed from the UI per Jamal's request (2026-06-27) — this block now
+    // only keeps _applyVesselFilter/_reapplyVesselFilter alive, fixed at 'ALL',
+    // because the ais-vessels layer toggle above still calls
+    // window._reapplyVesselFilter to re-sync dark-vessel/dot/trail visibility
+    // whenever that layer is switched on/off.
     {
         let _activeFilter = 'ALL';
-        const _filterBtns = document.querySelectorAll('.vf-btn');
-
-        _filterBtns.forEach(btn => {
-            btn.addEventListener('click', () => {
-                _activeFilter = btn.dataset.class;
-                _filterBtns.forEach(b => b.classList.toggle('active', b === btn));
-                _applyVesselFilter(_activeFilter);
-            });
-        });
 
         function _applyVesselFilter(filter) {
             window.aisShips.forEach(ship => {
@@ -1056,12 +1367,23 @@ async function init(mapData) {
                     if (ud.darkMarker) ud.darkMarker.visible = passes;
                 } else {
                     ship.visible = passes;
-                    if (ud.predictionLine) ud.predictionLine.visible = passes;
-                    if (ud.vesselDot)      ud.vesselDot.visible      = passes;
+                    if (ud.vesselDot) ud.vesselDot.visible = passes;
                 }
 
                 // Trail always follows the same visibility as the vessel
                 if (ud.trail) ud.trail.visible = passes;
+            });
+
+            // Dead-reckoning line/marker: independent of the class filter, EXCEPT
+            // a filtered-out vessel shouldn't show its line even if selected —
+            // re-sync everyone so _classHidden (just updated above) takes effect.
+            window.aisShips.forEach(ship => {
+                if (ship.userData._classHidden) {
+                    if (ship.userData.predictionLine)   ship.userData.predictionLine.visible = false;
+                    if (ship.userData.predictionMarker) ship.userData.predictionMarker.visible = false;
+                } else {
+                    window._syncPredictionVisual?.(ship);
+                }
             });
         }
 
@@ -1512,7 +1834,26 @@ async function init(mapData) {
         ibtracsManager.update(delta);
         gpsJammingManager.update(delta);
         wakeManager.update(elapsed);
+        // Aircraft trails register hidden (see flightManager.onAircraftNew) to
+        // avoid drawing thousands of overlapping contrails at once. Reveal only
+        // the currently selected/locked aircraft's trail, checked once per
+        // frame here rather than at every lockedShip assignment site scattered
+        // across uiController.js.
+        {
+            const locked = state.lockedShip;
+            if (locked !== window._prevLockedTrailShip) {
+                if (window._prevLockedTrailShip?.userData?.isRealFlight) {
+                    trailManager.setVisible(window._prevLockedTrailShip, false);
+                }
+                if (locked?.userData?.isRealFlight) {
+                    trailManager.setVisible(locked, true);
+                }
+                window._prevLockedTrailShip = locked;
+            }
+        }
         trailManager.tick();   // throttled GPU texture upload — every 3rd frame
+        altitudeDeckManager.update(delta, state); // small flight-level grid patch anchored under the currently selected/clicked aircraft
+        conflictManager.updateVisuals(flightManager.aircraft); // cheap — only moves lines for already-flagged pairs, no pairwise math here
 
         // ── Ionospheric / geomagnetic layers ─────────────────────────────────
         ionosphericLayers.update(elapsed, delta);
@@ -1522,11 +1863,92 @@ async function init(mapData) {
         aisManager.tick(delta);
         flightManager.tick(delta);
 
+        // ── Real-flight position sync (client-side extrapolation) ────────────
+        // flightManager.tick() above already advances each aircraft's
+        // currentPos every frame — first by lerping prevPos→targetPos after a
+        // poll lands, then by dead-reckoning from speed/heading once that
+        // lerp finishes (see flightManager.js tick()). Until now nothing ever
+        // read currentPos back onto the Object3D: onAircraftUpdate only sets
+        // obj.position once per ADS-B poll (every 30s), so aircraft sat
+        // frozen for most of each 30s window and then snapped. This loop
+        // closes that gap — every frame, every real flight's mesh follows
+        // currentPos, so movement reads as continuous even though fresh data
+        // only arrives every 30s. The altitude glow is a sibling sprite, not
+        // a child of the mesh (see entityBuilder.js createFlightObject — a
+        // child would inherit the mesh's tiny cls.scale and shrink to
+        // near-invisible), so its position is synced here too. The actual
+        // airframe (fuselage/wings/rotors/etc.) is no longer a per-aircraft
+        // Object3D — aircraftInstancer.update() writes this aircraft's
+        // transform straight into its class's shared InstancedMesh set
+        // (one draw call per part per class, not per aircraft; see
+        // aircraftInstancer.js). obj.visible is still driven entirely by
+        // clusterManager.js exactly as before — instancer.update() reads it
+        // here and degenerate-scales the instance when hidden, replacing the
+        // old "ship.visible=false hides its mesh children" behavior now that
+        // there are no mesh children to hide.
+        aircraftInstancer.tick(delta);
+        flightManager.aircraft.forEach((a) => {
+            const obj = a.threeObject;
+            if (!obj) return;
+            obj.position.set(a.currentPos.x, a.currentPos.y, a.currentPos.z);
+            if (obj.userData.altitudeGlow) {
+                obj.userData.altitudeGlow.position.set(a.currentPos.x, a.currentPos.y, a.currentPos.z);
+            }
+
+            // Emergency ring — pulsing red halo, mirrors the AIS
+            // integrityRing pattern just above for vessels. Driven off
+            // flightIntegrityManager's EMERGENCY flag (squawk 7500/7600/
+            // 7700 or ADS-B emergency field), never set anywhere else.
+            const eRing = obj.userData.emergencyRing;
+            const eMat  = obj.userData.emergencyRingMat;
+            if (eRing && eMat) {
+                const emergency = obj.visible && flightIntegrityManager.getRecord(a.icao24)?.flags.has('EMERGENCY');
+                eRing.visible = !!emergency;
+                if (emergency) {
+                    eRing.position.set(a.currentPos.x, a.currentPos.y, a.currentPos.z);
+                    const p = (Math.sin(elapsed * 6.0) + 1) * 0.5;   // ~1 Hz pulse
+                    eMat.opacity = 0.45 + p * 0.5;
+                    const s = 1.0 + p * 0.2;
+                    eRing.scale.set(s, s, s);
+
+                    if (!emergencyAlerted.has(a.icao24)) {
+                        emergencyAlerted.add(a.icao24);
+                        const rec = flightIntegrityManager.getRecord(a.icao24);
+                        const detail = rec?.flags.get('EMERGENCY')?.detail || 'emergency squawk';
+                        window.alertsManager?.addAlert({
+                            type: 'AIRCRAFT_EMERGENCY', mmsi: a.icao24, vesselName: obj.userData.displayName || a.icao24,
+                            message: `${obj.userData.displayName || a.icao24} — ${detail}`,
+                        });
+                    }
+                } else {
+                    emergencyAlerted.delete(a.icao24);
+                }
+            }
+
+            aircraftInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible,
+                a.currentHeadingDeg, a.bankDeg, a.pitchDeg, a.spawnEase);
+        });
+
         // ── Selection ring ────────────────────────────────────────────────────
         selectionRing.tick(delta, elapsed);
 
         // ── Cluster LOD ───────────────────────────────────────────────────────
         clusterManager.tick(window.aisShips, camera, elapsed);
+
+        // ── Real-AIS hull sync (instanced rendering) ──────────────────────────
+        // Ships, unlike aircraft, snap directly to each fresh AIS position in
+        // onVesselUpdate rather than lerping every frame — so this loop's main
+        // job isn't position smoothing, it's catching every place obj.visible
+        // changes without going through onVesselUpdate: clusterManager.tick()
+        // just above, the class-filter bar, dark-vessel logic, and
+        // onVesselReappear all toggle ship.visible directly. Placed AFTER
+        // clusterManager.tick() so same-frame zoom-threshold visibility
+        // changes are picked up immediately instead of lagging a frame.
+        for (let i = 0, n = window.aisShips.length; i < n; i++) {
+            const ship = window.aisShips[i];
+            if (!ship.userData.isRealAIS) continue;
+            shipInstancer.update(ship.userData.instanceHandle, ship.position, ship.visible);
+        }
 
         // ── Transition orchestrator (Plan 02) ─────────────────────────────────
         transitionMgr.tick(state, camera);
@@ -1558,6 +1980,7 @@ async function init(mapData) {
 
         // ── AI Co-Pilot ───────────────────────────────────────────────────────
         aiCopilot.tick(delta);
+        discoveryManager.tick(delta);
 
         // ── Chokepoint landmarks ──────────────────────────────────────────────
         chokepointManager.tick(delta, elapsed, window.aisShips);

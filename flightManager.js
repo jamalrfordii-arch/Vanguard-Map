@@ -1,16 +1,55 @@
 // flightManager.js — airplanes.live poller via local proxy
 // Run flight-proxy.js in a second terminal first:  node flight-proxy.js
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT, FLIGHT } from './config.js';
+import { MAP_WIDTH, MAP_HEIGHT, FLIGHT, AIRCRAFT_CLASSES, FLIGHT_DYNAMICS, AIRLINE_PREFIXES } from './config.js';
 import { simClock } from './simClock.js';
 
+// ── Heading/bank/pitch helpers ─────────────────────────────────────────────────
+// Shortest signed angular difference a→b, in degrees, range (-180, 180].
+function shortestAngleDelta(a, b) {
+    return ((b - a + 540) % 360) - 180;
+}
+
+// ── Aircraft classification ───────────────────────────────────────────────────
+// Picks a visual class from raw ADS-B fields. Military (dbFlags bit) wins over
+// everything else; cargo is inferred from callsign prefix since ADS-B has no
+// direct flag for it; everything else falls back to emitter category, then
+// to the global default (COMMERCIAL — matches the old single-model behavior
+// for any aircraft we can't otherwise classify).
+function classifyAircraft(s, callsign) {
+    if (((s.dbFlags ?? 0) & AIRCRAFT_CLASSES.MILITARY_DB_FLAG) !== 0) return 'MILITARY';
+    const prefix = callsign.slice(0, 3).toUpperCase();
+    if (AIRCRAFT_CLASSES.CARGO_CALLSIGN_PREFIXES.includes(prefix)) return 'CARGO';
+    const cat = (s.category || '').toUpperCase();
+    return AIRCRAFT_CLASSES.CATEGORY_MAP[cat] || AIRCRAFT_CLASSES.DEFAULT;
+}
+
+// Operator display name from the callsign's 3-letter ICAO prefix — local
+// table lookup, no network call. Returns null (not '—') when unknown so
+// callers can decide their own fallback text.
+function operatorFromCallsign(callsign) {
+    const prefix = (callsign || '').slice(0, 3).toUpperCase();
+    return AIRLINE_PREFIXES[prefix] || null;
+}
+
 // ── Coordinate helper ─────────────────────────────────────────────────────────
+// Continuous from ground up — no floor clamp. The old Math.max(2.0, ...)
+// pinned every aircraft below ~3,600ft to the exact same height, which
+// collapses departure/approach traffic near an airport into one overlapping
+// stack regardless of their real altitude separation.
+// Exported standalone so altitudeDeckManager.js can place its flight-level
+// reference grids at the exact same heights aircraft actually render at,
+// instead of duplicating this formula and risking drift between the two.
+export function altitudeMetersToY(altMeters) {
+    return altMeters > 50 ? 2.0 + (altMeters / 12000) * 20 : 2.0;
+}
+
 export function lonLatAltToScene(lon, lat, altMeters) {
     const x      = (lon / 180.0) * (MAP_WIDTH / 2.0);
     const latRad = lat * (Math.PI / 180.0);
     const mercY  = Math.log(Math.tan(Math.PI / 4.0 + latRad / 2.0));
     const z      = -(mercY / Math.PI) * (MAP_HEIGHT / 2.0);
-    const y      = altMeters > 50 ? Math.max(2.0, (altMeters / 12000) * 22) : 2.0;
+    const y      = altitudeMetersToY(altMeters);
     return new THREE.Vector3(x, y, z);
 }
 
@@ -22,7 +61,21 @@ export class FlightManager {
 
         this.onAircraftNew    = null; // (icao24, data) → void
         this.onAircraftUpdate = null; // (icao24, data) → void
-        this.onAircraftRemove = null; // (icao24) → void
+        this.onAircraftRemove = null; // (icao24) → void — genuine stale/lost-signal removal only
+        // (icao24, data) → void — fired when the feed explicitly reports the
+        // aircraft on the ground (alt_baro === 'ground'), i.e. it landed.
+        // Distinct from onAircraftRemove: that fires after STALE_MS of total
+        // silence, which is what actually happens when an aircraft flies out
+        // of receiver range or its transponder fails — a real "lost signal"
+        // event. Without this split, a normal landing and a genuine signal
+        // loss were indistinguishable (both just stopped updating until the
+        // same 2-minute timeout removed them), so a landing was wrongly
+        // logged identically to losing track of an aircraft mid-flight.
+        this.onAircraftLanded = null;
+        // (report) → void — fired for EVERY parsed state, new or existing,
+        // before scene mutation. Wired to flightIntegrityManager.evaluate in
+        // main.js; kept generic so this module stays ignorant of scoring.
+        this.onPositionEvaluated = null;
     }
 
     init() {
@@ -59,28 +112,110 @@ export class FlightManager {
             const altMeters = onGround ? 0 : (altFeet ?? s.alt_geom ?? 0) * 0.3048;
             const speedKts  = Math.round(s.gs ?? 0);
             const heading   = s.track ?? 0;
+            const squawk    = s.squawk ?? null;
+            const emergency = s.emergency ?? null;
+            const aircraftClass = classifyAircraft(s, callsign);
+            // Registration (tail number) and ICAO type code (e.g. "B738") come
+            // straight off the wire on ADSBExchange-compatible feeds — no extra
+            // lookup needed, just weren't plumbed through before. Operator is a
+            // local table lookup off the callsign prefix (see AIRLINE_PREFIXES,
+            // config.js); origin/destination/photo need a network round trip and
+            // are fetched on demand by uiController.js when a card is opened,
+            // not here on every poll.
+            const registration = s.r || null;
+            const typeCode      = s.t || null;
+            const operator      = operatorFromCallsign(callsign);
+            // Position source — ADSBExchange-compatible feeds (airplanes.live,
+            // adsb.lol) tag every state with a `type` field: 'adsb_icao' /
+            // 'adsb_icao_nt' for a direct transponder fix, 'mlat' for ground-
+            // station multilateration (no direct fix, triangulated from
+            // signal timing — materially less precise), 'tisb_icao'/'tisb_*'
+            // for relayed traffic-info broadcasts. Anything containing
+            // "mlat" is treated as MLAT; everything else defaults to ADS-B
+            // (the overwhelming majority of states on this feed).
+            const positionSource = String(s.type || '').toLowerCase().includes('mlat') ? 'MLAT' : 'ADSB';
 
-            if (onGround || lon == null || lat == null) continue;
+            // Symmetric appear/disappear floor (FLIGHT.MIN_ALT_M, 300ft AGL):
+            // an aircraft only exists in the scene above this altitude.
+            // Either an explicit 'ground' report OR simply dropping back
+            // below the same floor counts as landed — same threshold both
+            // directions, so an aircraft fades in and out at the same
+            // altitude rather than appearing at one cutoff and lingering
+            // until a separate ground flag arrives (which some feeds are
+            // slow to set during taxi/final approach). Handled immediately
+            // rather than falling through to the STALE_MS timeout, which
+            // would make a landing indistinguishable from genuinely losing
+            // the signal mid-flight (see onAircraftLanded above).
+            const belowFloor = onGround || altMeters < FLIGHT.MIN_ALT_M;
+            if (belowFloor) {
+                const grounded = this.aircraft.get(icao24);
+                if (grounded) {
+                    if (this.onAircraftLanded) this.onAircraftLanded(icao24, grounded);
+                    this.aircraft.delete(icao24);
+                }
+                continue;
+            }
+            if (lon == null || lat == null) continue;
             if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
-            if (altMeters < 100) continue;
             const scenePos = lonLatAltToScene(lon, lat, altMeters);
+
+            // Fire BEFORE scene mutation — integrity scoring needs the raw
+            // report, not the lerp/trail bookkeeping below. Every parsed
+            // state gets evaluated, new aircraft and updates alike; the
+            // scoring module tracks its own previous-position snapshot
+            // internally so it doesn't need to know which branch this is.
+            if (this.onPositionEvaluated) {
+                this.onPositionEvaluated({
+                    icao24, callsign, lat, lon, altMeters, speedKts,
+                    headingDeg: heading, squawk, emergency, now,
+                });
+            }
 
             const existing = this.aircraft.get(icao24);
             if (existing) {
-                existing.prevPos.copy(existing.targetPos);
+                // Lerp must start from where the aircraft is actually sitting on
+                // screen right now (currentPos) — NOT the old targetPos. Between
+                // polls, the dead-reckoning branch in tick() has been mutating
+                // currentPos directly every frame based on heading/speed, so by
+                // the time a new report lands ~POLL_INTERVAL later, currentPos
+                // has already walked well past the old targetPos. Resetting
+                // prevPos to that stale, already-passed targetPos made the lerp
+                // open by snapping the plane backward to it before crawling
+                // forward again — the "slow motion then snap" Jamal saw live.
+                existing.prevPos.copy(existing.currentPos);
                 existing.targetPos.copy(scenePos);
                 existing.lerpAlpha  = 0;
                 existing.speedKts   = speedKts;
-                existing.headingDeg = heading;
+                existing.headingDeg = heading;       // raw latest report — informational only now (UI mirror via main.js's obj.userData.headingDeg). Movement AND visual orientation both use currentHeadingDeg as of the 2026-06-28 heading-mismatch fix in tick() — don't reintroduce a dead-reckoning consumer of this raw field without re-checking that fix.
+                existing.targetHeadingDeg = heading; // what currentHeadingDeg eases toward in tick()
+
+                // Vertical rate from the altitude delta since the last report —
+                // only one sample per poll, so this is necessarily a coarse
+                // average over ~POLL_INTERVAL, not an instantaneous reading.
+                // Guard dt against near-zero (duplicate/rapid reports) to avoid
+                // a divide-by-near-zero spike feeding a momentary huge pitch.
+                const dtSec = Math.max(1, (now - existing.lastSeen) / 1000);
+                existing.verticalRateMs = (altMeters - existing.altMeters) / dtSec;
+
                 existing.latDeg     = lat;
                 existing.lonDeg     = lon;
                 existing.altMeters  = altMeters;
                 existing.lastSeen   = now;
+                existing.aircraftClass = aircraftClass; // can re-classify (e.g. dbFlags arrives later)
+                existing.positionSource = positionSource; // MLAT/ADS-B can flip poll-to-poll
+                // Registration/type rarely arrive on the very first report for a
+                // given aircraft (partial decode) — keep whichever value we already
+                // have if this poll's report doesn't include one, rather than
+                // flickering a known tail number back to "—".
+                if (registration) existing.registration = registration;
+                if (typeCode)      existing.typeCode      = typeCode;
+                if (operator)      existing.operator      = operator;
                 if (this.onAircraftUpdate) this.onAircraftUpdate(icao24, existing);
             } else {
                 if (this.aircraft.size >= FLIGHT.MAX_AIRCRAFT) continue;
                 const a = {
-                    icao24, callsign, country,
+                    icao24, callsign, country, aircraftClass, positionSource,
+                    registration, typeCode, operator,
                     speedKts, headingDeg: heading,
                     latDeg: lat, lonDeg: lon, altMeters,
                     currentPos:  scenePos.clone(),
@@ -89,7 +224,21 @@ export class FlightManager {
                     lerpAlpha:   1,
                     lastSeen:    now,
                     threeObject: null,
-                    history:     []
+                    history:     [],
+                    // Visual flight-dynamics state — see FLIGHT_DYNAMICS in
+                    // config.js and tick() below. Starts settled (no snap on
+                    // spawn): current === target, bank/pitch flat.
+                    currentHeadingDeg: heading,
+                    targetHeadingDeg:  heading,
+                    bankDeg:           0,
+                    pitchDeg:          0,
+                    verticalRateMs:    0,
+                    // Motion-graphics polish (2026-06-27): ramps 0→1 over
+                    // FLIGHT_DYNAMICS.SPAWN_EASE_SEC, consumed as an
+                    // instance-scale multiplier in aircraftInstancer.js so a
+                    // newly-appearing aircraft scales in rather than popping
+                    // to full size on the first frame it's drawn.
+                    spawnEase:         0,
                 };
                 this.aircraft.set(icao24, a);
                 if (this.onAircraftNew) this.onAircraftNew(icao24, a);
@@ -111,7 +260,19 @@ export class FlightManager {
             } else if (a.speedKts > 50 && a.threeObject) {
                 const speedMs = a.speedKts * 0.51444;
                 const distM   = speedMs * delta;
-                const hdgRad  = a.headingDeg * (Math.PI / 180);
+                // Bug fix (2026-06-28): this used to dead-reckon off
+                // a.headingDeg — the raw, just-arrived report, which snaps
+                // to its new value the instant a poll lands. The visual
+                // orientation below (currentHeadingDeg) only turns at a
+                // capped rate (FLIGHT_DYNAMICS.TURN_RATE_DEG_PER_SEC), so for
+                // several seconds after every report the aircraft was
+                // moving in the new direction while still visually pointed
+                // the old way — read as "erratic"/crabbing motion, worst
+                // during turns where consecutive reports differ most.
+                // currentHeadingDeg is the single source of truth for both
+                // movement and orientation now, so the plane always travels
+                // exactly where it's pointed.
+                const hdgRad  = a.currentHeadingDeg * (Math.PI / 180);
                 const mPerDeg = 111320;
                 const dLat    = Math.cos(hdgRad) * (distM / mPerDeg);
                 const cosLat  = Math.cos(a.latDeg * Math.PI / 180) || 0.001;
@@ -121,6 +282,38 @@ export class FlightManager {
                 a.lonDeg       += dLon;
                 a.currentPos.x += (dLon / 180.0) * (MAP_WIDTH  / 2.0);
                 a.currentPos.z -= dLat * (MAP_HEIGHT / (2.0 * Math.PI));
+            }
+
+            // ── Visual flight dynamics (heading ease, bank, pitch) ──────────
+            // Heading itself eases toward the latest report at a capped turn
+            // rate instead of snapping (matches the position lerp above —
+            // same "no instant jump on a new report" principle, applied to
+            // rotation). Bank/pitch are then derived from how much turning/
+            // climbing is currently happening, each with their own ease rate
+            // so they ramp in and out rather than snapping with the heading.
+            if (a.currentHeadingDeg != null) {
+                const headingErr = shortestAngleDelta(a.currentHeadingDeg, a.targetHeadingDeg);
+                const maxStep     = FLIGHT_DYNAMICS.TURN_RATE_DEG_PER_SEC * delta;
+                const step        = Math.max(-maxStep, Math.min(maxStep, headingErr));
+                a.currentHeadingDeg = (a.currentHeadingDeg + step + 360) % 360;
+
+                const bankTarget = Math.max(-FLIGHT_DYNAMICS.BANK_MAX_DEG,
+                    Math.min(FLIGHT_DYNAMICS.BANK_MAX_DEG, headingErr * FLIGHT_DYNAMICS.BANK_GAIN));
+                a.bankDeg += (bankTarget - a.bankDeg) * Math.min(1, delta * FLIGHT_DYNAMICS.BANK_EASE_RATE);
+
+                const pitchTarget = Math.max(-FLIGHT_DYNAMICS.PITCH_MAX_DEG,
+                    Math.min(FLIGHT_DYNAMICS.PITCH_MAX_DEG, (a.verticalRateMs ?? 0) * FLIGHT_DYNAMICS.PITCH_GAIN));
+                a.pitchDeg += (pitchTarget - a.pitchDeg) * Math.min(1, delta * FLIGHT_DYNAMICS.PITCH_EASE_RATE);
+            }
+
+            // Spawn-in scale ramp — see spawnEase field above. Plain linear
+            // ramp here; the pop/overshoot shaping (easeOutBack) is applied
+            // where it's consumed in aircraftInstancer.js, not here, so this
+            // stays a simple 0→1 progress value other consumers could also
+            // read literally (e.g. fading in a label) without inheriting the
+            // overshoot curve.
+            if (a.spawnEase < 1) {
+                a.spawnEase = Math.min(1, a.spawnEase + delta / FLIGHT_DYNAMICS.SPAWN_EASE_SEC);
             }
 
             if (now - a.lastSeen > FLIGHT.STALE_MS) stale.push(icao24);

@@ -22,7 +22,12 @@ const TYPE_META = {
     REAPPEAR:        { label: 'VESSEL REAPPEAR',  severity: 'INFO',     icon: '◎',  color: '#00e87a' },
     ZONE_BREACH:     { label: 'ZONE BREACH',      severity: 'CRITICAL', icon: '⬡',  color: '#ff1744' },
     DETENTION:       { label: 'PSC DETENTION',    severity: 'WARNING',  icon: '⚓', color: '#ff8c00' },
+    DISCOVERY:       { label: 'AI DISCOVERY',     severity: 'WARNING',  icon: '◈', color: '#b388ff' },
     CUSTOM:          { label: 'CUSTOM',           severity: 'INFO',     icon: '◆',  color: '#40c4ff' },
+    AIRCRAFT_EMERGENCY:  { label: 'AIRCRAFT EMERGENCY',   severity: 'CRITICAL', icon: '◉', color: '#ff1744' },
+    AIRCRAFT_LANDED:     { label: 'AIRCRAFT LANDED',      severity: 'INFO',     icon: '◎', color: '#00e87a' },
+    AIRCRAFT_LOST_SIGNAL:{ label: 'AIRCRAFT LOST SIGNAL', severity: 'WARNING',  icon: '⚡', color: '#ff8c00' },
+    AIRCRAFT_CONFLICT:   { label: 'AERIAL CONFLICT',      severity: 'CRITICAL', icon: '✈', color: '#ff1744' },
 };
 
 // ── Default rule set ──────────────────────────────────────────────────────────
@@ -33,9 +38,14 @@ const DEFAULT_RULES = [
     { id: 'cable_proximity', name: 'CABLE PROXIMITY',  type: 'CABLE_PROXIMITY', enabled: false, params: {} },
     { id: 'reappear',        name: 'VESSEL REAPPEAR',  type: 'REAPPEAR',        enabled: true,  params: {} },
     { id: 'detention',       name: 'PSC DETENTION',    type: 'DETENTION',       enabled: true,  params: {} },
+    { id: 'discovery',       name: 'AI DISCOVERY',     type: 'DISCOVERY',       enabled: true,  params: {} },
     { id: 'chokepoint',      name: 'CHOKEPOINT ENTRY', type: 'CHOKEPOINT',      enabled: false, params: {} },
     // Custom speed threshold — fires when a vessel is reported above N kts
     { id: 'speed_threshold', name: 'SPEED THRESHOLD',  type: 'SPEED_ANOMALY',   enabled: false, params: { minKts: 30 }, custom: true, customLabel: 'Min speed (kts)' },
+    { id: 'aircraft_emergency',   name: 'AIRCRAFT EMERGENCY',    type: 'AIRCRAFT_EMERGENCY',   enabled: true, params: {} },
+    { id: 'aircraft_landed',      name: 'AIRCRAFT LANDED',       type: 'AIRCRAFT_LANDED',      enabled: true, params: {} },
+    { id: 'aircraft_lost_signal', name: 'AIRCRAFT LOST SIGNAL',  type: 'AIRCRAFT_LOST_SIGNAL', enabled: true, params: {} },
+    { id: 'aircraft_conflict',    name: 'AERIAL CONFLICT',       type: 'AIRCRAFT_CONFLICT',    enabled: true, params: {} },
 ];
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
@@ -74,7 +84,7 @@ let _idSeq = Date.now();
 function _uid() { return ++_idSeq; }
 
 // ── Main export ───────────────────────────────────────────────────────────────
-export function initAlertsManager(aiCopilot, aisManager) {
+export function initAlertsManager(aiCopilot, aisManager, discoveryManager) {
 
     // ── State ─────────────────────────────────────────────────────────────────
     let _log    = _loadLog();
@@ -202,6 +212,22 @@ export function initAlertsManager(aiCopilot, aisManager) {
                     }
                     break;
             }
+        });
+    }
+
+    // ── discoveryManager event → alert ────────────────────────────────────────
+    // Cross-domain findings get their own alert type — distinct from the
+    // per-event types above, since a DISCOVERY entry is a correlation across
+    // multiple vessels/sources, not one vessel's anomaly.
+    if (discoveryManager) {
+        discoveryManager.onEvent(evt => {
+            if (evt.type !== 'DISCOVERY' || !evt.body) return;
+            _addAlert({
+                type:    'DISCOVERY',
+                mmsi:    '',
+                vesselName: '',
+                message: evt.body,
+            });
         });
     }
 

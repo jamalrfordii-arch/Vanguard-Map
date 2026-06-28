@@ -205,15 +205,14 @@ inverse: `(camera.y - 10) / 15`.
 
 ## Known issues (do not attempt to fix without the full diagnosis)
 
-1. **Grey multi-faced shape on south edge near Antarctica** — root cause unidentified despite
-   extended investigation. Ruled out: aquarium walls, `boardPlane` (now correctly uses
-   `Object3D.visible=false`), tile stream skirts (only active below camera.y=200), continent
-   mesh (only active below camera.y=25), day/night overlay. Remaining candidates: fog/cloud
-   post-process pass interaction, ocean floor mesh south-boundary triangle strip, or a
-   nested child of one of the Groups (tested direct scene children only, not recursively).
-   Next diagnostic: `window.scene.traverse(c=>{c.__sv=c.visible;c.visible=false})` — if
-   grey square vanishes, binary-search the full scene graph recursively.
-
-2. **Continent mesh visible at far zoom** — the fade thresholds in `continentMesh.js`
+1. **Continent mesh visible at far zoom** — the fade thresholds in `continentMesh.js`
    may have drifted from the point cloud's inverse thresholds. Investigate before changing
    any LOD values.
+
+2. **Antarctica grey shape** — a flat grey, multi-faceted shape appears on the south edge
+   of the map near Antarctica. Root cause previously diagnosed as two compounding issues in
+   `terrainWorker.js` (a too-late-engaging `polarIce` ramp inside `whiteSuppression`, and no
+   falloff treatment for the point cloud's exposed raw rectangular boundary after the aquarium
+   walls were removed — see `terrainBuilder.js createSolidOceanFloor`). A fix was implemented
+   and verified 2026-06-21, then fully reverted at Jamal's request the same day. Diagnosis
+   notes still apply if revisiting — see `memory/decisions.md` and `memory/scar-tissue.md`.

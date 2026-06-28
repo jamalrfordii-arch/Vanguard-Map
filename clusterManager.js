@@ -361,8 +361,19 @@ export class ClusterManager {
                 aisShips.forEach(ship => {
                     if (!ship.userData.isRealFlight) return;
                     ship.visible = true;
-                    if (ship.userData.headingLine) ship.userData.headingLine.visible = true;
-                    if (ship.userData.trail)       ship.userData.trail.visible       = true;
+                    // The altitude glow is a sibling sprite in laneGroup, not
+                    // a child of the aircraft mesh (see entityBuilder.js —
+                    // a child would inherit the mesh's tiny scale and shrink
+                    // to near-invisible), so its visibility must be toggled
+                    // explicitly here rather than following ship.visible
+                    // automatically. Trail (full position history) stays
+                    // hidden here on purpose: forcing it visible for every
+                    // aircraft on cluster-split undid the selection-only
+                    // gating from task #48 and produced the long
+                    // crossing-line spaghetti across the whole map. Trail
+                    // visibility is owned exclusively by the lockedShip sync
+                    // in the main animation loop now.
+                    if (ship.userData.altitudeGlow) ship.userData.altitudeGlow.visible = true;
                 });
                 this._flightClusters.forEach(c => {
                     c.sprite.visible = false;
@@ -379,8 +390,14 @@ export class ClusterManager {
         aisShips.forEach(ship => {
             if (!ship.userData.isRealFlight) return;
             ship.visible = false;
-            if (ship.userData.headingLine) ship.userData.headingLine.visible = false;
-            if (ship.userData.trail)       ship.userData.trail.visible       = false;
+            if (ship.userData.trail) ship.userData.trail.visible = false;
+            if (ship.userData.altitudeGlow) ship.userData.altitudeGlow.visible = false;
+            // Emergency ring (Task #1, flightIntegrityManager EMERGENCY flag)
+            // — same sibling-sprite visibility gotcha as altitudeGlow above:
+            // it doesn't follow ship.visible automatically, so without this
+            // it would stay visible (stuck on whatever the per-frame sync in
+            // main.js last set) even while clustered/hidden.
+            if (ship.userData.emergencyRing) ship.userData.emergencyRing.visible = false;
 
             const lat = ship.userData.latDeg;
             const lon = ship.userData.lonDeg;

@@ -108,7 +108,7 @@ export const AIS = {
 
 // ── Simulation / replay (simClock.js + dataSource.js) ────────────────────────
 export const SIM = {
-    SOURCE_TICK_MS: 2000,    // how often synthetic/recorded sources emit (real ms)
+    SOURCE_TICK_MS: 500,     // how often synthetic/recorded sources emit (real ms) — was 2000; lowered for more frequent position updates / visibly smoother movement
     RECORDER_MAX:   200000,  // max captured AIS messages before recorder stops
 };
 
@@ -163,6 +163,76 @@ export const INTEGRITY = {
     TICK_MS:           4000,    // periodic loiter/decay cadence
 };
 
+// ── Flight Integrity / trust scoring (2026-06-24) ────────────────────────────
+// Aerial-domain sibling of INTEGRITY above — same 0-100 score / TRUSTED-
+// QUESTIONABLE-SUSPECT tiering, same "flags are indicators for analyst
+// review, never verdicts" philosophy, see flightIntegrityManager.js. Self-
+// contained (unlike the AIS pipeline, there's no separate flightInvariants
+// gate module yet — kinematic checks live inside the scoring module itself).
+export const FLIGHT_INTEGRITY = {
+    WEIGHTS: {
+        EMERGENCY:        50,   // squawk 7500/7600/7700 or ADS-B emergency field set
+        IMPOSSIBLE_SPEED: 35,   // teleport-grade position jump between polls
+        ALTITUDE_JUMP:    25,   // climb/descent rate implied between polls is impossible
+        ICAO_INVALID:     20,   // malformed/null hex24 (000000, FFFFFF, not 6 hex chars)
+        SPEED_MISMATCH:   20,   // reported ground speed << implied speed from track
+        EXCESSIVE_SPEED:  15,   // implied speed exceeds plausible-aircraft ceiling
+        DARK:             15,   // ADS-B went silent (removed after STALE_MS with no update)
+        DEFAULT:          10,
+    },
+    TIER_TRUSTED:      80,      // score ≥ → TRUSTED (green) — mirrors INTEGRITY tiers for UI consistency
+    TIER_QUESTIONABLE: 50,      // score ≥ → QUESTIONABLE (amber); below → SUSPECT (red)
+    FLAG_TTL_MS:       10 * 60 * 1000,  // soft (event) flags expire after this if not re-triggered
+    MIN_DT_MS:         2000,    // ignore kinematic checks under this poll interval (noise floor)
+    IMPOSSIBLE_SPEED_KTS: 2200, // faster than anything in civil or most military airspace (SR-71-class)
+    EXCESSIVE_SPEED_KTS:  700,  // soft ceiling — flags outliers, not a hard physical limit
+    SPEED_MISMATCH_MIN_KTS: 100,  // only check mismatch above this implied speed (avoid low-speed GPS noise)
+    SPEED_MISMATCH_FACTOR:  1.6,  // implied speed must exceed reported gs by this factor to flag
+    ALTITUDE_JUMP_FPM:  12000,  // implied climb/descent rate (ft/min) beyond this is impossible
+    TICK_MS:            5000,   // periodic flag-decay cadence
+};
+
+// ── Airspace-avoidance war-signal detection (SCOPED, NOT BUILT — task #12) ───
+// Jamal's idea: a sharp drop in overflight density over a region vs. its own
+// recent baseline is a proxy for airspace closure/conflict — civil traffic
+// reroutes around war zones, SAM threats, and NOTAM closures almost in real
+// time, often well ahead of mainstream news. This block is the scoping
+// deliverable for task #12: config knobs + design notes, deliberately not
+// wired into a manager yet. See airspaceAvoidanceManager.js for the full
+// design writeup (data model, algorithm, open questions) — kept as a
+// non-imported stub file for the same reason.
+//
+// Key design choice: grid cells, not country polygons. We have no country
+// border geometry in this codebase (aisCountries.js is MMSI→country text
+// only, not polygons) and pulling one in is its own scoped decision. A coarse
+// lat/lon grid sidesteps that dependency entirely and arguably detects the
+// signal earlier — a closed air corridor inside a country shows up as a grid
+// cell anomaly before the whole country's traffic visibly drops.
+export const AIRSPACE_AVOIDANCE = {
+    GRID_DEG:           2,            // cell size in degrees lat/lon — coarse enough to smooth normal traffic noise, fine enough to localize a corridor
+    BASELINE_WINDOW_HR: 24 * 7,       // rolling baseline = same cell's avg occupancy over the trailing 7 days, bucketed by hour-of-day (traffic is diurnal — compare like-for-like hours, not a flat 7-day average)
+    SAMPLE_INTERVAL_MS: 5 * 60_000,   // how often a cell's current occupancy is sampled into its history
+    MIN_BASELINE_SAMPLES: 12,         // don't flag a cell until it has at least this many historical samples for its hour-of-day bucket — avoids false positives from sparse history
+    DROP_THRESHOLD_PCT: 60,           // flag when current occupancy is this much below baseline (e.g. 60 = traffic is down 60%+ from normal for this cell/hour)
+    MIN_BASELINE_COUNT: 4,            // ignore cells whose baseline occupancy is already near-zero (e.g. open ocean) — a "drop" from 1 aircraft to 0 isn't a signal
+    GRACE_HR:           2,            // a flagged cell must stay below threshold this long before it's treated as a sustained closure rather than a momentary gap in ADS-B coverage
+};
+
+// ── Aerial conflict / proximity detection (TCAS-style CPA check) ─────────────
+// Sibling of FLIGHT_INTEGRITY — separate module (conflictManager.js) since
+// this is pairwise (O(n²) over live aircraft) rather than per-aircraft.
+export const CONFLICT = {
+    HORIZONTAL_NM:    5,      // CPA horizontal separation below this = conflict
+    VERTICAL_FT:      1000,   // CPA vertical separation below this = conflict (standard IFR sep is 1000ft above FL290, 2000 below... we use one band, this is advisory not a real ATC tool)
+    LOOKAHEAD_SEC:    300,    // only project CPA up to 5 minutes out — beyond that the dead-reckoning straight-line assumption (no turns) is too unreliable to mean anything
+    MIN_SPEED_KTS:    50,     // ignore aircraft below this (parked/taxiing/ground-adjacent noise, already mostly filtered by FLIGHT.MIN_ALT_M)
+    TICK_MS:          3000,   // recompute cadence — independent of FLIGHT.POLL_INTERVAL since dead-reckoned positions move every frame
+    GRACE_MS:         15_000, // keep a pair flagged this long after it stops triggering, so it doesn't flicker in/out right at the threshold edge
+    // Severity bands — purely a function of how close + how soon, for UI color only.
+    CRITICAL_NM:      2,
+    CRITICAL_SEC:     90,
+};
+
 // ── Camera FOV presets ────────────────────────────────────────────────────────
 export const CAMERA = {
     FOV_PRESETS: [
@@ -179,10 +249,105 @@ export const FLIGHT = {
     POLL_INTERVAL: 30_000,           // ms — safe for anonymous tier
     MAX_AIRCRAFT:  300,
     STALE_MS:      120 * 1000,       // remove after 2 min silence
+    MIN_ALT_M:      300 * 0.3048,    // ~91.4m = 300ft AGL — symmetric appear/disappear floor.
+                                      // An aircraft is only tracked above this altitude; a poll
+                                      // reporting it at/below this (or explicitly on the ground)
+                                      // is treated as a landing, same threshold both directions.
     ALT_LOW_MAX:    2000,            // m — solid yellow below this
     ALT_MID_MAX:    6000,            // m — yellow→white gradient
     ALT_CRUISE_MAX: 10000,           // m — light grey; cyan gradient above
 };
+
+// ── Aircraft flight dynamics (visual, not physical sim) ──────────────────────
+// Heading/bank/pitch are smoothed in flightManager.js's tick() and applied as
+// a per-instance quaternion in aircraftInstancer.js. None of this feeds back
+// into actual position — it's purely a believable visual layer on top of the
+// real ADS-B track/altitude trend, tuned by eye rather than derived from real
+// aerodynamics.
+export const FLIGHT_DYNAMICS = {
+    TURN_RATE_DEG_PER_SEC: 6,    // max yaw speed when chasing a new heading report
+    BANK_MAX_DEG:          25,   // clamp on visual roll
+    BANK_GAIN:             0.8,  // deg of bank per deg of remaining heading error
+    BANK_EASE_RATE:        4,    // how fast bank eases toward its target (per sec)
+    PITCH_MAX_DEG:         12,   // clamp on visual nose-up/down
+    PITCH_GAIN:            1.0,  // deg of pitch per m/s of vertical rate
+    PITCH_EASE_RATE:       3,    // how fast pitch eases toward its target (per sec)
+    SPAWN_EASE_SEC:        0.5,  // motion-graphics polish (2026-06-27): newly spawned aircraft scale in over this many seconds instead of popping to full size instantly — see flightManager.js tick() spawnEase and aircraftInstancer.js's easeOutBack
+};
+
+// ── Aircraft classification (visual variety) ─────────────────────────────────
+// ADS-B carries an emitter category (ICAO Mode S Annex 10) and, on airplanes.live,
+// a dbFlags bitfield. Neither directly says "this is a cargo jet" or "this is a
+// fighter" — category tells us airframe size class, dbFlags bit 1 tells us
+// military, and cargo carriers are inferred from known callsign prefixes since
+// there is no dedicated flag for it. Classification happens once per poll in
+// flightManager.js; entityBuilder.js consumes the result to pick a visual model.
+export const AIRCRAFT_CLASSES = {
+    CATEGORY_MAP: {
+        A1: 'GA', A2: 'GA',
+        A3: 'COMMERCIAL', A4: 'COMMERCIAL', A5: 'COMMERCIAL',
+        A6: 'MILITARY',
+        A7: 'HELICOPTER',
+        B2: 'GA', B6: 'GA',   // lighter-than-air / UAV — folded into GA visuals for now
+    },
+    CARGO_CALLSIGN_PREFIXES: [
+        'FDX', 'UPS', 'GTI', 'CLX', 'ABW', 'BOX', 'CKS', 'GEC', 'CAO', 'MPH', 'ABX',
+    ],
+    MILITARY_DB_FLAG: 1,   // dbFlags & 1 (airplanes.live convention)
+    HEX: {
+        COMMERCIAL: '#e0f0ff',
+        CARGO:      '#ffab40',
+        MILITARY:   '#8aff80',
+        HELICOPTER: '#40c4ff',
+        GA:         '#d9b3ff',
+    },
+    SCALE: {
+        COMMERCIAL: 0.13,
+        CARGO:      0.15,
+        MILITARY:   0.10,
+        HELICOPTER: 0.11,
+        GA:         0.08,
+    },
+    DEFAULT: 'COMMERCIAL',
+};
+
+// ── Airline operator lookup (callsign ICAO prefix → display name) ───────────
+// Pure local table, no network call — same spirit as CARGO_CALLSIGN_PREFIXES
+// above. Covers the major commercial/cargo carriers likely to show up on a
+// global ADS-B feed; not exhaustive. Used by flightManager.js to populate
+// the aircraft card's OPERATOR field instantly (vs. registration/type which
+// come straight off the wire, and origin/destination/photo which need a
+// network round trip — see flight-proxy.js /flight-route, /aircraft-photo).
+export const AIRLINE_PREFIXES = {
+    AAL: 'American Airlines',   UAL: 'United Airlines',     DAL: 'Delta Air Lines',
+    SWA: 'Southwest Airlines',  JBU: 'JetBlue',              ASA: 'Alaska Airlines',
+    SKW: 'SkyWest',             FFT: 'Frontier Airlines',    NKS: 'Spirit Airlines',
+    ACA: 'Air Canada',          WJA: 'WestJet',
+    BAW: 'British Airways',     VIR: 'Virgin Atlantic',      EZY: 'easyJet',
+    RYR: 'Ryanair',             AFR: 'Air France',           DLH: 'Lufthansa',
+    KLM: 'KLM',                 IBE: 'Iberia',               VLG: 'Vueling',
+    SWR: 'Swiss',                AUA: 'Austrian Airlines',   SAS: 'SAS',
+    FIN: 'Finnair',              TAP: 'TAP Air Portugal',    LOT: 'LOT Polish Airlines',
+    WZZ: 'Wizz Air',             THY: 'Turkish Airlines',    AFL: 'Aeroflot',
+    UAE: 'Emirates',             QTR: 'Qatar Airways',       ETD: 'Etihad Airways',
+    SVA: 'Saudia',               GFA: 'Gulf Air',             KAC: 'Kuwait Airways',
+    MEA: 'Middle East Airlines', RJA: 'Royal Jordanian',
+    CPA: 'Cathay Pacific',       SIA: 'Singapore Airlines',  ANA: 'All Nippon Airways',
+    JAL: 'Japan Airlines',       KAL: 'Korean Air',           AAR: 'Asiana Airlines',
+    CCA: 'Air China',            CSN: 'China Southern',       CES: 'China Eastern',
+    EVA: 'EVA Air',              CAL: 'China Airlines',       THA: 'Thai Airways',
+    AXM: 'AirAsia',              GIA: 'Garuda Indonesia',     MAS: 'Malaysia Airlines',
+    QFA: 'Qantas',               JST: 'Jetstar',               VOZ: 'Virgin Australia',
+    ANZ: 'Air New Zealand',
+    LAN: 'LATAM Airlines',       AVA: 'Avianca',               AMX: 'Aeromexico',
+    GLO: 'GOL Linhas Aereas',    AZU: 'Azul Brazilian Airlines',
+    ETH: 'Ethiopian Airlines',   SAA: 'South African Airways', KQA: 'Kenya Airways',
+    // Cargo — mirrors CARGO_CALLSIGN_PREFIXES, named explicitly here for the OPERATOR field
+    FDX: 'FedEx Express',  UPS: 'UPS Airlines',   GTI: 'Atlas Air',  CLX: 'Cargolux',
+    ABW: 'Air Bridge Cargo', BOX: 'AeroLogic',    CKS: 'Kalitta Air', GEC: 'Lufthansa Cargo',
+    CAO: 'Air China Cargo',  MPH: 'Martinair Cargo', ABX: 'ABX Air',
+};
+
 
 // ── Layer manager ─────────────────────────────────────────────────────────────
 export const LAYER = {
@@ -225,6 +390,41 @@ export const COPILOT = {
     ANOMALY_TICK_S:       30,            // rule engine cadence
     CLUSTER_DEG_RADIUS:    1.5,          // ~90 nm radius for vessel clustering
     CLUSTER_MIN_VESSELS:   4,            // min vessels to flag as cluster
+};
+
+// ── AI Discovery layer ──────────────────────────────────────────────────────
+// Cross-domain pattern-finding, separate from the per-event aiCopilot enrichment
+// above. Where COPILOT narrates one event in isolation, DISCOVERY periodically
+// hands Claude the whole live picture (recent timeline + invariants + integrity
+// + clusters) and lets it surface correlations / act back on the scene.
+export const DISCOVERY = {
+    AI_ENABLED:        false,           // kill switch — false means NEVER call /ai-discover or /ai-query,
+                                          // even on RUN NOW or a genuine escalation. Rule engine only.
+                                          // Flip to true once a provider key with real quota is configured.
+    API_URL:           'http://localhost:8787/ai-discover',
+    QUERY_API_URL:      'http://localhost:8787/ai-query', // freeform operator Q&A, same snapshot context
+    LOG_PASS_URL:       'http://localhost:8787/memory/log-pass', // free telemetry — every tick, see memoryStore.js appendRulePass
+    TICK_S:             90,            // how often we consider running a discovery pass
+    MIN_CALL_INTERVAL:  60_000,        // ms — hard floor between Claude calls (separate budget from COPILOT)
+    MIN_NEW_ENTRIES:    3,             // don't call Claude if nothing new happened since last pass
+    MAX_TIMELINE_PER_ENTITY: 12,       // rolling per-MMSI history depth (narrative memory, not just dedup)
+    TIMELINE_TTL_MS:    6 * 60 * 60 * 1000, // drop timeline entries older than 6h
+    MAX_SNAPSHOT_ENTITIES: 40,         // cap payload size — most-relevant entities only (flagged/active first)
+    MAX_QUERY_HISTORY:  6,             // # of prior Q&A turns kept for /ai-query conversational memory (3 pairs)
+};
+
+// ── Discovery local rule engine (2026-06-21) ─────────────────────────────────
+// Analyst-tradecraft heuristics that run on every tick, in-browser, for $0 —
+// see discoveryRules.js. These decide which findings are confident enough to
+// template directly (no LLM call) and which co-occurrences are genuinely
+// ambiguous enough to be worth spending a Claude call on. Tune here, not in
+// discoveryRules.js — that file should stay pure logic, no magic numbers.
+export const DISCOVERY_RULES = {
+    SUSPECT_MIN_FLAGS_FOR_AUTO:        2,  // SUSPECT tier + this many corroborating flags → auto-finding, no LLM
+    STS_PAIR_CONFIDENT_MAX:            2,  // exactly this many loitering together → confident STS template
+    MULTI_SIGNAL_TYPES_MIN:            2,  // distinct event TYPES (not just count) on one vessel → escalate
+    CROSS_DOMAIN_ESCALATE_MIN_DOMAINS: 3,  // domains (RF/chokepoint/AIS-story/loitering) active at once → escalate
+    COORDINATED_VESSEL_MIN:            3,  // vessels with developing stories in the same window → escalate
 };
 
 // ── Tactical regions (SITREP context — first match wins, order matters) ───────
