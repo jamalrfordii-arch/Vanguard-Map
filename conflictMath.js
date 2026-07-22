@@ -38,25 +38,44 @@ export function evaluatePair(a, b, cfg = CONFLICT) {
     const vx = vb.x - va.x, vy = vb.y - va.y;
     const vv = vx * vx + vy * vy;
 
-    // Time to CPA in hours (velocities are nm/hr) — clamp to [0, lookahead].
-    // vv ~ 0 means no closing/opening rate (formation flight); fall back to
-    // t=0 (current separation) rather than dividing by ~zero.
     const lookaheadHr = cfg.LOOKAHEAD_SEC / 3600;
+
+    // Separation as a function of look-ahead time t (hours): horizontal from the
+    // relative-motion vector, vertical from each aircraft's altitude + climb rate
+    // (verticalRateMs → ft/hr). Kept as closures so we can evaluate either the
+    // single horizontal-CPA instant OR sweep the window (see below).
+    const altA0 = a.altMeters * M_TO_FT, vrA = (a.verticalRateMs ?? 0) * M_TO_FT * 3600;
+    const altB0 = b.altMeters * M_TO_FT, vrB = (b.verticalRateMs ?? 0) * M_TO_FT * 3600;
+    const horizNmAt = t => Math.hypot(rx + vx * t, ry + vy * t);
+    const vertFtAt  = t => Math.abs((altA0 + vrA * t) - (altB0 + vrB * t));
+
+    // Horizontal closest-point-of-approach time, clamped to [0, lookahead].
+    // vv ~ 0 means no closing/opening rate (formation flight); fall back to t=0
+    // (current separation) rather than dividing by ~zero.
     let tHr = vv > 1e-6 ? -(rx * vx + ry * vy) / vv : 0;
     tHr = Math.max(0, Math.min(lookaheadHr, tHr));
 
-    const cpaX = rx + vx * tHr;
-    const cpaY = ry + vy * tHr;
-    const horizontalNm = Math.sqrt(cpaX * cpaX + cpaY * cpaY);
-    if (horizontalNm > cfg.HORIZONTAL_NM) return null;
+    // A conflict needs BOTH thresholds breached at the SAME instant. Horizontal
+    // CPA is usually the tightest moment, so try it first. But a pair can stay
+    // horizontally close for a window while vertically converging into threshold
+    // a little later — checking only the CPA instant misses that (regression
+    // covered by tests/conflict.test.mjs). So if CPA doesn't qualify, sweep the
+    // look-ahead window second-by-second for the earliest instant that does.
+    // The time of loss-of-separation is what drives eta/severity.
+    let tConf = null;
+    if (horizNmAt(tHr) <= cfg.HORIZONTAL_NM && vertFtAt(tHr) <= cfg.VERTICAL_FT) {
+        tConf = tHr;
+    } else {
+        for (let s = 0; s <= cfg.LOOKAHEAD_SEC; s++) {
+            const t = s / 3600;
+            if (horizNmAt(t) <= cfg.HORIZONTAL_NM && vertFtAt(t) <= cfg.VERTICAL_FT) { tConf = t; break; }
+        }
+    }
+    if (tConf === null) return null;
 
-    // Vertical projection at the same tHr (verticalRateMs → ft/hr).
-    const altAFt = a.altMeters * M_TO_FT + (a.verticalRateMs ?? 0) * M_TO_FT * 3600 * tHr;
-    const altBFt = b.altMeters * M_TO_FT + (b.verticalRateMs ?? 0) * M_TO_FT * 3600 * tHr;
-    const verticalFt = Math.abs(altAFt - altBFt);
-    if (verticalFt > cfg.VERTICAL_FT) return null;
-
-    const etaSec = tHr * 3600;
+    const horizontalNm = horizNmAt(tConf);
+    const verticalFt    = vertFtAt(tConf);
+    const etaSec        = tConf * 3600;
     const severity = (horizontalNm <= cfg.CRITICAL_NM && etaSec <= cfg.CRITICAL_SEC)
         ? 'CRITICAL' : 'ADVISORY';
 

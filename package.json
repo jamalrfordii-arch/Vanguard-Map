@@ -1,0 +1,14 @@
+{
+  "name": "vanguard1",
+  "version": "1.0.0",
+  "description": "Multi-domain 3D tactical intelligence map — Three.js + plain ES modules, no bundler.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --import ./tests/_stubs/register.mjs --test",
+    "test:file": "node --import ./tests/_stubs/register.mjs"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  }
+}

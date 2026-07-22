@@ -155,7 +155,9 @@ test(`${R.STS_PAIR_CONFIDENT_MAX + 1} loitering → escalates instead of templat
     const r = runDiscoveryRules(s);
     assert.equal(r.findings.some(f => /ship-to-ship/.test(f.text)), false, 'should not template a 3-way as a pair');
     assert.equal(r.escalate, true);
-    assert.equal(r.escalateReasons.some(reason => reason.includes('3 vessels loitering together (A, B, C)')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.text.includes('3 vessels loitering together (A, B, C)')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.type === 'STS_GROUP'), true,
+        'escalateReasons entries must carry a `type` that keys into OPTION_MENUS');
 });
 
 console.log(`\nMulti-signal single vessel (config: MULTI_SIGNAL_TYPES_MIN = ${R.MULTI_SIGNAL_TYPES_MIN})`);
@@ -175,7 +177,8 @@ test(`${R.MULTI_SIGNAL_TYPES_MIN} distinct types on one vessel → escalates`, (
     ] }];
     const r = runDiscoveryRules(s);
     assert.equal(r.escalate, true);
-    assert.equal(r.escalateReasons.some(reason => reason.includes('MMSI A shows 2 different kinds')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.text.includes('MMSI A shows 2 different kinds')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.type === 'MULTI_SIGNAL_VESSEL'), true);
 });
 
 console.log(`\nCross-domain co-occurrence (config: CROSS_DOMAIN_ESCALATE_MIN_DOMAINS = ${R.CROSS_DOMAIN_ESCALATE_MIN_DOMAINS})`);
@@ -185,7 +188,7 @@ test('exactly 2 domains active → does not cross the cross-domain gate', () => 
     s.rfEvents = [{ severity: 'WARN', summary: 'x', vessel: null }]; // domain 1 (active = length>0, severity irrelevant to this gate)
     s.chokepointActivity = [{ name: 'X', count: 1, state: 'NORMAL', dark: 0 }]; // domain 2
     const r = runDiscoveryRules(s);
-    assert.equal(r.escalateReasons.some(reason => reason.includes('domains active simultaneously')), false);
+    assert.equal(r.escalateReasons.some(reason => reason.text.includes('domains active simultaneously')), false);
 });
 
 test(`exactly ${R.CROSS_DOMAIN_ESCALATE_MIN_DOMAINS} domains active → escalates`, () => {
@@ -194,7 +197,8 @@ test(`exactly ${R.CROSS_DOMAIN_ESCALATE_MIN_DOMAINS} domains active → escalate
     s.chokepointActivity = [{ name: 'X', count: 1, state: 'NORMAL', dark: 0 }];      // domain 2
     s.integrityFlagged = [{ mmsi: 'A', score: 50, tier: 'WATCH', flags: ['LOITERING'] }]; // domain 3 (loitering)
     const r = runDiscoveryRules(s);
-    assert.equal(r.escalateReasons.some(reason => reason.includes('3 domains active simultaneously')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.text.includes('3 domains active simultaneously')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.type === 'CROSS_DOMAIN'), true);
 });
 
 console.log(`\nCoordinated multi-vessel activity (config: COORDINATED_VESSEL_MIN = ${R.COORDINATED_VESSEL_MIN})`);
@@ -203,7 +207,7 @@ test(`${R.COORDINATED_VESSEL_MIN - 1} vessels with developing stories → no esc
     const s = base();
     s.developingStories = [{ mmsi: 'A', events: [{ type: 'X' }] }, { mmsi: 'B', events: [{ type: 'X' }] }];
     const r = runDiscoveryRules(s);
-    assert.equal(r.escalateReasons.some(reason => reason.includes('developing stories in the same window')), false);
+    assert.equal(r.escalateReasons.some(reason => reason.text.includes('developing stories in the same window')), false);
 });
 
 test(`${R.COORDINATED_VESSEL_MIN} vessels with developing stories → escalates`, () => {
@@ -214,7 +218,8 @@ test(`${R.COORDINATED_VESSEL_MIN} vessels with developing stories → escalates`
         { mmsi: 'C', events: [{ type: 'X' }] },
     ];
     const r = runDiscoveryRules(s);
-    assert.equal(r.escalateReasons.some(reason => reason.includes('3 vessels with developing stories')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.text.includes('3 vessels with developing stories')), true);
+    assert.equal(r.escalateReasons.some(reason => reason.type === 'COORDINATED_MULTI_VESSEL'), true);
 });
 
 console.log('\nShape contract — exact field names _buildSnapshot() actually produces');

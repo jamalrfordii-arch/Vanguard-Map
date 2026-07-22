@@ -36,13 +36,17 @@ test('clean ocean vessel → 100 / TRUSTED', () => {
     assert.equal(r.tier, 'TRUSTED');
 });
 
-test('on-land vessel → ON_LAND flag, score 60, QUESTIONABLE', () => {
+test('lone on-land hit → ON_LAND flag but stays TRUSTED (weak weight by design)', () => {
+    // ON_LAND is deliberately a WEAK signal (see config.js rationale + commit
+    // 801d309): inland-waterway traffic on the Rhine/Great Lakes/Danube would
+    // otherwise be false-flagged by the coarse DEM. A single on-land hit records
+    // the flag for analyst context but must NOT by itself demote the vessel.
     reset(); ELEV = 120;
     IM.evaluate(vessel('211000002'), [], ctx());
     const r = IM.getRecord('211000002');
     assert.ok(r.flags.has('ON_LAND'));
-    assert.equal(r.score, 100 - INTEGRITY.WEIGHTS.ON_LAND);   // 60
-    assert.equal(r.tier, 'QUESTIONABLE');
+    assert.equal(r.score, 100 - INTEGRITY.WEIGHTS.ON_LAND);   // 85
+    assert.equal(r.tier, 'TRUSTED');
 });
 
 test('SOG mismatch → flag recorded, score 80, still TRUSTED (boundary)', () => {
@@ -54,11 +58,25 @@ test('SOG mismatch → flag recorded, score 80, still TRUSTED (boundary)', () =>
     assert.equal(r.tier, 'TRUSTED');
 });
 
-test('on-land + SOG mismatch → SUSPECT', () => {
+test('on-land corroborated by SOG mismatch → demoted to QUESTIONABLE', () => {
+    // Corroboration is the whole point of the weak weight: on-land alone stays
+    // TRUSTED, but a second independent flag pushes it below the TRUSTED band
+    // (85 - 20 = 65 → QUESTIONABLE).
     reset(); ELEV = 120;
     IM.evaluate(vessel('211000004'), [{ type: 'SOG_MISMATCH' }], ctx());
     const r = IM.getRecord('211000004');
-    assert.equal(r.score, 100 - INTEGRITY.WEIGHTS.ON_LAND - INTEGRITY.WEIGHTS.SOG_MISMATCH); // 40
+    assert.equal(r.score, 100 - INTEGRITY.WEIGHTS.ON_LAND - INTEGRITY.WEIGHTS.SOG_MISMATCH); // 65
+    assert.equal(r.tier, 'QUESTIONABLE');
+});
+
+test('two strong kinematic violations → SUSPECT', () => {
+    // Teleport (35) + SOG mismatch (20) = 55 penalty → score 45 → SUSPECT (< 50).
+    // Guards the bottom band with the flags that actually warrant a red vessel.
+    reset(); ELEV = -50;
+    IM.evaluate(vessel('211000014'),
+        [{ type: 'IMPOSSIBLE_SPEED' }, { type: 'SOG_MISMATCH' }], ctx());
+    const r = IM.getRecord('211000014');
+    assert.equal(r.score, 100 - INTEGRITY.WEIGHTS.IMPOSSIBLE_SPEED - INTEGRITY.WEIGHTS.SOG_MISMATCH); // 45
     assert.equal(r.tier, 'SUSPECT');
 });
 
@@ -117,14 +135,15 @@ test('loitering: two stopped offshore vessels within radius flag after dwell', (
 });
 
 test('flagged() returns below-trusted vessels worst-first', () => {
-    reset(); ELEV = -50;
-    IM.evaluate(vessel('211000010'), [], ctx());                                   // 100 TRUSTED
-    ELEV = 120; IM.evaluate(vessel('211000011'), [{ type: 'SOG_MISMATCH' }], ctx()); // 40 SUSPECT
-    ELEV = 120; IM.evaluate(vessel('211000012'), [], ctx());                        // 60 QUESTIONABLE
+    reset();
+    ELEV = -50; IM.evaluate(vessel('211000010'), [], ctx());                        // 100 TRUSTED (excluded)
+    ELEV = -50; IM.evaluate(vessel('211000011'),
+        [{ type: 'IMPOSSIBLE_SPEED' }, { type: 'SOG_MISMATCH' }], ctx());           // 45 SUSPECT (worst)
+    ELEV = 120; IM.evaluate(vessel('211000012'), [{ type: 'SOG_MISMATCH' }], ctx()); // 65 QUESTIONABLE
     const f = IM.flagged();
     assert.equal(f.length, 2);                       // trusted one excluded
-    assert.equal(f[0].mmsi, '211000011');            // worst (40) first
-    assert.equal(f[1].mmsi, '211000012');            // 60 next
+    assert.equal(f[0].mmsi, '211000011');            // worst (45) first
+    assert.equal(f[1].mmsi, '211000012');            // 65 next
 });
 
 console.log(`\n${passed} passed.`);
