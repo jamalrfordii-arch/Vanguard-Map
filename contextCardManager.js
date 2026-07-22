@@ -151,6 +151,7 @@ class ContextCardManager {
 
     /** Show a context card if this key hasn't been shown this session. */
     show(key) {
+        if (this._disabled) return;   // globally suppressed "for the moment" (2026-07-15); set contextCards._disabled=false to re-enable
         if (this._seen.has(key)) return;
         const def = REGISTRY[key];
         if (!def) { console.warn('[ContextCard] Unknown key:', key); return; }

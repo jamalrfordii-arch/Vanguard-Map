@@ -86,10 +86,12 @@ class AircraftInstancer {
                 if (!child.isMesh) return; // skip nav-light/strobe? no — keep them, they're cheap & expected on-screen
                 child.updateMatrix();
 
-                const position = child.position.clone();
-                const rotation = child.rotation.clone();
-                const scale    = child.scale.clone();
-                const spin     = SPIN_PARTS[child.name] || null;
+                const position    = child.position.clone();
+                const rotation    = child.rotation.clone();
+                const scale       = child.scale.clone();
+                const spin        = SPIN_PARTS[child.name] || null;
+                const isBodyPart  = child.userData.isBodyPart === true;
+                const isTailPart  = child.userData.isTailPart === true;
 
                 const mesh = new THREE.InstancedMesh(child.geometry, child.material, CAPACITY);
                 mesh.count = CAPACITY;
@@ -97,9 +99,18 @@ class AircraftInstancer {
                 mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
                 for (let i = 0; i < CAPACITY; i++) mesh.setMatrixAt(i, _zeroMatrix);
                 mesh.instanceMatrix.needsUpdate = true;
+
+                // Initialise per-instance colour buffer (white = no tint by default).
+                // Body parts receive the airline livery colour via setColorAt() in update();
+                // non-body parts (engines, glow, nav lights) stay white so their own
+                // material colour shows through unchanged.
+                const _white = new THREE.Color(1, 1, 1);
+                for (let i = 0; i < CAPACITY; i++) mesh.setColorAt(i, _white);
+                if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
                 scene.add(mesh);
 
-                parts.push({ mesh, position, rotation, scale, spin });
+                parts.push({ mesh, position, rotation, scale, spin, isBodyPart, isTailPart });
             });
 
             this.classes[classType] = {
@@ -159,7 +170,7 @@ class AircraftInstancer {
     // spawnEase (0-1, default 1 = no animation) is flightManager.js's
     // linear spawn-progress value — see _easeOutBack above for the curve
     // applied to it.
-    update(handle, position, visible, headingDeg = 0, bankDeg = 0, pitchDeg = 0, spawnEase = 1) {
+    update(handle, position, visible, headingDeg = 0, bankDeg = 0, pitchDeg = 0, spawnEase = 1, bodyColor = null, tailColor = null) {
         if (!handle) return;
         const cls = this.classes[handle.classType];
         if (!cls) return;
@@ -202,6 +213,18 @@ class AircraftInstancer {
             _finalMatrix.copy(_aircraftMatrix).multiply(_partMatrix);
             part.mesh.setMatrixAt(handle.slot, _finalMatrix);
             part.mesh.instanceMatrix.needsUpdate = true;
+
+            // Apply airline livery colours:
+            //   isBodyPart → bodyColor  (fuselage, wings, stabs, pylons)
+            //   isTailPart → tailColor if distinct, else bodyColor (vertical fin)
+            // Engines, glow, nav lights, glass, lips keep their own material colour.
+            if (part.isTailPart && part.mesh.instanceColor) {
+                const tc = tailColor ?? bodyColor;
+                if (tc) { part.mesh.setColorAt(handle.slot, tc); part.mesh.instanceColor.needsUpdate = true; }
+            } else if (bodyColor && part.isBodyPart && part.mesh.instanceColor) {
+                part.mesh.setColorAt(handle.slot, bodyColor);
+                part.mesh.instanceColor.needsUpdate = true;
+            }
         });
     }
 }

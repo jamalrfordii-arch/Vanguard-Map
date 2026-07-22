@@ -20,7 +20,105 @@
 // tools; they never need to touch this file's internals.
 
 import { DISCOVERY } from './config.js';
-import { runDiscoveryRules } from './discoveryRules.js';
+import { runDiscoveryRules, OPTION_MENUS } from './discoveryRules.js';
+
+// ── Synthetic test fixtures for testOptionsMode() ───────────────────────────
+// One fixture per OPTION_MENUS key, shaped to match exactly what a real
+// _buildSnapshot() pass produces (see buildDiscoverySummary in flight-proxy.js
+// for the fields each section reads) — a fictional but internally-consistent
+// scenario per trigger type, so the test round trip gives Claude something
+// real to reason about instead of an empty snapshot.
+function _buildTestFixture(triggerType) {
+    const base = {
+        developingStories: [], invariantViolations: [], integrityFlagged: [],
+        rfEvents: [], chokepointActivity: [],
+    };
+    switch (triggerType) {
+        case 'STS_GROUP': {
+            const mmsis = ['235089224', '412345678', '563001122'];
+            base.chokepointActivity = [{
+                name: 'STRAIT OF HORMUZ', count: 3, state: 'ELEVATED', dark: 0,
+                vessels: mmsis.map(mmsi => ({ mmsi, dark: false, stopped: true })),
+            }];
+            return {
+                snapshot: base,
+                trigger: {
+                    type: 'STS_GROUP',
+                    text: `[TEST] ${mmsis.length} vessels loitering together (${mmsis.join(', ')}) — more than a simple pair`,
+                    mmsis,
+                },
+            };
+        }
+        case 'CROSS_DOMAIN': {
+            const mmsi = '235089224';
+            base.developingStories = [{
+                mmsi,
+                events: [
+                    { type: 'AIS_GAP', ageSec: 340, detail: 'signal lost for 47 minutes near Strait of Hormuz' },
+                ],
+            }];
+            base.rfEvents = [{
+                severity: 'ALERT', type: 'JAMMING', vessel: mmsi,
+                summary: '[TEST] GPS jamming signature detected in the same sector', ageSec: 300,
+            }];
+            base.chokepointActivity = [{
+                name: 'STRAIT OF HORMUZ', count: 4, state: 'ELEVATED', dark: 1,
+                vessels: [{ mmsi, dark: true, stopped: true }],
+            }];
+            return {
+                snapshot: base,
+                trigger: {
+                    type: 'CROSS_DOMAIN',
+                    text: '[TEST] 3 domains active simultaneously (RF/chokepoint/AIS-story) — worth checking for a single underlying incident',
+                    mmsis: [mmsi],
+                },
+            };
+        }
+        case 'COORDINATED_MULTI_VESSEL': {
+            const mmsis = ['235089224', '412345678', '563001122', '271004455'];
+            base.developingStories = mmsis.map(mmsi => ({
+                mmsi,
+                events: [{ type: 'HEADING_JUMP', ageSec: 120, detail: '[TEST] sudden course change toward the same waypoint' }],
+            }));
+            return {
+                snapshot: base,
+                trigger: {
+                    type: 'COORDINATED_MULTI_VESSEL',
+                    text: `[TEST] ${mmsis.length} vessels with developing stories in the same window — possible coordinated activity`,
+                    mmsis,
+                },
+            };
+        }
+        case 'MULTI_SIGNAL_VESSEL':
+        default: {
+            const mmsi = '235089224';
+            base.developingStories = [{
+                mmsi,
+                events: [
+                    { type: 'AIS_GAP', ageSec: 400, detail: '[TEST] AIS signal lost for 47 minutes near Strait of Hormuz' },
+                    { type: 'SPEED_ANOMALY', ageSec: 380, detail: '[TEST] speed dropped from 14kn to 0.2kn immediately before signal loss' },
+                    { type: 'HEADING_JUMP', ageSec: 30, detail: '[TEST] heading changed 92 degrees upon signal reacquisition' },
+                ],
+            }];
+            base.integrityFlagged = [{ mmsi, tier: 'FLAGGED', score: 62, flags: ['POSITION_JUMP'] }];
+            base.chokepointActivity = [{
+                name: 'STRAIT OF HORMUZ', count: 6, state: 'ELEVATED', dark: 1,
+                vessels: [
+                    { mmsi, dark: true, stopped: true },
+                    { mmsi: '412345678', dark: false, stopped: false },
+                ],
+            }];
+            return {
+                snapshot: base,
+                trigger: {
+                    type: 'MULTI_SIGNAL_VESSEL',
+                    text: `[TEST] MMSI ${mmsi} shows 3 different kinds of anomalous behavior (AIS_GAP, SPEED_ANOMALY, HEADING_JUMP) in the same window`,
+                    mmsis: [mmsi],
+                },
+            };
+        }
+    }
+}
 
 export class DiscoveryManager {
     constructor() {
@@ -158,6 +256,12 @@ export class DiscoveryManager {
                     .map(m => ({
                         name: m.userData.chokepointName, count: m.userData.chokepointCount,
                         state: m.userData.chokepointState, dark: m.userData.chokepointDark || 0,
+                        // Added 2026-07-21 alongside the Hormuz box widen — gives Claude
+                        // MMSIs to cross-reference against developingStories/RF/integrity
+                        // instead of just an aggregate count with nothing to correlate.
+                        vessels: (m.userData.chokepointVessels || []).map(v => ({
+                            mmsi: v.mmsi, dark: v.dark, stopped: v.stopped,
+                        })),
                     }))
                 : [],
         };
@@ -294,7 +398,7 @@ export class DiscoveryManager {
                         : `scan — nothing across any domain to analyze (next check in ${DISCOVERY.TICK_S}s, or hit RUN NOW)`)
                     : aiOff
                         ? `AI disabled — rule engine handled ${rules.findings.length} finding(s) locally`
-                            + (rules.escalate ? `; would have escalated: ${rules.escalateReasons.join('; ')}` : '')
+                            + (rules.escalate ? `; would have escalated: ${rules.escalateReasons.map(r => r.text).join('; ')}` : '')
                         : `rule engine handled ${rules.findings.length} finding(s) locally — `
                             + `nothing ambiguous enough to escalate (next check in ${DISCOVERY.TICK_S}s, or hit RUN NOW)`,
             });
@@ -318,38 +422,89 @@ export class DiscoveryManager {
             return;
         }
 
+        return this._escalateToClaude(snapshot, rules, force);
+    }
+
+    // Factored out of _maybeRunDiscoveryPass (2026-07-21) so testOptionsMode()
+    // below can drive the exact same fetch/parse/emit/action path with a
+    // synthetic snapshot+trigger instead of duplicating it. Behaviour is
+    // unchanged from before the extraction — same stats, same _logPass calls,
+    // same event shapes.
+    async _escalateToClaude(snapshot, rules, force = false) {
         if (rules.escalate) this.stats.escalations++;
         this._isProcessing = true;
         this._lastCallTime = Date.now();
         this.stats.passes++;
+
+        // Pick the dominant trigger for OPTIONS mode (2026-07-21). v1
+        // simplification, documented rather than silent: if multiple triggers
+        // fire in the same pass, only the FIRST one (in discoveryRules.js's
+        // fixed check order — STS_GROUP, MULTI_SIGNAL_VESSEL, CROSS_DOMAIN,
+        // COORDINATED_MULTI_VESSEL) gets its menu sent; the others still show
+        // up as plain text in the DISCOVERY_SCAN line below. Multi-trigger
+        // passes are rare (most ticks have zero or one), and ranking two
+        // unrelated menus in one Claude call would be a worse UX than picking
+        // the first — a future pass can split into multiple calls if this
+        // turns out to matter in practice.
+        const primaryTrigger = rules.escalateReasons[0] || null;
+        const menu = primaryTrigger ? OPTION_MENUS[primaryTrigger.type] : null;
 
         this._emit({
             type: 'DISCOVERY_SCAN', cls: 'discovery-scan', timestamp: Date.now(),
             body: force && !rules.escalate
                 ? `forced scan — ${snapshot.developingStories.length} developing stories, `
                     + `${snapshot.integrityFlagged.length} flagged, ${snapshot.invariantViolations.length} violations`
-                : `escalating to Claude — ${rules.escalateReasons.join('; ') || 'forced by operator'}`,
+                : `escalating to Claude — ${rules.escalateReasons.map(r => r.text).join('; ') || 'forced by operator'}`,
         });
 
         try {
             const res = await fetch(DISCOVERY.API_URL, {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ snapshot }),
+                body:    JSON.stringify(menu
+                    ? { snapshot, triggerType: primaryTrigger.type, triggerText: primaryTrigger.text, menu }
+                    : { snapshot }),
                 signal:  AbortSignal.timeout(20_000),
             });
 
             if (res.ok) {
-                const { assessment, actions } = await res.json();
+                const result = await res.json();
+                const { assessment, options, actions } = result;
                 this.stats.claudeCalls++;
-                this._logPass('escalated-ok', rules, { forced: force, hasAssessment: !!assessment });
+                this._logPass('escalated-ok', rules, { forced: force, hasAssessment: !!assessment, hasOptions: !!(options && options.length) });
 
-                if (assessment) {
+                if (options && options.length) {
+                    // OPTIONS mode — render as cards (uiController.js), not prose.
+                    this._emit({
+                        type:      'DISCOVERY',
+                        cls:       'discovery',
+                        label:     '◈ AI DISCOVERY — OPTIONS',
+                        triggerType: result.triggerType || primaryTrigger?.type,
+                        triggerText: result.triggerText || primaryTrigger?.text,
+                        options,
+                        isAiEnriched: true,
+                        timestamp: Date.now(),
+                        timeStr:   'JUST NOW',
+                    });
+                } else if (assessment) {
                     this._emit({
                         type:      'DISCOVERY',
                         cls:       'discovery',
                         label:     '◈ AI DISCOVERY',
                         body:      assessment,
+                        isAiEnriched: true,
+                        timestamp: Date.now(),
+                        timeStr:   'JUST NOW',
+                    });
+                } else if (result.rawFallback) {
+                    // OPTIONS mode was requested but the model didn't return valid
+                    // JSON — surface the raw text rather than silently dropping a
+                    // spent Claude call (mirrors DISCOVERY_SYSTEM's own text fallback).
+                    this._emit({
+                        type:      'DISCOVERY',
+                        cls:       'discovery',
+                        label:     '◈ AI DISCOVERY (unparsed)',
+                        body:      result.rawFallback,
                         isAiEnriched: true,
                         timestamp: Date.now(),
                         timeStr:   'JUST NOW',
@@ -384,6 +539,43 @@ export class DiscoveryManager {
         this._isProcessing = false;
     }
 
+    // ── Manual options-card test (2026-07-21) ──────────────────────────────
+    // Fires a REAL /ai-discover round trip with a synthetic snapshot + a
+    // specific trigger type, bypassing the normal escalation gate (rules
+    // firing, cooldown, MIN_CALL_INTERVAL) entirely — for confirming the
+    // options-card UI renders correctly without waiting for a natural trigger
+    // to occur live. Uses the same _escalateToClaude() path as a real pass, so
+    // a pass here is a genuine end-to-end test of the whole chain, not a mock.
+    // Console: await vg1Discovery.testOptionsMode('MULTI_SIGNAL_VESSEL')
+    //          await vg1Discovery.testOptionsMode()   // defaults to MULTI_SIGNAL_VESSEL
+    testOptionsMode(triggerType = 'MULTI_SIGNAL_VESSEL') {
+        if (!OPTION_MENUS[triggerType]) {
+            const valid = Object.keys(OPTION_MENUS).join(', ');
+            this._emit({
+                type: 'DISCOVERY_ERROR', cls: 'discovery-error', timestamp: Date.now(),
+                body: `testOptionsMode: unknown trigger type "${triggerType}" — valid: ${valid}`,
+            });
+            return;
+        }
+        if (this._isProcessing) {
+            this._emit({
+                type: 'DISCOVERY_SCAN', cls: 'discovery-scan', timestamp: Date.now(),
+                body: 'testOptionsMode: a pass is already running — try again in a moment',
+            });
+            return;
+        }
+
+        const { snapshot, trigger } = _buildTestFixture(triggerType);
+        const rules = { findings: [], escalate: true, escalateReasons: [trigger] };
+
+        this._emit({
+            type: 'DISCOVERY_SCAN', cls: 'discovery-scan', timestamp: Date.now(),
+            body: `manual test — firing synthetic ${triggerType} trigger through the real /ai-discover pipeline`,
+        });
+
+        return this._escalateToClaude(snapshot, rules, false);
+    }
+
     // ── Tool registry — Claude acting back on the scene ────────────────────
 
     _registerBuiltinTools() {
@@ -395,6 +587,28 @@ export class DiscoveryManager {
             window.dispatchEvent(new CustomEvent('vg1:selectVessel', {
                 detail: { mmsi, source: 'aiDiscovery', openCard: !!openCard },
             }));
+        });
+
+        // Course-of-action tools (2026-07-21) — the first step of turning the
+        // options cards from "here's what I think this is" into "here's what
+        // to do about it". Both reuse window.watchlist's existing, already-
+        // persisted (localStorage) API — no new storage, no new UI needed;
+        // the vessel just shows up in the Watchlist tab already flagged.
+        // Deliberately NOT adding createWatchZone or checkSanctionsList here —
+        // neither has a real system behind it yet (custom watch points and
+        // OFAC sanctions cross-referencing are both unbuilt), and a tool that
+        // Claude can call but that does nothing real would be worse than not
+        // offering it. Add them here once those systems exist.
+        this.registerTool('addToWatchlist', ({ mmsi } = {}) => {
+            if (mmsi == null || typeof window === 'undefined' || !window.watchlist) return;
+            window.watchlist.add(String(mmsi));
+        });
+
+        this.registerTool('flagForNextShift', ({ mmsi, note = '' } = {}) => {
+            if (mmsi == null || typeof window === 'undefined' || !window.watchlist) return;
+            const m = String(mmsi);
+            window.watchlist.add(m);   // flagging implies watching
+            if (note) window.watchlist.setNote(m, `[AI DISCOVERY] ${note}`);
         });
     }
 

@@ -82,7 +82,12 @@ export class CityManager {
 
         this._terrainPatches = [];  // { mesh, mat, cx, cz }
 
-        this._buildTerrainPatches();
+        // LAYER DISABLED (2026-07-12, Jamal's call): the terrain patches read as
+        // a tan "mud smudge" over the point cloud at every zoom/angle (reported
+        // at Lagos and Durban), and tile-stream terrain (y<22, zoom 12-13) already
+        // provides real close-zoom ground detail. The build path is kept intact —
+        // uncomment to bring patches back for a future restyle.
+        // this._buildTerrainPatches();
         scene.add(this._group);
     }
 
@@ -282,6 +287,12 @@ export class CityManager {
             };
 
             const mesh = new THREE.Mesh(geo, mat);
+            // Anchor the patch at its city. Geometry is local (plane centred at
+            // origin); colours/UVs/elevations were sampled at x+local, z+local,
+            // so translating the mesh here lines everything up. Without this,
+            // every patch rendered stacked at world (0,0) — Null Island, Gulf of
+            // Guinea — visible as a tan "terrain ghost" south of Lagos.
+            mesh.position.set(x, 0, z);
             mesh.visible     = false;
             mesh.renderOrder = 2;
             this._group.add(mesh);
@@ -293,20 +304,22 @@ export class CityManager {
     update(camera) {
         const cam = camera.position;
 
-        // Mesh terrain patches: fade in between dist 50 → 30.
+        // Mesh terrain patches: CLOSE-ZOOM ONLY (2026-07-12). The old y<60 gate
+        // let patches appear at strategic altitude, where the tan tone + isolines
+        // clash with the point cloud and read as a giant terrain smudge (the
+        // "ghost terrain near Lagos" complaint). Patches exist to replace the
+        // gappy point-cloud surface up close, so: fully in by y≤12 (below the
+        // splat/continent crossfade band), gone above y=18, plus XZ fade 25→15.
         this._terrainPatches.forEach(({ mesh, mat, cx, cz }) => {
-            // Height gate — patches are close-zoom only; never show at strategic
-            // altitude. Without this, panning to a city at camera.y > 60 brings
-            // the XZ distance below the 50-unit threshold and the patch activates
-            // as a large floating tile overlay visible from far above.
-            if (cam.y >= 60) {
+            const yFade = THREE.MathUtils.clamp((18 - cam.y) / 6, 0, 1);
+            if (yFade <= 0) {
                 if (mesh.visible) { mesh.visible = false; mat.opacity = 0; }
                 return;
             }
             const dx = cam.x - cx;
             const dz = cam.z - cz;
             const d  = Math.sqrt(dx * dx + dz * dz);
-            const a  = THREE.MathUtils.clamp((50 - d) / 20, 0, 1);
+            const a  = THREE.MathUtils.clamp((25 - d) / 10, 0, 1) * yFade;
             if (a > 0 !== mesh.visible) mesh.visible = a > 0;
             if (mesh.visible) mat.opacity = a;
         });

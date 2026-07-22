@@ -9,7 +9,9 @@ function _scenePosToLonLat(x, z) {
     const latRad = 2 * Math.atan(Math.exp(mercY)) - Math.PI / 2;
     return { lon, lat: latRad * (180 / Math.PI) };
 }
-import { getTrueElevation } from './terrainBuilder.js';
+import { getTrueElevation, getSceneGroundY } from './terrainBuilder.js';
+import { countryAt } from './territoryLookup.js';
+let _lastTerritoryCheck = 0;   // hover territory lookup throttle
 import { CITIES } from './cityManager.js';
 import { contextCards } from './contextCardManager.js';
 import { integrityManager } from './integrityManager.js';
@@ -20,6 +22,14 @@ let _searchQuery  = '';
 let _detailShip   = null;   // ship currently shown in vessel-detail panel
 let _alertZone    = null;   // { mesh, ringMesh, center: Vector3, radius: number }
 let _zoneWaiting  = false;  // true while waiting for user click to place zone
+let _mapPickCb    = null;   // one-shot map-pick callback (requestMapPick)
+
+// ── Generic one-shot map pick ─────────────────────────────────────────────────
+// Any panel can ask for "the next click on the map" without owning raycast
+// internals: cb receives { point: Vector3 (scene), lon, lat }. Consumed by
+// onClick before all other click handling. Pass null to cancel.
+export function requestMapPick(cb) { _mapPickCb = cb; }
+export function isMapPickPending() { return !!_mapPickCb; }
 let _darkCount    = 0;
 
 // ── Highlight helpers ─────────────────────────────────────────────────────────
@@ -427,7 +437,10 @@ function _wireAircraftIntel(ship, ud) {
     // adsb.lol) but is null when OpenSky is the active source — its
     // /states/all schema has no registration/type field. Resolve it via
     // hexdb.io by icao24 hex in that case before giving up on the photo.
-    const regPromise = ud.registration
+    // Also call hexdb when registration is known but typeCode is missing —
+    // airplanes.live occasionally omits s.t even when s.r is present, and
+    // hexdb can supply both from the hex alone.
+    const regPromise = (ud.registration && ud.typeCode)
         ? Promise.resolve({ ok: true, registration: ud.registration, typeCode: ud.typeCode, operator: ud.operator })
         : _fetchAircraftReg(hex);
 
@@ -440,9 +453,17 @@ function _wireAircraftIntel(ship, ud) {
             const regEl = document.getElementById('vd-registration');
             const typeEl = document.getElementById('vd-type');
             const opEl   = document.getElementById('vd-operator');
-            if (regEl && !ud.registration && r.registration) regEl.innerText = r.registration;
-            if (typeEl && !ud.typeCode && r.typeCode)         typeEl.innerText = r.typeCode;
-            if (opEl   && !ud.operator  && r.operator)        opEl.innerText   = r.operator;
+            if (regEl && !ud.registration && r.registration) { regEl.innerText = r.registration; ud.registration = r.registration; }
+            if (typeEl && !ud.typeCode && r.typeCode)         { typeEl.innerText = r.typeCode;    ud.typeCode     = r.typeCode;    }
+            if (opEl   && !ud.operator  && r.operator)        { opEl.innerText   = r.operator;    ud.operator     = r.operator;   }
+            // Dispatch enrichment event so main.js can reclassify the 3D shape
+            // (e.g. COMMERCIAL → BIZJET) when hexdb reveals the real type code
+            // that the ADS-B stream didn't carry.
+            if (r.typeCode || r.registration || r.operator) {
+                window.dispatchEvent(new CustomEvent('vg1:aircraftTypeEnriched', {
+                    detail: { icao24: hex, typeCode: r.typeCode, registration: r.registration, operator: r.operator }
+                }));
+            }
         }
         if (!registration) return;
         return _fetchAircraftPhoto(registration).then(p => {
@@ -846,11 +867,31 @@ export function initDiscoveryConsole(discoveryManager) {
 
         const ts   = new Date(evt.timestamp || Date.now()).toLocaleTimeString();
         const cls  = CLASS[evt.type] || 'disc-scan';
-        const tag  = evt.type === 'DISCOVERY' ? '<span class="disc-tag">FINDING</span> '
+        // Options-mode events (2026-07-21, see discoveryManager.js) carry a
+        // ranked `options` array instead of a `body` string — everything else
+        // about a DISCOVERY event is unchanged, so this only branches the tag
+        // and adds the card block; the timestamp/class/scroll logic below is
+        // shared with the plain-assessment path.
+        const hasOptions = evt.type === 'DISCOVERY' && Array.isArray(evt.options) && evt.options.length > 0;
+        const tag  = hasOptions ? '<span class="disc-tag">OPTIONS</span> '
+            : evt.type === 'DISCOVERY' ? '<span class="disc-tag">FINDING</span> '
             : evt.type === 'DISCOVERY_RULE' ? '<span class="disc-tag">RULE</span> ' : '';
         const line = document.createElement('div');
         line.className = `disc-line ${cls}`;
-        line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX[evt.type] || ''}${esc(evt.body)}`;
+
+        if (hasOptions) {
+            const headline = evt.triggerText ? esc(evt.triggerText) : 'ranked options';
+            const cards = evt.options.map(o => `
+                <div class="disc-option">
+                    <span class="disc-option-conf conf-${esc(o.confidence || 'LOW')}">${esc(o.confidence || 'LOW')}</span>
+                    <span class="disc-option-label">${esc(o.label)}</span>
+                    ${o.reasoning ? `<div class="disc-option-reason">${esc(o.reasoning)}</div>` : ''}
+                </div>`).join('');
+            line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX.DISCOVERY}${headline}`
+                + `<div class="disc-options-block">${cards}</div>`;
+        } else {
+            line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX[evt.type] || ''}${esc(evt.body)}`;
+        }
         log.appendChild(line);
 
         while (log.children.length > MAX_LINES) log.removeChild(log.firstChild);
@@ -1009,6 +1050,44 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
             arcToggle.style.borderColor = nowActive ? '#40ffaa' : '#40c4ff';
             arcToggle.style.color       = nowActive ? '#40ffaa' : '#40c4ff';
         };
+    }
+
+    // ── Flight route arc toggle (aircraft only) ───────────────────────────────
+    const routeRow    = document.getElementById('vd-route-row');
+    const routeToggle = document.getElementById('vd-route-toggle');
+    if (routeRow) routeRow.style.display = isAircraft ? '' : 'none';
+    if (routeToggle && isAircraft) {
+        const _updateRouteBtn = (active, label) => {
+            routeToggle.textContent     = active ? '✈ HIDE PATH' : (label || '✈ TRACK PATH');
+            routeToggle.style.borderColor = active ? '#40ffaa' : '#40c4ff';
+            routeToggle.style.color       = active ? '#40ffaa' : '#40c4ff';
+        };
+        const routeActive = window.flightRouteManager?.isActive(ship) ?? false;
+        _updateRouteBtn(routeActive);
+
+        // Replace previous onclick (card may be reused for different aircraft)
+        routeToggle.onclick = () => {
+            window.dispatchEvent(new CustomEvent('vg1:flightRouteToggle', { detail: { flight: ship } }));
+        };
+
+        // Listen for the result to update the button label
+        const _onResult = e => {
+            if (e.detail.flight !== ship) return;
+            window.removeEventListener('vg1:flightRouteResult', _onResult);
+            if (e.detail.ok) {
+                _updateRouteBtn(true);
+            } else {
+                // Route not on file — reset button and show brief error
+                routeToggle.textContent       = `✈ NO ROUTE (${e.detail.error || 'unavailable'})`;
+                routeToggle.style.borderColor = '#ff4455';
+                routeToggle.style.color       = '#ff4455';
+                setTimeout(() => _updateRouteBtn(false), 3000);
+            }
+        };
+        // Remove any lingering listener from a previous card open
+        window.removeEventListener('vg1:flightRouteResult', routeToggle._resultHandler);
+        routeToggle._resultHandler = _onResult;
+        window.addEventListener('vg1:flightRouteResult', _onResult);
     }
 
     panel.style.display = 'block';
@@ -1362,6 +1441,24 @@ export function setupUI(deps) {
         }
     };
 
+    // ── Asset Search toggle ───────────────────────────────────────────────────
+    const _assetSearchBtn   = document.getElementById('asset-search-toggle');
+    const _assetSearchPanel = document.getElementById('search-panel');
+    if (_assetSearchBtn && _assetSearchPanel) {
+        _assetSearchBtn.addEventListener('click', () => {
+            const open = _assetSearchPanel.classList.toggle('open');
+            _assetSearchBtn.classList.toggle('active', open);
+            if (open) document.getElementById('search-input')?.focus();
+        });
+        // Close on Escape
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && _assetSearchPanel.classList.contains('open')) {
+                _assetSearchPanel.classList.remove('open');
+                _assetSearchBtn.classList.remove('active');
+            }
+        });
+    }
+
     // ── Zoom buttons ──────────────────────────────────────────────────────────
     document.getElementById('btn-zoom-in').onclick = () => {
         const dir = new THREE.Vector3()
@@ -1683,6 +1780,94 @@ export function setupSettingsPanel(weatherManager) {
             if (e.key === 'Enter') connectBtn.click();
         });
     }
+
+    // ── Cesium Ion token (photoreal terrain tile stream) ──────────────────────
+    // Token was previously only settable via a DevTools localStorage line, so
+    // every fresh browser/profile silently lost photoreal terrain (2026-07-12).
+    _refreshCesiumState();
+    const cesBtn   = document.getElementById('cesium-connect-btn');
+    const cesInput = document.getElementById('cesium-token-input');
+    const cesFb    = document.getElementById('cesium-feedback');
+
+    if (cesBtn && cesInput) {
+        cesBtn.addEventListener('click', async () => {
+            // Already connected → act as disconnect
+            if (localStorage.getItem('vg1_cesium_token')) {
+                try { localStorage.removeItem('vg1_cesium_token'); } catch (_) {}
+                cesInput.value = '';
+                cesInput.placeholder = 'Paste Cesium Ion access token…';
+                _refreshCesiumState();
+                _setFeedback(cesFb, 'Token removed — reload to apply', 'var(--orange)');
+                return;
+            }
+
+            const token = cesInput.value.trim();
+            if (!token) {
+                _setFeedback(cesFb, 'Enter a token first', 'var(--orange)');
+                return;
+            }
+
+            cesBtn.innerText = 'Validating…';
+            cesBtn.disabled  = true;
+
+            // Light validation against the Ion REST API. Network failure ≠ bad
+            // token, so only reject on an explicit 401/403.
+            let verdict = 'unverified';
+            try {
+                const r = await fetch('https://api.cesium.com/v1/me', {
+                    headers: { 'Authorization': `Bearer ${token}` },
+                });
+                verdict = r.ok ? 'ok' : (r.status === 401 || r.status === 403) ? 'bad' : 'unverified';
+            } catch (_) { /* offline / CORS hiccup — save anyway */ }
+
+            cesBtn.disabled = false;
+
+            if (verdict === 'bad') {
+                _refreshCesiumState();
+                _setFeedback(cesFb, '✕ Token rejected by Cesium Ion — check it and try again', 'var(--orange)');
+                return;
+            }
+
+            try { localStorage.setItem('vg1_cesium_token', token); } catch (_) {}
+            _refreshCesiumState();
+            _setFeedback(cesFb,
+                verdict === 'ok'
+                    ? '✓ Token valid — reload to stream photoreal terrain'
+                    : '✓ Token saved (couldn’t reach Cesium to verify) — reload to apply',
+                '#40ffaa');
+        });
+
+        cesInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') cesBtn.click();
+        });
+    }
+}
+
+function _refreshCesiumState() {
+    const dot        = document.getElementById('cesium-dot');
+    const statusText = document.getElementById('cesium-status-text');
+    const btn        = document.getElementById('cesium-connect-btn');
+    const input      = document.getElementById('cesium-token-input');
+
+    let saved = null;
+    try { saved = localStorage.getItem('vg1_cesium_token'); } catch (_) {}
+    // "LIVE" = the stream actually initialised this session; "SAVED" = token
+    // stored but a reload is needed before tiles flow.
+    const streaming = !!(window.tileStream && window.tileStream._ready);
+    const state = streaming ? 'LIVE' : saved ? 'SAVED — RELOAD' : 'OFFLINE';
+
+    if (dot)        dot.className = 'cfg-dot' + (streaming ? ' live' : '');
+    if (statusText) {
+        statusText.innerText   = state;
+        statusText.style.color = streaming ? '#40ffaa' : saved ? '#ffc966' : '#4a6b84';
+    }
+    if (btn) {
+        btn.innerText = saved ? 'Disconnect' : 'Connect';
+        btn.className = 'cfg-btn' + (saved ? ' cfg-btn-disconnect' : '');
+    }
+    if (input && saved && !input.value) {
+        input.placeholder = '••••••••••••••••  (saved)';
+    }
 }
 
 function _refreshOwmState(weatherManager) {
@@ -1744,7 +1929,21 @@ export function onMouseMove(event, deps) {
 
         if (hits.length > 0 && !stateRef.hoveredShip) {
             const pt = hits[0].point;
-            hoverReticle.position.set(pt.x, pt.y + 0.5, pt.z);
+            // Sit ON the actual rendered terrain surface, not the flat helper
+            // plane used for raycasting (2026-07-20 fix) — boardPlane is a
+            // sea-level proxy so the reticle used to float above/through real
+            // relief at close zoom. getSceneGroundY matches the terrain
+            // build's own elevation math exactly (same helper borders use).
+            const groundY = getSceneGroundY(pt.x, pt.z);
+            hoverReticle.position.set(pt.x, groundY + 0.05, pt.z);
+            // Scale down with camera altitude (2026-07-20) — same zoomScale
+            // curve as selectionRing.js's 2026-07-15 fix, for the same reason:
+            // a fixed ~1.8-unit radius is a reasonable dot at regional view but
+            // balloons to fill the screen at close zoom. Full size at regional
+            // view (camY≈90), tightens fast as you dive.
+            const camY = camera.position.y;
+            const zoomScale = Math.max(0.025, Math.min(1.15, Math.pow(camY / 90, 1.5)));
+            hoverReticle.scale.setScalar(zoomScale);
             hoverReticle.visible = true;
 
             const lon    = (pt.x / (MAP_WIDTH  / 2.0)) * 180.0;
@@ -1756,6 +1955,16 @@ export function onMouseMove(event, deps) {
             document.getElementById('coord-lat').innerText = lat.toFixed(4);
             document.getElementById('coord-lon').innerText = lon.toFixed(4);
             document.getElementById('coord-dep').innerText = depStr;
+
+            // Territory under cursor (2026-07-13) — throttled to ~8/sec; the
+            // lookup itself is bbox-prefiltered point-in-polygon, ~µs cheap.
+            const nowT = performance.now();
+            if (nowT - _lastTerritoryCheck > 120) {
+                _lastTerritoryCheck = nowT;
+                const terr = countryAt(lon, lat);
+                const el = document.getElementById('coord-territory');
+                if (el) el.innerText = terr || (hM < 0 ? 'INTL WATERS' : '—');
+            }
 
             // Place alert zone on click if waiting
             if (_zoneWaiting) {
@@ -1800,6 +2009,23 @@ export function onClick(event, deps) {
     // clear hoveredShip and bail — don't lock a ship the user never intended to select.
     if (hasInteracted && !hasInteracted()) {
         stateRef.hoveredShip = null;
+        return;
+    }
+
+    // One-shot map pick (requestMapPick) — takes priority over everything
+    if (_mapPickCb && boardPlane) {
+        raycaster.setFromCamera(mouse, camera);
+        const pickHits = [];
+        boardPlane.raycast(raycaster, pickHits);
+        if (pickHits.length > 0) {
+            const pt    = pickHits[0].point.clone();
+            const lon   = (pt.x / (MAP_WIDTH  / 2.0)) * 180.0;
+            const mercY = -(pt.z / (MAP_HEIGHT / 2.0)) * Math.PI;
+            const lat   = (2.0 * Math.atan(Math.exp(mercY)) - Math.PI / 2.0) * (180.0 / Math.PI);
+            const cb    = _mapPickCb;
+            _mapPickCb  = null;
+            cb({ point: pt, lon, lat });
+        }
         return;
     }
 
@@ -1891,11 +2117,22 @@ export function onClick(event, deps) {
             const ttId = document.getElementById('tt-id');
             if (ttId) ttId.innerText = '[LOCKED] ' + stateRef.hoveredShip.userData.id;
 
-            const dir = new THREE.Vector3()
-                .subVectors(camera.position, stateRef.lockedShip.position).normalize();
-            stateRef.flightTargetPos
-                .copy(stateRef.lockedShip.position).add(dir.multiplyScalar(35));
-            if (stateRef.flightTargetPos.y < 5) stateRef.flightTargetPos.y = 5;
+            if (stateRef.lockedShip.userData?.isRealFlight) {
+                // Aircraft: fly to an overhead angle at a comfortable altitude.
+                // y=50 keeps the plane visible without diving to terrain level.
+                stateRef.flightTargetPos.set(
+                    stateRef.lockedShip.position.x,
+                    50,
+                    stateRef.lockedShip.position.z + 20
+                );
+            } else {
+                // Ships / satellites: keep existing approach-from-current-direction logic.
+                const dir = new THREE.Vector3()
+                    .subVectors(camera.position, stateRef.lockedShip.position).normalize();
+                stateRef.flightTargetPos
+                    .copy(stateRef.lockedShip.position).add(dir.multiplyScalar(35));
+                if (stateRef.flightTargetPos.y < 5) stateRef.flightTargetPos.y = 5;
+            }
             stateRef.isFlyingToTarget = true;
         }
     } else {
@@ -2438,4 +2675,66 @@ export function setupSectorSearch(camera, controls, stateRef) {
 
     // Initial render (empty query shows top cities)
     render();
+}
+
+// ── Fleet Intelligence Panel ──────────────────────────────────────────────────
+// Populates #fleet-intel every UPDATE_INTERVAL ms with live airline + vessel
+// counts drawn from window.aisShips (shared array set up by main.js).
+// No imports needed — reads global window refs like every other panel here.
+
+const _FI_INTERVAL = 5000; // ms between refreshes
+
+function _renderFleetIntelRows(containerEl, entries, maxCount) {
+    if (!containerEl) return;
+    containerEl.innerHTML = entries.map(([name, count]) => {
+        const pct = maxCount > 0 ? ((count / maxCount) * 100).toFixed(0) : 0;
+        return `<div class="fi-row">
+            <span class="fi-name">${name}</span>
+            <span class="fi-count">${count}</span>
+        </div>
+        <div class="fi-bar"><div class="fi-bar-fill" style="width:${pct}%"></div></div>`;
+    }).join('');
+}
+
+function _updateFleetIntel() {
+    const ships = window.aisShips || [];
+
+    // ── Air traffic ──────────────────────────────────────────────────────────
+    const aircraft = ships.filter(o => o.userData?.isRealFlight);
+    const airTotalEl = document.getElementById('fi-air-total');
+    if (airTotalEl) airTotalEl.textContent = `${aircraft.length} aircraft`;
+
+    const opCount = {};
+    aircraft.forEach(a => {
+        const op = a.userData.operator || (a.userData.displayName || '').slice(0, 3) || 'UNK';
+        opCount[op] = (opCount[op] || 0) + 1;
+    });
+    const topOps = Object.entries(opCount).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    _renderFleetIntelRows(
+        document.getElementById('fi-airlines'),
+        topOps,
+        topOps[0]?.[1] ?? 1
+    );
+
+    // ── Sea traffic ──────────────────────────────────────────────────────────
+    const vessels = ships.filter(o => o.userData?.isRealAIS);
+    const seaTotalEl = document.getElementById('fi-sea-total');
+    if (seaTotalEl) seaTotalEl.textContent = `${vessels.length} vessels`;
+
+    const typeCount = {};
+    vessels.forEach(v => {
+        const type = v.userData.class || 'OTHER';
+        typeCount[type] = (typeCount[type] || 0) + 1;
+    });
+    const topTypes = Object.entries(typeCount).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    _renderFleetIntelRows(
+        document.getElementById('fi-vessel-types'),
+        topTypes,
+        topTypes[0]?.[1] ?? 1
+    );
+}
+
+export function initFleetIntel() {
+    _updateFleetIntel();
+    setInterval(_updateFleetIntel, _FI_INTERVAL);
 }

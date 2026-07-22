@@ -1,10 +1,10 @@
 // terrainBuilder.js — Splat cloud, ocean floor mesh, contour shader, country borders
 import * as THREE from 'three';
 import {
-    MAP_WIDTH, MAP_HEIGHT, MAX_SPLAT_BUDGET, prng,
-    SPLAT_BRIGHTNESS, SPLAT_LAND_LIFT, SPLAT_LAND_GAMMA, SPLAT_SATURATION, SPLAT_HEMI_STRENGTH, SPLAT_BIOME_STRENGTH,
+    MAP_WIDTH, MAP_HEIGHT, prng,
+    SPLAT_BRIGHTNESS, SPLAT_LAND_LIFT, SPLAT_LAND_GAMMA, SPLAT_SATURATION, SPLAT_HEMI_STRENGTH, SPLAT_BIOME_STRENGTH, SPLAT_HILLSHADE,
     SPLAT_LAND_GRID, SPLAT_OCEAN_GRID,
-    SPLAT_FADE_START, SPLAT_FADE_END,
+    SPLAT_FADE_START, SPLAT_FADE_END, SPLAT_FADE_TILES_START, SPLAT_FADE_TILES_END,
     AQUARIUM_DEPTH,
     DAYNIGHT_TERRAIN,
     SPLAT_FX,
@@ -160,6 +160,10 @@ export function createHighFidelityPointCloud(scene) {
             // Saturation multiplier — >1 makes colours more vivid, 1.0 = no change.
             // Tune: window.splatCloud.material.uniforms.uSaturation.value = 1.5
             uSaturation:    { value: SPLAT_SATURATION },
+            // Cartographic hillshade strength (2026-07-13 map-artist mission 4).
+            // 0 = off. Fixed NW light, aspect-aware, time-of-day independent.
+            // Tune live: window.splatCloud.material.uniforms.uHillshade.value
+            uHillshade:     { value: SPLAT_HILLSHADE },
             uFade:          { value: 1.0 },  // crossfade LOD: 1=fully visible, 0=invisible
             uTilt:          { value: 0.0 },  // 0=top-down, 1=horizontal — drives oblique brightness boost
             // ── Hemisphere lighting — slope-direction dependent fill ──────────
@@ -285,9 +289,23 @@ export function createHighFidelityPointCloud(scene) {
                 // Raised from 3.0 to 4.5 so splats overlap more at close zoom and
                 // read as a continuous surface instead of discrete grainy dots.
                 float maxSize   = mix(4.5, 3.0, clamp(1.0 - dist / 80.0, 0.0, 1.0));
-                // uSplatScale: global coverage multiplier — >1 closes the gaps
-                // between points so terrain reads as continuous surface.
-                gl_PointSize    = clamp(perspSize, lodMin, maxSize) * uSplatScale;
+                // 2026-07-20: a tilt-gated point-size boost was tried here to close
+                // the "blue bleeding" gap and REVERTED the same session — turned out
+                // that report's real cause was the water plane occluding land (see
+                // waterManager.js / memory/decisions.md), not point density, so this
+                // never actually fixed anything and was just unverified extra risk.
+                // uSplatScale: coverage multiplier — >1 closes the gaps between
+                // points so distant terrain reads as a continuous surface. Applied
+                // DISTANCE-DEPENDENTLY (2026-07-18, retuned): the boost now stays OFF
+                // (points natural-sized = crisp) through close AND regional zoom, and
+                // only ramps in at the extreme whole-world distance where the grainy
+                // speckle actually appeared. So detail holds crisp as you pull back to
+                // a continental view, and only the full globe smooths out.
+                // 110→160 (2026-07-18): big dots blobbing at the hovering distance
+                // made land shapes look pixelated / lost. Keep points small (sharp
+                // shapes) until you're nearly at the whole-globe view.
+                float splatScaleD = mix(1.0, uSplatScale, clamp((dist - 160.0) / 70.0, 0.0, 1.0));
+                gl_PointSize    = clamp(perspSize, lodMin, maxSize) * splatScaleD;
                 gl_Position  = projectionMatrix * mvPos;
             }
         `,
@@ -299,6 +317,7 @@ export function createHighFidelityPointCloud(scene) {
             uniform float uLandLift;
             uniform float uLandGamma;
             uniform float uSaturation;
+            uniform float uHillshade;
             uniform float uFade;
             uniform float uTilt;
             uniform float uHemiStrength;
@@ -383,6 +402,20 @@ export function createHighFidelityPointCloud(scene) {
 
                 // Apply the non-directional AO factor — land only.
                 litColor *= mix(1.0, aoFactor, oceanMask);
+
+                // ── Cartographic hillshade (2026-07-13, map-artist mission 4) ──
+                // Fixed NW light (the relief-map convention), aspect-AWARE where
+                // aoFactor above is direction-blind: a west-facing and an
+                // east-facing slope of equal steepness previously rendered
+                // identically → mountains read flat. Deliberately NOT tied to
+                // the real sun: sun-shading was removed by design (see NdotL
+                // note) because it fought the baked colours by time of day. A
+                // fixed neutral light keeps relief carved 24/7. Flat ground
+                // (N.y=1 → dot≈0.707) maps to exactly 1.0 — plains unchanged.
+                vec3  hsDir    = normalize(vec3(-0.5, 0.707, -0.5));   // from NW, 45° alt
+                float hs       = clamp(dot(vWorldNormal, hsDir), 0.0, 1.0);
+                float hsFactor = clamp(1.0 + (hs - 0.707), 0.55, 1.30);
+                litColor *= mix(1.0, hsFactor, uHillshade * oceanMask);
 
                 // ── Hemisphere color tint ─────────────────────────────────────
                 // Multiply a subtle sky/ground tint into land faces based on
@@ -475,7 +508,15 @@ export function createHighFidelityPointCloud(scene) {
                 float iceRawLum = dot(litColor, vec3(0.299, 0.587, 0.114));
                 float adaptCeil = mix(0.97, 0.68,
                                       clamp((iceRawLum - 0.80) / 0.40, 0.0, 1.0));
-                landColor       = min(landColor, vec3(adaptCeil));
+                // HUE-PRESERVING ceiling (2026-07-13 map-artist mission 2): the
+                // old per-channel min() flattened every bright WARM pixel into
+                // khaki-grey — sand (0.98,0.80,0.42) clamped to (0.68,0.68,0.42),
+                // which is why the whole Sahara read as "missing data" grey no
+                // matter what the worker painted. Scaling by luminance keeps the
+                // anti-blowout behaviour (Antarctica still dims) without
+                // destroying hue.
+                float ceilLum   = dot(landColor, vec3(0.299, 0.587, 0.114));
+                landColor      *= min(1.0, adaptCeil / max(ceilLum, 1e-4));
                 // Saturation boost — mix away from luminance to restore vibrancy
                 // lost during the gamma lift (which pushes colours toward grey).
                 float landLum   = dot(landColor, vec3(0.299, 0.587, 0.114));
@@ -702,34 +743,34 @@ export function createSolidOceanFloor(scene) {
             // discrete colour break visible at 200 m.
             const d = Math.abs(hMeters);
             let r, g, b;
+            // "Deep stage" palette (2026-07-13 map-artist mission 3): same band
+            // structure ~25% deeper/darker so the ocean reads as a calm backdrop
+            // and the DATA (vessels/alerts, all cyan-family) is the brightest
+            // thing on screen. MUST match terrainWorker's ocean bands exactly.
             if (d < 200) {
-                // Shelf — pushed brighter (was 0.58 max blue, now 0.78). Reads
-                // as sunlit shallow water against deeper bands below.
+                // Shelf — still the brightest band, no longer electric.
                 const t = d / 200;
-                r = 0.06  - t * 0.030;   // 0.060 → 0.030
-                g = 0.32  - t * 0.160;   // 0.320 → 0.160
-                b = 0.78  - t * 0.230;   // 0.780 → 0.550
+                r = 0.050 - t * 0.025;   // 0.050 → 0.025
+                g = 0.250 - t * 0.130;   // 0.250 → 0.120
+                b = 0.600 - t * 0.180;   // 0.600 → 0.420
             } else if (d < 2000) {
-                // Slope — continental shelf break to abyssal plain transition.
-                // Endpoints match shelf (top) and abyss (bottom) for continuity.
+                // Slope — endpoints match shelf (top) and abyss (bottom).
                 const t = (d - 200) / 1800;
-                r = 0.030 - t * 0.015;   // 0.030 → 0.015
-                g = 0.160 - t * 0.100;   // 0.160 → 0.060
-                b = 0.550 - t * 0.200;   // 0.550 → 0.350
+                r = 0.025 - t * 0.012;   // 0.025 → 0.013
+                g = 0.120 - t * 0.070;   // 0.120 → 0.050
+                b = 0.420 - t * 0.140;   // 0.420 → 0.280
             } else if (d < 6000) {
-                // Abyss — deep blue-indigo. Was max blue 0.18, now 0.10 at 6km.
+                // Abyss — deep blue-indigo.
                 const t = (d - 2000) / 4000;
-                r = 0.015 - t * 0.008;   // 0.015 → 0.007
-                g = 0.060 - t * 0.035;   // 0.060 → 0.025
-                b = 0.350 - t * 0.180;   // 0.350 → 0.170
+                r = 0.013 - t * 0.007;   // 0.013 → 0.006
+                g = 0.050 - t * 0.028;   // 0.050 → 0.022
+                b = 0.280 - t * 0.130;   // 0.280 → 0.150
             } else {
-                // Hadal — Mariana / Tonga / Kuril trenches. Pushed darker than
-                // before (0.180→0.100 was the old end; now 0.170→0.055) so
-                // trenches read as visibly different from regular abyss.
+                // Hadal — trenches visibly darker than abyss.
                 const t = Math.min(1.0, (d - 6000) / 4000);
-                r = 0.007 - t * 0.003;   // 0.007 → 0.004
-                g = 0.025 - t * 0.013;   // 0.025 → 0.012
-                b = 0.170 - t * 0.115;   // 0.170 → 0.055
+                r = 0.006 - t * 0.003;   // 0.006 → 0.003
+                g = 0.022 - t * 0.011;   // 0.022 → 0.011
+                b = 0.150 - t * 0.100;   // 0.150 → 0.050
             }
             colors.push(r, g, b);
         } else {
@@ -748,7 +789,9 @@ export function createSolidOceanFloor(scene) {
         name: 'OceanFloor',
         vertexColors: true, roughness: 0.72, metalness: 0.12, flatShading: false,
         emissive:          new THREE.Color(0x002244),
-        emissiveIntensity: 0.70,
+        // 0.70 → 0.45 (2026-07-13 mission 3): the floor's blue self-glow was a
+        // major source of "the ocean competes with the data".
+        emissiveIntensity: 0.45,
         // alphaTest required so the land-discard in onBeforeCompile doesn't
         // leave ghost depth writes that occlude the point cloud behind them.
         alphaTest: 0.01,
@@ -799,12 +842,13 @@ export function createSolidOceanFloor(scene) {
                     float majorEdge = min(majorMod, 2500.0 - majorMod);
                     float isMajor   = 1.0 - smoothstep(0.0, width * 2.0, majorEdge);
 
-                    vec3  minorCol   = vec3(0.08, 0.42, 0.72);
-                    vec3  majorCol   = vec3(0.22, 0.72, 0.95);  // brighter
-                    // Minor halved (0.30→0.15) so 500m grid stops dominating
-                    // flat abyssal plains; major lifted (0.58→0.72) so the
-                    // 2500m landmarks read sharply against quieter background.
-                    float finalAlpha = max(isMinor * 0.15, isMajor * 0.72);
+                    // Calmed (2026-07-13 mission 3): the electric-cyan majors at
+                    // 0.72 alpha were the single loudest thing in the ocean —
+                    // same family as the UI accent and vessel colors, pure
+                    // competition. Now steel-blue reference lines, not data.
+                    vec3  minorCol   = vec3(0.05, 0.26, 0.46);
+                    vec3  majorCol   = vec3(0.14, 0.46, 0.64);
+                    float finalAlpha = max(isMinor * 0.10, isMajor * 0.38);
                     gl_FragColor.rgb = mix(gl_FragColor.rgb,
                                           mix(minorCol, majorCol, isMajor),
                                           finalAlpha);
@@ -869,37 +913,121 @@ export function createCountryBorders(scene, worldBordersGeoJSON) {
     return bordersGroup;
 }
 
+// DRAPED borders (2026-07-13, deep-dive era). Three fixes over the old version,
+// all invisible from 2,000 km and glaring from 20:
+//   1. The fixed +0.4 lift (~50 km!) floated borders above the terrain → 0.015.
+//   2. Elevation used hM/1000 while the terrain worker uses an adaptive 650→1100
+//      divisor — borders sat at a DIFFERENT height model than the ground.
+//      Now matches the worker's formula exactly.
+//   3. Natural Earth vertices are far apart; straight segments bridged over
+//      valleys. Long segments are subdivided and terrain-resampled.
+// Exported (2026-07-20) as the general-purpose "real elevation → rendered
+// scene Y" helper — was border-only (_borderGroundY), but any UI element that
+// needs to sit ON the actual terrain surface (not a flat helper plane) needs
+// this exact formula, matching the worker's build-time math. First consumer
+// outside borders: uiController.js's mouse-hover ground reticle.
+export function getSceneGroundY(x, z) {
+    const hM   = getTrueElevation(x, z);
+    const dist = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
+    const curveY = -Math.pow(dist, 2) * 20.0;
+    if (hM < 0) return (hM / 600.0) * TERRAIN_VSCALE_OCEAN + curveY;
+    const highBlend = Math.min(1.0, Math.max(0.0, (hM - 2000.0) / 2000.0));
+    const exag      = 650.0 + highBlend * 450.0;
+    return (hM / exag) * TERRAIN_VSCALE_LAND + curveY;
+}
+const _borderGroundY = getSceneGroundY;   // internal alias, call sites below unchanged
+
+// ── Redrape-to-real-mesh pass (2026-07-21) ──────────────────────────────────
+// createCountryBorders() runs at boot BEFORE the continent mesh worker has
+// populated real vertex data (~800ms cold start), so every border vertex's Y
+// is necessarily the analytic getSceneGroundY() formula, not a measured
+// height. That formula is a global approximation (adaptive-divisor exaggeration
+// curve) and can drift from the real DEM by enough, on complex terrain, that
+// lines visibly float or sink relative to whatever's actually rendered —
+// reported by Jamal as "country lines floating above the terrain."
+//
+// Once the continent mesh's 1537x1537 real vertex grid is ready
+// (terrainHeightSampler.isReady()), call this once to re-snap every existing
+// border-line vertex to that measured height in place — same X/Z, corrected Y,
+// no rebuild of the line topology. Cheap (one geometry walk, runs once) and
+// strictly more accurate than the boot-time formula since it reads real
+// sampled terrain instead of approximating it.
+//
+// NOTE: the continent mesh's grid is still coarser than the Cesium DEM tiles
+// streamed in at close/oblique zoom (tileStreamManager.js), so at extreme
+// close-up on very steep local relief a few metres of residual drift can
+// remain — that would need a live tile-aware sampler (borders re-draped
+// per-frame near the camera, mirroring how ports/chokepoints already do
+// live lookups) as a follow-up if this pass isn't enough on its own.
+export function redrapeToTerrainHeight(group, heightFn) {
+    if (!group) return;
+    const LIFT = 0.015;   // must match _drawBorderRing's LIFT
+    let vertsUpdated = 0;
+    group.traverse(obj => {
+        if (!obj.isLine || !obj.geometry) return;
+        const pos = obj.geometry.attributes.position;
+        if (!pos) return;
+        for (let i = 0; i < pos.count; i++) {
+            const x = pos.getX(i);
+            const z = pos.getZ(i);
+            const y = heightFn(x, z);
+            if (Number.isFinite(y)) {
+                pos.setY(i, y + LIFT);
+                vertsUpdated++;
+            }
+        }
+        pos.needsUpdate = true;
+        obj.geometry.computeBoundingSphere();
+    });
+    console.info(`[Borders] Redraped ${vertsUpdated.toLocaleString()} vertices to real terrain mesh height`);
+}
+// Scratch vector for updatePointCloud()'s per-frame tilt calc — avoids a
+// `new THREE.Vector3()` allocation every frame (CLAUDE.md perf rule).
+const _tiltLookDir = new THREE.Vector3();
+
 function _drawBorderRing(ring, material, bordersGroup) {
     let points = [];
+    const LIFT = 0.015;                 // hug the ground, stay above z-fight
+    const MAX_SEG = 0.6;                // scene units before subdividing
 
-    ring.forEach(coord => {
-        const lon    = coord[0];
-        const lat    = coord[1];
+    const toXZ = (lon, lat) => {
         const x      = (lon / 180.0) * (MAP_WIDTH / 2.0);
         const latRad = lat * (Math.PI / 180.0);
         const mercY  = Math.log(Math.tan((Math.PI / 4.0) + (latRad / 2.0)));
         let   z      = -(mercY / Math.PI) * (MAP_HEIGHT / 2.0);
-
         z = Math.max(-MAP_HEIGHT / 2, Math.min(MAP_HEIGHT / 2, z));
+        return [x, z];
+    };
 
-        const hMeters = getTrueElevation(x, z);
-        const isOcean = hMeters < 0;
-        const dist    = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
-        const curveY  = -Math.pow(dist, 2) * 20.0;
-        const finalY  = isOcean ? (hMeters / 600.0) * TERRAIN_VSCALE_OCEAN
-                                : (hMeters / 1000.0) * TERRAIN_VSCALE_LAND;
+    let prev = null;
+    ring.forEach(coord => {
+        const [x, z] = toXZ(coord[0], coord[1]);
 
         // Break line at anti-meridian jumps
-        if (points.length > 0 && Math.abs(x - points[points.length - 1].x) > MAP_WIDTH * 0.5) {
+        if (prev && Math.abs(x - prev[0]) > MAP_WIDTH * 0.5) {
             if (points.length > 1) {
                 bordersGroup.add(new THREE.Line(
                     new THREE.BufferGeometry().setFromPoints(points), material
                 ));
             }
             points = [];
+            prev = null;
         }
 
-        points.push(new THREE.Vector3(x, finalY + curveY + 0.4, z));
+        if (prev) {
+            // Subdivide long segments so the line follows the terrain
+            const dx = x - prev[0], dz = z - prev[1];
+            const len = Math.sqrt(dx * dx + dz * dz);
+            const steps = Math.min(24, Math.floor(len / MAX_SEG));
+            for (let s = 1; s <= steps; s++) {
+                const t  = s / (steps + 1);
+                const sx = prev[0] + dx * t, sz = prev[1] + dz * t;
+                points.push(new THREE.Vector3(sx, _borderGroundY(sx, sz) + LIFT, sz));
+            }
+        }
+
+        points.push(new THREE.Vector3(x, _borderGroundY(x, z) + LIFT, z));
+        prev = [x, z];
     });
 
     if (points.length > 1) {
@@ -1135,19 +1263,53 @@ export function createOceanBasinLabels(scene) {
 // Point cloud stays fully visible until close zoom, then crossfades with mesh.
 //   camera.y > 25  → uFade = 1.0  (point cloud fully visible)
 //   camera.y 25→10 → uFade 1→0    (fades as continent mesh fades in)
-export function updatePointCloud(camera) {
+export function updatePointCloud(camera, coverage = 0) {
     if (!_splatCloud) return;
-    const fade = THREE.MathUtils.clamp(
-        (camera.position.y - SPLAT_FADE_END) / (SPLAT_FADE_START - SPLAT_FADE_END), 0, 1
-    );
-    _splatCloud.material.uniforms.uFade.value = fade;
-    _splatCloud.visible = fade > 0;
-
-    // Compute tilt: dot of camera look direction with world up (0,1,0).
-    // When looking straight down: dot ≈ -1 → tilt = 0 (no boost needed).
-    // When looking horizontally:  dot ≈  0 → tilt = 1 (full boost applied).
-    const lookDir = new THREE.Vector3();
+    // Base cloud (the global fallback floor) fades out ONLY where we are close
+    // AND real streamed-tile coverage has actually arrived. `coverage` is a 0..1
+    // fraction from tileStream.coverageFraction(). Slow loads / gaps (low
+    // coverage) keep the base as a backstop → no black voids while tiles stream
+    // in; once tiles solidly cover, the base clears so it stops cluttering the
+    // detail. Replaces the old binary look-at check that dropped the whole base
+    // the instant one tile loaded (2026-07-15).
+    // Camera tilt: 0 = looking straight DOWN, 1 = looking horizontally/obliquely.
+    const lookDir = _tiltLookDir.set(0, 0, 0);
     camera.getWorldDirection(lookDir);
     const tilt = THREE.MathUtils.clamp(1.0 + lookDir.y, 0, 1);
     _splatCloud.material.uniforms.uTilt.value = tilt;
+
+    const closeness = THREE.MathUtils.clamp(
+        (SPLAT_FADE_TILES_START - camera.position.y) /
+        (SPLAT_FADE_TILES_START - SPLAT_FADE_TILES_END), 0, 1
+    );
+    // TILT-AWARE base fade (2026-07-18) — the consistency fix. The base only clears
+    // when you're looking straight DOWN and close, where the tiles genuinely cover
+    // the whole small footprint. The moment you tilt to an oblique angle, the far
+    // part of the view is effectively much higher altitude (tiles can't reach it),
+    // so the base is HELD as a full backstop — no black voids, no floating tile
+    // patches. (1 - tilt): 1 when top-down (allow fade), 0 when oblique (hold base).
+    // This is what stops the layers "competing" as the camera angle changes.
+    //
+    // Tilt FLOOR (2026-07-21, "random splat dots floating around" — reported live
+    // from a close, oblique, ground-level view where the tile terrain was clearly
+    // loaded solid underfoot). The old (1.0 - tilt) term goes to EXACTLY 0 at
+    // tilt=1 (fully horizontal), which zeroes the whole fade expression — meaning
+    // the base cloud held at FULL opacity for ANY oblique angle, no matter how
+    // well `coverage` says the near-field ground is actually covered. Oblique
+    // framing is the common case (nobody flies perfectly nadir), so in practice
+    // this made the base cloud's ambient dots visible almost everywhere close-up,
+    // floating over perfectly good tile detail — coverage was already doing the
+    // real job of protecting genuinely-uncovered ground (far horizon at oblique
+    // angles has low measured coverage on its own), so gating an ADDITIONAL full
+    // zero on top of it was double-protection that cost visual quality for no
+    // safety benefit. TILT_FADE_FLOOR keeps SOME extra caution at full oblique
+    // tilt (never trust coverage AS much as top-down) without disabling fading
+    // entirely — tune live: window.splatCloud (search TILT_FADE_FLOOR to relocate).
+    const TILT_FADE_FLOOR = 0.45;   // fade capacity retained at tilt=1, vs 0 before
+    const tiltFactor = THREE.MathUtils.lerp(1.0, TILT_FADE_FLOOR, tilt);
+    const fade = 1 - closeness * tiltFactor * THREE.MathUtils.clamp(coverage, 0, 1);
+    _splatCloud.material.uniforms.uFade.value = fade;
+    // Cull only when the base is genuinely near-gone (top-down + close, tiles
+    // covering). At any oblique angle fade≈1, so the base stays as the backstop.
+    _splatCloud.visible = fade > 0.2;
 }

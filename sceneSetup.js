@@ -21,6 +21,10 @@ export function initScene() {
 
     const clock = new THREE.Clock();
 
+    // near stays at 1: the post-processing chain (fog/bokeh/tilt-shift) reads
+    // depth assuming this near plane — lowering it to 0.05 fogged the whole
+    // world to black (2026-07-12). City-scale zoom needs a coordinated
+    // near-plane + post-chain depth pass; see DEMO-PUNCHLIST.
     const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 3000);
     camera.position.set(0, 250, 400);
 
@@ -52,7 +56,18 @@ export function initControls(camera, renderer, stateRef) {
     // Camera Feel control in Settings (persisted).
     controls.dampingFactor = (() => { try { return parseFloat(localStorage.getItem('vg1_cam_damping')) || 0.12; } catch (_) { return 0.12; } })();
     controls.maxDistance = 550;
-    controls.minDistance = 15;
+    // minDistance 2 → 0.08 (2026-07-13 near-plane surgery): the near plane is
+    // now altitude-dynamic in main.js (near=1 up high — tuned look unchanged;
+    // near→0.02 down low), so the camera may descend to a ~15 km-wide view.
+    // Post-chain audit: fog/clouds/tilt-shift are depth-free; the optional
+    // bokeh pass gets nearClip synced per-frame. Terrain collision clamp in
+    // main.js keeps the camera out of the rock.
+    // ZOOM-IN CAP (2026-07-18): locked to the tile-stream's z9 satellite level —
+    // we don't currently need to dive closer than this, and z9 is the deepest LOD
+    // (z10-z12 disabled in tileStreamManager). Raising minDistance from 0.08 to 2.3
+    // stops the camera descending past the height where z9 imagery fills the view.
+    // To re-enable deep dives later: restore this to ~0.08 and re-enable z10-z12.
+    controls.minDistance = 2.3;
     // Polar angle limits — prevent the two failure modes:
     //   minPolarAngle > 0  → can't go fully top-down (3D depth cues would vanish)
     //   maxPolarAngle < π/2 → can't dip to horizon (terrain occludes vessels at close zoom)

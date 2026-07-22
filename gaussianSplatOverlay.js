@@ -46,7 +46,13 @@
 //       lon:           4.4792,
 //       path:        './splats/rotterdam.splat',
 //       sceneScale:    0.003,      // tune per capture — see above
-//       yOffset:       0.5,        // lift above terrain surface (scene units)
+//       yOffset:       0.5,        // lift ABOVE THE REAL TERRAIN SURFACE at
+//                                   // (lat,lon) — not an absolute scene Y. The
+//                                   // capture's actual Y is
+//                                   // getSceneGroundY(cx, cz) + yOffset, so it
+//                                   // sits on the ground anywhere on the globe,
+//                                   // not just near scene-Y=0 (2026-07-21 fix —
+//                                   // see _loadOverlay).
 //       rotation:    [0, 0, 0, 1], // quaternion [x,y,z,w] — tune per capture
 //       showCamY:     25,          // start loading when cam Y < this
 //       fullCamY:     10,          // fully visible when cam Y < this
@@ -59,6 +65,7 @@
 import * as THREE from 'three';
 import * as GaussianSplats3D from './lib/gaussian-splats-3d.module.js';
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { getSceneGroundY } from './terrainBuilder.js';
 
 const DEG2RAD = Math.PI / 180;
 
@@ -76,7 +83,7 @@ function lonLatToXZ(lon, lat) {
 
 const OVERLAY_DEFAULTS = {
     sceneScale:   0.003,      // scene units per metre of capture (tune per scene)
-    yOffset:      0.5,        // scene units above terrain elevation
+    yOffset:      0.5,        // scene units above REAL terrain elevation at (lat,lon)
     rotation:     [0, 0, 0, 1], // identity quaternion
     showCamY:     25,
     fullCamY:     10,
@@ -152,7 +159,39 @@ export class GaussianSplatOverlayManager {
                     entry.visible        = shouldShow;
                 }
             }
+
+            // ── Drive the splat sort every frame (2026-07-18 render fix) ──────
+            // In this library build the DropInViewer's callback-mesh onBeforeRender
+            // is a no-op, so viewer.update() was never called: the sort never ran,
+            // the splat mesh's drawRange stayed 0, and nothing rendered even though
+            // the mesh was a live child of the scene. Driving update() here runs
+            // the (CPU, transferable-buffer) sort → populates drawRange → the mesh
+            // then draws normally through the composer's RenderPass.
+            if (entry.loaded && entry.visible && entry.viewer && entry.viewer.viewer) {
+                try { entry.viewer.viewer.update(this._renderer, camera); } catch (_) { /* sort not ready */ }
+            }
         }
+    }
+
+    // 0..1 — how strongly the strongest loaded capture "owns" the current view.
+    // 0 = none in range; 1 = a loaded capture is fully in view (camera at/below
+    // its fullCamY and near its centre). The layer coordinator uses this to fade
+    // the point terrain out from under a photoreal capture (2026-07-15).
+    capturePresence(camera) {
+        let best = 0;
+        const camY = camera.position.y;
+        for (const e of this._overlays) {
+            if (!e.loaded || !e.viewer) continue;
+            const dx = camera.position.x - e.cx;
+            const dz = camera.position.z - e.cz;
+            const hDist = Math.hypot(dx, dz);
+            const { showCamY, fullCamY, showHorizDist } = e.cfg;
+            if (camY >= showCamY || hDist >= showHorizDist) continue;
+            const aRamp = THREE.MathUtils.clamp((showCamY - camY) / (showCamY - fullCamY), 0, 1);
+            const hRamp = THREE.MathUtils.clamp(1 - hDist / showHorizDist, 0, 1);
+            best = Math.max(best, aRamp * hRamp);
+        }
+        return best;
     }
 
     dispose() {
@@ -178,16 +217,37 @@ export class GaussianSplatOverlayManager {
         try {
             // DropInViewer extends THREE.Group — can be added to any scene
             const viewer = new GaussianSplats3D.DropInViewer({
-                gpuAcceleratedSort:          true,
+                // CPU sort (2026-07-18): the GPU sort needs a live render-pass
+                // context that our externally-driven update() can't guarantee; the
+                // CPU worker sorts via transferable buffers and reliably populates
+                // the splat draw range in this non-cross-origin-isolated app.
+                gpuAcceleratedSort:          false,
                 halfPrecisionCovariances:    true,   // saves GPU memory
                 dynamicScene:                false,  // static capture
                 logLevel:                    GaussianSplats3D.LogLevel.None,
+                // CRITICAL (2026-07-15): the dev server isn't cross-origin isolated
+                // (crossOriginIsolated=false, no SharedArrayBuffer), so the default
+                // shared-memory workers HANG mid-load — captures loaded forever and
+                // never appeared. Force transferable ArrayBuffers so .spz/.ksplat/
+                // .ply all load without COOP/COEP headers. This is THE fix that made
+                // the capture actually load.
+                sharedMemoryForWorkers:      false,
             });
 
-            // Position and scale the group at the geographic anchor point
-            // Y = 0 puts base of capture at the scene origin for this XZ;
-            // yOffset lifts it above the terrain splat layer.
-            viewer.position.set(cx, cfg.yOffset, cz);
+            // Position and scale the group at the geographic anchor point.
+            // BUG FIX (2026-07-21): this used to be `viewer.position.set(cx,
+            // cfg.yOffset, cz)` — yOffset (0.3-0.5 scene units) treated as an
+            // ABSOLUTE scene Y, i.e. "near sea level at the map's flat origin."
+            // Real terrain Y varies with elevation AND with the map's paraboloid
+            // curvature term in getSceneGroundY (dist^2 * 20 falloff toward the
+            // edges), so anywhere the ground wasn't already ~0, the capture spawned
+            // detached from the visible surface — exactly the "floating splats
+            // with no purpose" Jamal reported. getSceneGroundY(cx, cz) is the same
+            // drape formula country borders and the hover reticle use to sit
+            // correctly on the real ground; yOffset is now a small lift ABOVE that,
+            // like every other terrain-anchored overlay in this codebase.
+            const groundY = getSceneGroundY(cx, cz);
+            viewer.position.set(cx, groundY + cfg.yOffset, cz);
             viewer.scale.setScalar(cfg.sceneScale);
 
             // Apply per-capture rotation (compensates for orientation drift

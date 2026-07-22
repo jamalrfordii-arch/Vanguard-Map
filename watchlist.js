@@ -159,6 +159,22 @@ export function initWatchlist(aisManager) {
         isWatched(mmsi)  { return _watched.has(String(mmsi)); },
         getAll()         { return [..._watched]; },
         getNotes(mmsi)   { return _notes[String(mmsi)]  || ''; },
+        // Programmatic note-setter (2026-07-21) — the textarea's `input`
+        // listener above was the only way to write a note before this; that's
+        // fine for a human typing, but discoveryManager's flagForNextShift
+        // tool needs to leave a note on a vessel that may not even have its
+        // card open. Appends with a timestamp by default so an AI-left flag
+        // never silently overwrites something a human already wrote — pass
+        // { append: false } to replace instead.
+        setNote(mmsi, note, { append = true } = {}) {
+            const m = String(mmsi);
+            if (!note) return;
+            const stamped = `[${new Date().toLocaleString()}] ${note}`;
+            const existing = _notes[m] || '';
+            _notes[m] = (append && existing) ? `${existing}\n${stamped}` : stamped;
+            _saveNotes(_notes);
+            if (_currentMmsi === m && notesEl) notesEl.value = _notes[m];
+        },
         getAlerts(mmsi)  { return _alerts[String(mmsi)] || _defaultAlerts(); },
         // Returns the best known display name for an MMSI (live > cached > null)
         getCachedName(mmsi) {

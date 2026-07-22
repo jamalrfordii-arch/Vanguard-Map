@@ -218,10 +218,131 @@ export const SHIP_CLASSES = [
     { type: "OTHER",     hex: "#90a4ae", builder: shapeBuilders.OTHER },
 ];
 
+// ── Window stripe helper ───────────────────────────────────────────────────────
+// Two thin dark panels on the upper sides of the fuselage representing the
+// passenger window strip. Positioned at ~45° above the equator so they're
+// visible from both above and from an oblique tactical camera angle.
+// `radius` = fuselage top radius, `len` = cabin section length.
+// Returns [portStripe, stbdStripe] — both non-body parts (stay dark, no airline tint).
+function _windowStripes(radius, len) {
+    const mat = new THREE.MeshStandardMaterial({ color: 0x1a2538, roughness: 0.8, metalness: 0.1 });
+    const geo = new THREE.BoxGeometry(0.04, 0.07, len);
+    const xOff = radius * 0.86;
+    const yOff = radius * 0.35;
+    const sL = new THREE.Mesh(geo, mat);
+    sL.position.set(-xOff, yOff, -0.2); // -0.2 Z shifts stripe aft of cockpit
+    const sR = new THREE.Mesh(geo, mat);
+    sR.position.set( xOff, yOff, -0.2);
+    return [sL, sR];
+}
+
+// ── Nose-window helper ────────────────────────────────────────────────────────
+// Two angled windshield panels flanking the cockpit dome. glassMat is the
+// caller's existing glass material so colour stays consistent per builder.
+// `w/h` = panel width/height, `z` = forward position, `yOff/xOff` = mount offset.
+// Both panels are NOT body parts — they stay glass-dark regardless of airline tint.
+function _noseWindows(glassMat, w, h, z, yOff, xOff) {
+    const geo = new THREE.BoxGeometry(w, h, 0.025);
+    const wL = new THREE.Mesh(geo, glassMat);
+    wL.position.set(-xOff, yOff, z);
+    wL.rotation.y =  0.30;   // angled inward toward centreline
+    wL.rotation.x = -0.22;   // raked back (windshield angle)
+    const wR = new THREE.Mesh(geo, glassMat);
+    wR.position.set( xOff, yOff, z);
+    wR.rotation.y = -0.30;
+    wR.rotation.x = -0.22;
+    return [wL, wR];
+}
+
+// ── Belly-strobe helper ───────────────────────────────────────────────────────
+// Adds a white anti-collision strobe on the fuselage underside. Named and cached
+// on group.userData so blink logic can toggle it the same way _tailStrobe works.
+function _addBellyStrobe(group, y, z) {
+    const strobe = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07, 6, 4),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+    );
+    strobe.position.set(0, y, z);
+    strobe.name = 'strobe_belly';
+    group.add(strobe);
+    group.userData._bellyStrobe = strobe;
+}
+
+// ── Engine pylon helper ───────────────────────────────────────────────────────
+// Flat strut connecting wing underside to engine nacelle top.
+//   x         — lateral position (same X as engine)
+//   nacTopY   — top of nacelle = engineCenterY + nacelle_radius
+//   wingBotY  — bottom of wing = wingCenterY - wing_half_thickness
+//   z         — fore-aft position (engine Z)
+//   mat       — body material (gets airline tint via isBodyPart)
+function _pylon(x, nacTopY, wingBotY, z, mat) {
+    const h  = Math.max(wingBotY - nacTopY, 0.02);
+    const cy = (nacTopY + wingBotY) / 2;
+    const m  = new THREE.Mesh(new THREE.BoxGeometry(0.055, h, 0.20), mat);
+    m.position.set(x, cy, z);
+    return m;
+}
+
+// ── Boeing-style smooth nose helper ──────────────────────────────────────────
+// Replaces ConeGeometry nose with a LatheGeometry profile: rounded tip →
+// gradual shoulder curve matching the fuselage radius.
+//   baseR  — fuselage radius (matches top radius of adjacent CylinderGeometry)
+//   length — overall nose cone length (same value used in ConeGeometry height)
+// Position the returned mesh at the same z as the old ConeGeometry mesh.
+function _smoothNose(baseR, length, mat, segs = 12) {
+    const h = length / 2;
+    const pts = [
+        new THREE.Vector2(0.000,          h),           // closed tip
+        new THREE.Vector2(baseR * 0.14,   h * 0.68),    // early sharp taper
+        new THREE.Vector2(baseR * 0.54,   h * 0.22),    // mid-belly curve
+        new THREE.Vector2(baseR,         -h),            // base → joins fuselage
+    ];
+    const m = new THREE.Mesh(new THREE.LatheGeometry(pts, segs), mat);
+    m.rotation.x = Math.PI / 2;
+    return m;
+}
+
+// ── Wing geometry helper ───────────────────────────────────────────────────────
+// Creates a trapezoidal wing panel: wider chord at root, narrower at tip.
+// Root is at local +X, tip at local -X. Pass isRight=true for the right wing —
+// that reverses face winding so normals point outward on both sides.
+// Caller places the mesh at X = ∓(span/2) and applies sweep via rotation.y.
+function _taperedWingGeo(span, thickness, chordRoot, chordTip, isRight = false) {
+    const hw = span / 2, ht = thickness / 2;
+    const cr = chordRoot / 2, ct = chordTip / 2;
+    const [rX, tX] = isRight ? [-hw, hw] : [hw, -hw]; // root X, tip X in local space
+
+    const v = new Float32Array([
+        // bottom (y = -ht)
+        tX, -ht, -ct,  // 0 tip-leading
+        tX, -ht,  ct,  // 1 tip-trailing
+        rX, -ht,  cr,  // 2 root-trailing
+        rX, -ht, -cr,  // 3 root-leading
+        // top (y = +ht)
+        tX,  ht, -ct,  // 4 tip-leading
+        tX,  ht,  ct,  // 5 tip-trailing
+        rX,  ht,  cr,  // 6 root-trailing
+        rX,  ht, -cr,  // 7 root-leading
+    ]);
+
+    // CCW winding = outward normal. Right wing mirrors X → all face windings reverse.
+    /* eslint-disable no-multi-spaces */
+    const idx = isRight
+        ? [0,1,2, 0,2,3,  4,6,5, 4,7,6,  3,6,7, 3,2,6,  0,4,5, 0,5,1,  0,7,3, 0,4,7,  1,6,2, 1,5,6]
+        : [0,2,1, 0,3,2,  4,5,6, 4,6,7,  3,7,6, 3,6,2,  0,5,4, 0,1,5,  0,3,7, 0,7,4,  1,2,6, 1,6,5];
+    /* eslint-enable no-multi-spaces */
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(v, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    return geo;
+}
+
 // ── AIRLINER shape (real flight data) ─────────────────────────────────────────
 function buildAirliner() {
     const group   = new THREE.Group();
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xdde8f0, roughness: 0.3, metalness: 0.55 });
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.3, metalness: 0.55, emissive: 0xffffff, emissiveIntensity: 0.14 }); // base white — airline instance colour multiplies in; emissive ensures planes pop against bright terrain
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x334455, roughness: 0.5, metalness: 0.4 });
     const glassMat= new THREE.MeshStandardMaterial({ color: 0x99bbdd, roughness: 0.1, metalness: 0.8, transparent: true, opacity: 0.7 });
 
@@ -229,48 +350,74 @@ function buildAirliner() {
     const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.17, 4.8, 12), bodyMat);
     fuselage.rotation.x = Math.PI / 2;
 
-    // Nose cone
-    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.9, 12), bodyMat);
-    nose.rotation.x = Math.PI / 2;
-    nose.position.z = 2.85;
+    // Nose — Boeing-style smooth curve (LatheGeometry) instead of sharp cone
+    const nose = _smoothNose(0.22, 0.60, bodyMat);
+    nose.position.z = 2.70;   // fuselage end (2.4) + half nose (0.30)
 
     // Cockpit windows
     const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), glassMat);
-    cockpit.position.set(0, 0.16, 2.3);
+    cockpit.position.set(0, 0.16, 2.1);
 
-    // Main swept wings
-    const wingL = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.06, 0.9), bodyMat);
-    wingL.position.set(-1.6, -0.06, 0.3);
+    // Nose windows — L/R windshield panels flanking cockpit dome
+    const [nwL, nwR] = _noseWindows(glassMat, 0.14, 0.08, 2.18, 0.08, 0.09);
+
+    // Main swept wings — tapered (root 1.0, tip 0.40), dihedral +5.6°
+    const wingL = new THREE.Mesh(_taperedWingGeo(3.2, 0.06, 1.0, 0.40, false), bodyMat);
+    wingL.position.set(-1.6, 0.097, 0.1);
     wingL.rotation.y =  Math.PI / 9;
+    wingL.rotation.z = -Math.PI / 32;
 
-    const wingR = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.06, 0.9), bodyMat);
-    wingR.position.set( 1.6, -0.06, 0.3);
+    const wingR = new THREE.Mesh(_taperedWingGeo(3.2, 0.06, 1.0, 0.40, true), bodyMat);
+    wingR.position.set( 1.6, 0.097, 0.1);
     wingR.rotation.y = -Math.PI / 9;
+    wingR.rotation.z =  Math.PI / 32;
 
-    // Winglets
+    // Winglets — placed at actual swept+dihedralled tip position
     const wlL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.42, 0.28), bodyMat);
-    wlL.position.set(-3.15, 0.18, 0.1);
+    wlL.position.set(-3.10, 0.24, 0.65);
     const wlR = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.42, 0.28), bodyMat);
-    wlR.position.set( 3.15, 0.18, 0.1);
+    wlR.position.set( 3.10, 0.24, 0.65);
 
-    // Horizontal stabiliser
-    const stabH = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.05, 0.5), bodyMat);
-    stabH.position.set(0, 0.05, -2.2);
-    stabH.rotation.y = Math.PI / 14;
+    // Horizontal stabiliser — split into L/R halves so each sweeps symmetrically.
+    // A single mesh rotated around Y makes the whole stab yaw (crooked); two halves
+    // with mirrored rotations produce the correct symmetric swept-back look.
+    const stabHL = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.05, 0.48), bodyMat);
+    stabHL.position.set(-0.475, 0.04, -2.2); stabHL.rotation.y =  Math.PI / 9;
+    const stabHR = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.05, 0.48), bodyMat);
+    stabHR.position.set( 0.475, 0.04, -2.2); stabHR.rotation.y = -Math.PI / 9;
 
-    // Vertical stabiliser
-    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.9, 0.7), bodyMat);
+    // Vertical stabiliser — slightly wider for readability at map zoom
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.9, 0.7), bodyMat);
     stabV.position.set(0, 0.5, -2.1);
 
-    // Engines under wings (x2)
+    // Engines under wings (x2) — nacR=0.17, top = -0.28+0.17=-0.11
+    // wing bottom = 0.097-0.03=0.067 → pylon height ≈ 0.177
     const engGeo = new THREE.CylinderGeometry(0.17, 0.14, 0.95, 10);
     const engL = new THREE.Mesh(engGeo, darkMat);
     engL.rotation.x = Math.PI / 2;
-    engL.position.set(-1.25, -0.28, 0.35);
+    engL.position.set(-1.25, -0.28, 0.15);
 
     const engR = new THREE.Mesh(engGeo, darkMat);
     engR.rotation.x = Math.PI / 2;
-    engR.position.set( 1.25, -0.28, 0.35);
+    engR.position.set( 1.25, -0.28, 0.15);
+
+    // Inlet faces — dark discs at front of each nacelle (z + 0.475)
+    const inletMat = new THREE.MeshStandardMaterial({ color: 0x080c10, roughness: 0.9, metalness: 0.1 });
+    const inletL = new THREE.Mesh(new THREE.CircleGeometry(0.148, 10), inletMat);
+    inletL.position.set(-1.25, -0.28, 0.625);
+    const inletR = new THREE.Mesh(new THREE.CircleGeometry(0.148, 10), inletMat);
+    inletR.position.set( 1.25, -0.28, 0.625);
+
+    // Intake lip ring at nacelle mouth
+    const lipMat = new THREE.MeshStandardMaterial({ color: 0xaabbcc, roughness: 0.25, metalness: 0.75 });
+    const lipL = new THREE.Mesh(new THREE.TorusGeometry(0.17 * 0.94, 0.17 * 0.14, 5, 12), lipMat);
+    lipL.rotation.x = Math.PI / 2; lipL.position.set(-1.25, -0.28, 0.625);
+    const lipR = new THREE.Mesh(new THREE.TorusGeometry(0.17 * 0.94, 0.17 * 0.14, 5, 12), lipMat);
+    lipR.rotation.x = Math.PI / 2; lipR.position.set( 1.25, -0.28, 0.625);
+
+    // Engine pylons — flat struts wing underside → nacelle top
+    const pylonL = _pylon(-1.25, -0.11, 0.067, 0.05, bodyMat);
+    const pylonR = _pylon( 1.25, -0.11, 0.067, 0.05, bodyMat);
 
     // Engine exhaust glow (additive blending)
     const glowMat = new THREE.MeshBasicMaterial({
@@ -280,25 +427,25 @@ function buildAirliner() {
     const glowGeo = new THREE.ConeGeometry(0.12, 0.55, 8);
     const glowL = new THREE.Mesh(glowGeo, glowMat);
     glowL.rotation.x = -Math.PI / 2;
-    glowL.position.set(-1.25, -0.28, -0.2);
+    glowL.position.set(-1.25, -0.28, -0.4);
 
     const glowR = new THREE.Mesh(glowGeo, glowMat);
     glowR.rotation.x = -Math.PI / 2;
-    glowR.position.set( 1.25, -0.28, -0.2);
+    glowR.position.set( 1.25, -0.28, -0.4);
 
     // Navigation lights (red port, green starboard) — blinking handled in tick
     const navL = new THREE.Mesh(
         new THREE.SphereGeometry(0.09, 6, 6),
         new THREE.MeshBasicMaterial({ color: 0xff2222 })
     );
-    navL.position.set(-3.15, 0, 0.1);
+    navL.position.set(-3.10, 0.24, 0.65);
     navL.name = 'nav_red';
 
     const navR = new THREE.Mesh(
         new THREE.SphereGeometry(0.09, 6, 6),
         new THREE.MeshBasicMaterial({ color: 0x22ff44 })
     );
-    navR.position.set(3.15, 0, 0.1);
+    navR.position.set(3.10, 0.24, 0.65);
     navR.name = 'nav_green';
 
     // Tail strobe (white)
@@ -309,17 +456,25 @@ function buildAirliner() {
     tailStrobe.position.set(0, 0.95, -2.1);
     tailStrobe.name = 'strobe_tail';
 
+    // stabV = vertical fin — gets airline TAIL colour (separate instancer layer).
+    stabV.userData.isTailPart = true;
     // Mark structural body parts so altitude-colour coding knows what to tint.
-    // Nav lights, glow cones, and glass are intentionally excluded.
-    const bodyParts = [fuselage, nose, wingL, wingR, wlL, wlR, stabH, stabV];
+    // Nav lights, glow cones, glass, lip rings, stripes, and the tail fin are excluded.
+    const bodyParts = [fuselage, nose, wingL, wingR, wlL, wlR, stabHL, stabHR, pylonL, pylonR];
     bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+
+    // Window stripe — stays dark regardless of airline tint (not in bodyParts)
+    const [stripeL, stripeR] = _windowStripes(0.22, 3.4);
 
     group.add(
         fuselage, nose, cockpit,
         wingL, wingR, wlL, wlR,
-        stabH, stabV,
-        engL, engR, glowL, glowR,
-        navL, navR, tailStrobe
+        stabHL, stabHR, stabV,
+        pylonL, pylonR,
+        engL, engR, glowL, glowR, inletL, inletR, lipL, lipR,
+        navL, navR, tailStrobe,
+        stripeL, stripeR,
+        nwL, nwR
     );
 
     // Cache hot-path references directly on the group so the animate loop
@@ -328,6 +483,8 @@ function buildAirliner() {
     group.userData._navRed     = navL;
     group.userData._navGreen   = navR;
     group.userData._tailStrobe = tailStrobe;
+
+    _addBellyStrobe(group, -0.22, 0.4);
 
     return group;
 }
@@ -350,11 +507,26 @@ function _navLights(group, halfSpan, tailZ, tailY = 0.5) {
     group.userData._tailStrobe = tailStrobe;
 }
 
-// Engine pod + additive exhaust glow cone, mounted under a wing.
+// Engine pod + additive exhaust glow cone + inlet face disc + intake lip ring.
+// Returns [eng, glow, inlet, lip] — callers must add all four to the group.
 function _engineWithGlow(x, y, z, mat, scale = 1, glowColor = 0xff9900) {
-    const eng = new THREE.Mesh(new THREE.CylinderGeometry(0.17 * scale, 0.14 * scale, 0.95 * scale, 10), mat);
+    const nacR = 0.17 * scale;
+    const eng = new THREE.Mesh(new THREE.CylinderGeometry(nacR, 0.14 * scale, 0.95 * scale, 10), mat);
     eng.rotation.x = Math.PI / 2;
     eng.position.set(x, y, z);
+
+    // Dark intake disc at the forward (nose-facing) end of the nacelle.
+    const inletMat = new THREE.MeshStandardMaterial({ color: 0x080c10, roughness: 0.9, metalness: 0.1 });
+    const inlet = new THREE.Mesh(new THREE.CircleGeometry(0.148 * scale, 10), inletMat);
+    inlet.position.set(x, y, z + 0.476 * scale);
+
+    // Intake lip ring — TorusGeometry around the nacelle mouth; the chamfered ring
+    // that distinguishes a real turbofan from a plain cylinder at close zoom.
+    const lipMat = new THREE.MeshStandardMaterial({ color: 0xaabbcc, roughness: 0.25, metalness: 0.75 });
+    const lip = new THREE.Mesh(new THREE.TorusGeometry(nacR * 0.94, nacR * 0.14, 5, 12), lipMat);
+    lip.rotation.x = Math.PI / 2;
+    lip.position.set(x, y, z + 0.476 * scale);
+
     const glowMat = new THREE.MeshBasicMaterial({
         color: glowColor, transparent: true, opacity: 0.55,
         blending: THREE.AdditiveBlending, depthWrite: false,
@@ -362,13 +534,13 @@ function _engineWithGlow(x, y, z, mat, scale = 1, glowColor = 0xff9900) {
     const glow = new THREE.Mesh(new THREE.ConeGeometry(0.12 * scale, 0.55 * scale, 8), glowMat);
     glow.rotation.x = -Math.PI / 2;
     glow.position.set(x, y, z - 0.75 * scale);
-    return [eng, glow];
+    return [eng, glow, inlet, lip];
 }
 
-// ── CARGO shape — boxier fuselage, no winglets, twin engines, amber livery ───
+// ── CARGO shape — boxier fuselage, no winglets, twin engines, white base (tinted per-instance) ──
 function buildCargoFreighter() {
     const group   = new THREE.Group();
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffab40, roughness: 0.4, metalness: 0.5 });
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.4, metalness: 0.5, emissive: 0xffffff, emissiveIntensity: 0.12 });
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x334455, roughness: 0.5, metalness: 0.4 });
 
     const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.22, 5.4, 12), bodyMat);
@@ -377,24 +549,32 @@ function buildCargoFreighter() {
     nose.rotation.x = Math.PI / 2;
     nose.position.z = 3.3;
 
-    const wingL = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.07, 1.0), bodyMat);
-    wingL.position.set(-1.8, -0.08, 0.1); wingL.rotation.y = Math.PI / 11;
-    const wingR = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.07, 1.0), bodyMat);
-    wingR.position.set(1.8, -0.08, 0.1); wingR.rotation.y = -Math.PI / 11;
+    const wingL = new THREE.Mesh(_taperedWingGeo(3.6, 0.07, 1.05, 0.45, false), bodyMat);
+    wingL.position.set(-1.8, 0.096, 0.1); wingL.rotation.y = Math.PI / 11; wingL.rotation.z = -Math.PI / 32;
+    const wingR = new THREE.Mesh(_taperedWingGeo(3.6, 0.07, 1.05, 0.45, true), bodyMat);
+    wingR.position.set(1.8, 0.096, 0.1); wingR.rotation.y = -Math.PI / 11; wingR.rotation.z =  Math.PI / 32;
 
-    const stabH = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.05, 0.55), bodyMat);
-    stabH.position.set(0, 0.05, -2.5); stabH.rotation.y = Math.PI / 14;
-    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.0, 0.8), bodyMat);
+    // Split L/R stab halves
+    const stabHL = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.05, 0.53), bodyMat);
+    stabHL.position.set(-0.525, 0.04, -2.5); stabHL.rotation.y =  Math.PI / 9;
+    const stabHR = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.05, 0.53), bodyMat);
+    stabHR.position.set( 0.525, 0.04, -2.5); stabHR.rotation.y = -Math.PI / 9;
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.09, 1.0, 0.8), bodyMat);
     stabV.position.set(0, 0.55, -2.4);
 
-    const [eng1, glow1] = _engineWithGlow(-1.5, -0.32, 0.4, darkMat, 1.1);
-    const [eng2, glow2] = _engineWithGlow(1.5, -0.32, 0.4, darkMat, 1.1);
+    const [eng1, glow1, inlet1, lip1] = _engineWithGlow(-1.5, -0.32, 0.2, darkMat, 1.1);
+    const [eng2, glow2, inlet2, lip2] = _engineWithGlow( 1.5, -0.32, 0.2, darkMat, 1.1);
 
-    const bodyParts = [fuselage, nose, wingL, wingR, stabH, stabV];
+    // Pylons: nacR=0.17*1.1=0.187, nacTopY=-0.32+0.187=-0.133
+    // wingBotY=0.096-0.035=0.061
+    const cpylonL = _pylon(-1.5, -0.133, 0.061, 0.1, bodyMat);
+    const cpylonR = _pylon( 1.5, -0.133, 0.061, 0.1, bodyMat);
+
+    const bodyParts = [fuselage, nose, wingL, wingR, stabHL, stabHR, stabV, cpylonL, cpylonR];
     bodyParts.forEach(m => { m.userData.isBodyPart = true; });
     group.userData._bodyParts = bodyParts;
 
-    group.add(fuselage, nose, wingL, wingR, stabH, stabV, eng1, eng2, glow1, glow2);
+    group.add(fuselage, nose, wingL, wingR, stabHL, stabHR, stabV, cpylonL, cpylonR, eng1, eng2, glow1, glow2, inlet1, inlet2, lip1, lip2);
     _navLights(group, 3.5, -2.4, 0.95);
     return group;
 }
@@ -402,7 +582,7 @@ function buildCargoFreighter() {
 // ── MILITARY shape — slim fuselage, swept delta wings, twin tails, afterburner glow ──
 function buildMilitaryJet() {
     const group   = new THREE.Group();
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x6b7a5e, roughness: 0.55, metalness: 0.45 });
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x6b7a5e, roughness: 0.55, metalness: 0.45, emissive: 0x667744, emissiveIntensity: 0.12 });
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x263238, roughness: 0.5, metalness: 0.5 });
     const glassMat= new THREE.MeshStandardMaterial({ color: 0x4a5a66, roughness: 0.1, metalness: 0.8, transparent: true, opacity: 0.75 });
 
@@ -427,13 +607,13 @@ function buildMilitaryJet() {
     const tailR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.65, 0.55), darkMat);
     tailR.position.set(0.18, 0.35, -1.55); tailR.rotation.z = -Math.PI / 10;
 
-    const [eng, glow] = _engineWithGlow(0, -0.05, -1.7, darkMat, 1.3, 0xff5500);
+    const [eng, glow, inlet, lip] = _engineWithGlow(0, -0.05, -1.7, darkMat, 1.3, 0xff5500);
 
     const bodyParts = [fuselage, nose, wingL, wingR, tailL, tailR];
     bodyParts.forEach(m => { m.userData.isBodyPart = true; });
     group.userData._bodyParts = bodyParts;
 
-    group.add(fuselage, nose, cockpit, wingL, wingR, tailL, tailR, eng, glow);
+    group.add(fuselage, nose, cockpit, wingL, wingR, tailL, tailR, eng, glow, inlet, lip);
     _navLights(group, 1.0, -1.55, 0.6);
     return group;
 }
@@ -441,7 +621,7 @@ function buildMilitaryJet() {
 // ── HELICOPTER shape — boxy cabin, tail boom, spinning main + tail rotor ─────
 function buildHelicopter() {
     const group   = new THREE.Group();
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x40c4ff, roughness: 0.4, metalness: 0.5 });
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x40c4ff, roughness: 0.4, metalness: 0.5, emissive: 0x1a6080, emissiveIntensity: 0.18 });
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x263238, roughness: 0.5, metalness: 0.4 });
     const glassMat= new THREE.MeshStandardMaterial({ color: 0x99bbdd, roughness: 0.1, metalness: 0.7, transparent: true, opacity: 0.7 });
 
@@ -490,7 +670,7 @@ function buildHelicopter() {
 // ── GA shape — small single-engine prop, straight wings, no jet glow ────────
 function buildGA() {
     const group   = new THREE.Group();
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd9b3ff, roughness: 0.4, metalness: 0.3 });
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd9b3ff, roughness: 0.4, metalness: 0.3, emissive: 0x7040aa, emissiveIntensity: 0.15 });
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x37474f, roughness: 0.6 });
     const glassMat= new THREE.MeshStandardMaterial({ color: 0x99bbdd, roughness: 0.1, metalness: 0.6, transparent: true, opacity: 0.7 });
 
@@ -529,13 +709,304 @@ function buildGA() {
     return group;
 }
 
+// ── NARROWBODY shape — slim single-aisle (A320 / B737 family) ────────────────
+// Most common commercial airliner. Slightly slimmer than the generic COMMERCIAL
+// fallback, sharklet winglets, moderate wing sweep. Scale 0.13.
+function buildNarrowbody() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.25, metalness: 0.60, emissive: 0xffffff, emissiveIntensity: 0.14 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a3a4a, roughness: 0.50, metalness: 0.40 });
+    const glassMat= new THREE.MeshStandardMaterial({ color: 0x88aacc, roughness: 0.10, metalness: 0.85, transparent: true, opacity: 0.70 });
+
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.15, 4.4, 12), bodyMat);
+    fuselage.rotation.x = Math.PI / 2;
+
+    // Nose — smooth Boeing-style LatheGeometry curve (0.60 long)
+    const nose = _smoothNose(0.19, 0.60, bodyMat);
+    nose.position.z = 2.50;   // fuselage end (2.2) + half nose (0.30)
+
+    const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), glassMat);
+    cockpit.position.set(0, 0.14, 1.95);
+
+    const [nwL, nwR] = _noseWindows(glassMat, 0.12, 0.07, 2.02, 0.07, 0.08);
+
+    const wingL = new THREE.Mesh(_taperedWingGeo(2.8, 0.055, 0.82, 0.32, false), bodyMat);
+    wingL.position.set(-1.4, 0.082, 0.05); wingL.rotation.y = Math.PI / 10; wingL.rotation.z = -Math.PI / 32;
+    const wingR = new THREE.Mesh(_taperedWingGeo(2.8, 0.055, 0.82, 0.32, true), bodyMat);
+    wingR.position.set( 1.4, 0.082, 0.05); wingR.rotation.y = -Math.PI / 10; wingR.rotation.z =  Math.PI / 32;
+
+    // Sharklets — placed at actual swept+dihedralled tip position
+    const wlL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.52, 0.24), bodyMat);
+    wlL.position.set(-2.73, 0.21, 0.48);
+    const wlR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.52, 0.24), bodyMat);
+    wlR.position.set( 2.73, 0.21, 0.48);
+
+    // Split L/R stab halves — symmetric sweep instead of single-mesh yaw
+    const stabHL = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.045, 0.43), bodyMat);
+    stabHL.position.set(-0.425, 0.04, -2.0); stabHL.rotation.y =  Math.PI / 9;
+    const stabHR = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.045, 0.43), bodyMat);
+    stabHR.position.set( 0.425, 0.04, -2.0); stabHR.rotation.y = -Math.PI / 9;
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.85, 0.65), bodyMat);
+    stabV.position.set(0, 0.46, -1.95);
+
+    // LEAP-1A / CFM56 engines — large diameter on A320neo/737MAX, scale=1.3
+    // 737 has distinctive flat-bottom nacelles (low ground clearance) → scale.y=0.88
+    const [engL, glowL, inletL, lipL] = _engineWithGlow(-1.1, -0.33, 0.1, darkMat, 1.3);
+    const [engR, glowR, inletR, lipR] = _engineWithGlow( 1.1, -0.33, 0.1, darkMat, 1.3);
+    engL.scale.y = 0.88; engR.scale.y = 0.88;  // flat-bottom nacelle (737 signature)
+
+    // Pylons: nacR=0.17*1.3=0.221, nacTopY=-0.33+0.221=-0.109
+    // wingBotY=0.082-0.0275=0.0545
+    const pylonL = _pylon(-1.1, -0.109, 0.0545, 0.05, bodyMat);
+    const pylonR = _pylon( 1.1, -0.109, 0.0545, 0.05, bodyMat);
+
+    stabV.userData.isTailPart = true;
+    const bodyParts = [fuselage, nose, wingL, wingR, wlL, wlR, stabHL, stabHR, pylonL, pylonR];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+
+    const [stripeL, stripeR] = _windowStripes(0.19, 3.0);
+    group.add(fuselage, nose, cockpit, wingL, wingR, wlL, wlR, stabHL, stabHR, stabV,
+              pylonL, pylonR,
+              engL, engR, glowL, glowR, inletL, inletR, lipL, lipR,
+              stripeL, stripeR, nwL, nwR);
+    _navLights(group, 2.73, -1.95, 0.85);
+    _addBellyStrobe(group, -0.19, 0.3);
+    return group;
+}
+
+// ── WIDEBODY shape — large twin-aisle (B777 / A330 / B787 family) ─────────────
+// Noticeably fatter fuselage, longer wingspan, bigger engines, raked wingtips
+// (no winglets — 777/787 style). Scale 0.18 makes it visibly larger than the
+// narrowbody at the same map position.
+function buildWidebody() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.22, metalness: 0.62, emissive: 0xffffff, emissiveIntensity: 0.14 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a3a4a, roughness: 0.50, metalness: 0.40 });
+    const glassMat= new THREE.MeshStandardMaterial({ color: 0x88aacc, roughness: 0.08, metalness: 0.85, transparent: true, opacity: 0.70 });
+
+    // Fat fuselage — double-aisle cross-section
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.31, 0.26, 6.0, 14), bodyMat);
+    fuselage.rotation.x = Math.PI / 2;
+
+    // Nose — smooth Boeing-style LatheGeometry curve (0.70 long)
+    const nose = _smoothNose(0.31, 0.70, bodyMat, 14);
+    nose.position.z = 3.35;   // fuselage end (3.0) + half nose (0.35)
+
+    const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), glassMat);
+    cockpit.position.set(0, 0.20, 2.7);
+
+    const [nwL, nwR] = _noseWindows(glassMat, 0.18, 0.11, 2.80, 0.11, 0.12);
+
+    // Long wings with wider chord
+    const wingL = new THREE.Mesh(_taperedWingGeo(4.2, 0.08, 1.25, 0.50, false), bodyMat);
+    wingL.position.set(-2.1, 0.126, 0.0); wingL.rotation.y = Math.PI / 8; wingL.rotation.z = -Math.PI / 32;
+    const wingR = new THREE.Mesh(_taperedWingGeo(4.2, 0.08, 1.25, 0.50, true), bodyMat);
+    wingR.position.set( 2.1, 0.126, 0.0); wingR.rotation.y = -Math.PI / 8; wingR.rotation.z =  Math.PI / 32;
+
+    // Raked wingtips (777X / 787 style) — placed at actual swept+dihedralled tip position
+    const rtL = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.35), bodyMat);
+    rtL.position.set(-4.03, 0.32, 0.80); rtL.rotation.z =  Math.PI / 8;
+    const rtR = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.35), bodyMat);
+    rtR.position.set( 4.03, 0.32, 0.80); rtR.rotation.z = -Math.PI / 8;
+
+    // Split L/R stab halves
+    const stabHL = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.06, 0.58), bodyMat);
+    stabHL.position.set(-0.6, 0.04, -2.8); stabHL.rotation.y =  Math.PI / 9;
+    const stabHR = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.06, 0.58), bodyMat);
+    stabHR.position.set( 0.6, 0.04, -2.8); stabHR.rotation.y = -Math.PI / 9;
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.10, 1.10, 0.85), bodyMat);
+    stabV.position.set(0, 0.60, -2.7);
+
+    // Large twin engines — GE9X / Trent 1000 scale, scale=1.35
+    const [engL, glowL, inletL, lipL] = _engineWithGlow(-1.6, -0.38, 0.1, darkMat, 1.35);
+    const [engR, glowR, inletR, lipR] = _engineWithGlow( 1.6, -0.38, 0.1, darkMat, 1.35);
+
+    // Pylons: nacR=0.17*1.35=0.2295, nacTopY=-0.38+0.2295=-0.1505
+    // wingBotY=0.126-0.04=0.086
+    const pylonL = _pylon(-1.6, -0.1505, 0.086, 0.05, bodyMat);
+    const pylonR = _pylon( 1.6, -0.1505, 0.086, 0.05, bodyMat);
+
+    stabV.userData.isTailPart = true;
+    const bodyParts = [fuselage, nose, wingL, wingR, rtL, rtR, stabHL, stabHR, pylonL, pylonR];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+
+    const [stripeL, stripeR] = _windowStripes(0.31, 4.4);
+    group.add(fuselage, nose, cockpit, wingL, wingR, rtL, rtR, stabHL, stabHR, stabV,
+              pylonL, pylonR,
+              engL, engR, glowL, glowR, inletL, inletR, lipL, lipR,
+              stripeL, stripeR, nwL, nwR);
+    _navLights(group, 4.03, -2.7, 1.1);
+    _addBellyStrobe(group, -0.31, 0.5);
+    return group;
+}
+
+// ── REGIONAL shape — small regional jet (E175 / CRJ9 family) ─────────────────
+// Shorter, narrower fuselage, less wing sweep, smaller engines, no winglets.
+// Visibly smaller than the narrowbody at the same map zoom.
+function buildRegional() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.30, metalness: 0.55, emissive: 0xffffff, emissiveIntensity: 0.14 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a3a4a, roughness: 0.50, metalness: 0.40 });
+    const glassMat= new THREE.MeshStandardMaterial({ color: 0x88aacc, roughness: 0.12, metalness: 0.80, transparent: true, opacity: 0.70 });
+
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.11, 3.2, 10), bodyMat);
+    fuselage.rotation.x = Math.PI / 2;
+
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.75, 10), bodyMat);
+    nose.rotation.x = Math.PI / 2;
+    nose.position.z = 2.05;
+
+    const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), glassMat);
+    cockpit.position.set(0, 0.10, 1.65);
+
+    const [nwL, nwR] = _noseWindows(glassMat, 0.09, 0.06, 1.71, 0.06, 0.06);
+
+    // Shorter, less-swept wings — regional jets have relatively straight wings
+    const wingL = new THREE.Mesh(_taperedWingGeo(2.1, 0.040, 0.58, 0.25, false), bodyMat);
+    wingL.position.set(-1.05, 0.063, 0.15); wingL.rotation.y = Math.PI / 13; wingL.rotation.z = -Math.PI / 32;
+    const wingR = new THREE.Mesh(_taperedWingGeo(2.1, 0.040, 0.58, 0.25, true), bodyMat);
+    wingR.position.set( 1.05, 0.063, 0.15); wingR.rotation.y = -Math.PI / 13; wingR.rotation.z =  Math.PI / 32;
+
+    // Split L/R stab halves
+    const stabHL = new THREE.Mesh(new THREE.BoxGeometry(0.625, 0.035, 0.33), bodyMat);
+    stabHL.position.set(-0.315, 0.03, -1.5); stabHL.rotation.y =  Math.PI / 9;
+    const stabHR = new THREE.Mesh(new THREE.BoxGeometry(0.625, 0.035, 0.33), bodyMat);
+    stabHR.position.set( 0.315, 0.03, -1.5); stabHR.rotation.y = -Math.PI / 9;
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.70, 0.55), bodyMat);
+    stabV.position.set(0, 0.38, -1.45);
+
+    const [engL, glowL, inletL, lipL] = _engineWithGlow(-0.85, -0.22, 0.05, darkMat, 0.75);
+    const [engR, glowR, inletR, lipR] = _engineWithGlow( 0.85, -0.22, 0.05, darkMat, 0.75);
+
+    // Pylons: nacR=0.17*0.75=0.1275, nacTopY=-0.22+0.1275=-0.0925
+    // wingBotY=0.063-0.02=0.043
+    const pylonL = _pylon(-0.85, -0.0925, 0.043, 0.05, bodyMat);
+    const pylonR = _pylon( 0.85, -0.0925, 0.043, 0.05, bodyMat);
+
+    stabV.userData.isTailPart = true;
+    const bodyParts = [fuselage, nose, wingL, wingR, stabHL, stabHR, pylonL, pylonR];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+
+    const [stripeL, stripeR] = _windowStripes(0.14, 2.2);
+    group.add(fuselage, nose, cockpit, wingL, wingR, stabHL, stabHR, stabV,
+              pylonL, pylonR,
+              engL, engR, glowL, glowR, inletL, inletR, lipL, lipR,
+              stripeL, stripeR, nwL, nwR);
+    _navLights(group, 2.05, -1.45, 0.70);
+    _addBellyStrobe(group, -0.14, 0.2);
+    return group;
+}
+
+// ── BIZJET shape — sleek business jet (Citation / Gulfstream family) ──────────
+// Three distinguishing features vs. the airliner shapes:
+//   1. REAR-mounted engines on the aft fuselage (not under the wings)
+//   2. T-tail — horizontal stab sits on TOP of the vertical stab
+//   3. Highly swept, thin wings (more delta-ish planform)
+function buildBizjet() {
+    const group   = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.20, metalness: 0.70, emissive: 0xffffff, emissiveIntensity: 0.14 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a3a4a, roughness: 0.50, metalness: 0.40 });
+    const glassMat= new THREE.MeshStandardMaterial({ color: 0x88aacc, roughness: 0.08, metalness: 0.85, transparent: true, opacity: 0.65 });
+
+    // Slim, sleek fuselage
+    const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.08, 3.4, 10), bodyMat);
+    fuselage.rotation.x = Math.PI / 2;
+
+    // Pointed nose — more streamlined than a commercial airliner
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.11, 1.0, 10), bodyMat);
+    nose.rotation.x = Math.PI / 2;
+    nose.position.z = 2.2;
+
+    const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), glassMat);
+    cockpit.position.set(0, 0.09, 1.8);
+
+    const [nwL, nwR] = _noseWindows(glassMat, 0.07, 0.05, 1.86, 0.05, 0.05);
+
+    // Highly swept wings
+    const wingL = new THREE.Mesh(_taperedWingGeo(2.2, 0.035, 0.55, 0.18, false), bodyMat);
+    wingL.position.set(-1.1, 0.073, 0.0); wingL.rotation.y =  Math.PI / 6; wingL.rotation.z = -Math.PI / 32;
+    const wingR = new THREE.Mesh(_taperedWingGeo(2.2, 0.035, 0.55, 0.18, true), bodyMat);
+    wingR.position.set( 1.1, 0.073, 0.0); wingR.rotation.y = -Math.PI / 6; wingR.rotation.z =  Math.PI / 32;
+
+    // Winglets (common on Gulfstream / Citation X) — placed at swept+dihedralled tip
+    const wlL = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.38, 0.18), bodyMat);
+    wlL.position.set(-2.05, 0.17, 0.55);
+    const wlR = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.38, 0.18), bodyMat);
+    wlR.position.set( 2.05, 0.17, 0.55);
+
+    // Vertical stab — tall
+    const stabV = new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.0, 0.55), bodyMat);
+    stabV.position.set(0, 0.55, -1.6);
+
+    // T-tail: split L/R halves so each sweeps symmetrically at the vertical stab apex.
+    // A single mesh rotated around Y yaws the whole stab; two halves with mirrored Y
+    // rotations produce the correct symmetric swept look (same pattern as main stabs).
+    const stabHL = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.035, 0.35), bodyMat);
+    stabHL.position.set(-0.325, 1.05, -1.65); stabHL.rotation.y =  Math.PI / 9;
+    const stabHR = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.035, 0.35), bodyMat);
+    stabHR.position.set( 0.325, 1.05, -1.65); stabHR.rotation.y = -Math.PI / 9;
+
+    // REAR-mounted engines on aft fuselage sides (most distinctive bizjet feature)
+    const engGeo = new THREE.CylinderGeometry(0.095, 0.075, 0.72, 8);
+    const engL = new THREE.Mesh(engGeo, darkMat);
+    engL.rotation.x = Math.PI / 2;
+    engL.position.set(-0.22, 0.04, -0.8);
+    const engR = new THREE.Mesh(engGeo, darkMat);
+    engR.rotation.x = Math.PI / 2;
+    engR.position.set( 0.22, 0.04, -0.8);
+
+    // Inlet faces — front of nacelle at z + 0.36 (half of 0.72 height)
+    const bjInletMat = new THREE.MeshStandardMaterial({ color: 0x080c10, roughness: 0.9, metalness: 0.1 });
+    const inletL = new THREE.Mesh(new THREE.CircleGeometry(0.083, 8), bjInletMat);
+    inletL.position.set(-0.22, 0.04, -0.44);
+    const inletR = new THREE.Mesh(new THREE.CircleGeometry(0.083, 8), bjInletMat);
+    inletR.position.set( 0.22, 0.04, -0.44);
+
+    const glowMat = new THREE.MeshBasicMaterial({
+        color: 0xff9900, transparent: true, opacity: 0.50,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const glowGeo = new THREE.ConeGeometry(0.07, 0.38, 8);
+    const glowL = new THREE.Mesh(glowGeo, glowMat);
+    glowL.rotation.x = -Math.PI / 2;
+    glowL.position.set(-0.22, 0.04, -1.2);
+    const glowR = new THREE.Mesh(glowGeo, glowMat.clone());
+    glowR.rotation.x = -Math.PI / 2;
+    glowR.position.set( 0.22, 0.04, -1.2);
+
+    stabV.userData.isTailPart = true;
+    const bodyParts = [fuselage, nose, wingL, wingR, wlL, wlR, stabHL, stabHR];
+    bodyParts.forEach(m => { m.userData.isBodyPart = true; });
+    group.userData._bodyParts = bodyParts;
+
+    const [stripeL, stripeR] = _windowStripes(0.11, 2.4);
+    group.add(fuselage, nose, cockpit, wingL, wingR, wlL, wlR, stabV, stabHL, stabHR, engL, engR, glowL, glowR, inletL, inletR, stripeL, stripeR, nwL, nwR);
+    _navLights(group, 2.05, -1.6, 1.05);  // nav at wingtips, strobe at T-tail apex
+    _addBellyStrobe(group, -0.11, 0.3);
+    return group;
+}
+
 // --- AIRCRAFT CLASS REGISTRY (mirrors SHIP_CLASSES) ──────────────────────────
 // Exported so aircraftInstancer.js can harvest each class's parts (geometry +
 // material + local transform) ONCE at startup, instead of every individual
 // aircraft calling cls.builder() and allocating its own fresh meshes/materials.
 export const AIRCRAFT_CLASSES_VISUAL = {
+    // Generic fallback — catches anything the typeCode lookup misses.
+    // Kept identical to the old single-class setup so unclassified aircraft
+    // look exactly as they always did.
     COMMERCIAL: { hex: '#e0f0ff', scale: 0.13, builder: buildAirliner },
-    CARGO:      { hex: '#ffab40', scale: 0.15, builder: buildCargoFreighter },
+
+    // Type-code-driven subclasses — picked by typeCodeToVisualClass() in
+    // flightManager.js before the emitter-category fallback runs.
+    NARROWBODY: { hex: '#d8e8f4', scale: 0.13, builder: buildNarrowbody },  // A320/B737 — cool aluminium
+    WIDEBODY:   { hex: '#e4ddd4', scale: 0.18, builder: buildWidebody },    // B777/A330 — warm white, clearly bigger
+    REGIONAL:   { hex: '#c4d8ee', scale: 0.10, builder: buildRegional },    // E175/CRJ9 — cooler blue, smaller
+    BIZJET:     { hex: '#d4d4e8', scale: 0.10, builder: buildBizjet },      // Citation/Gulfstream — silver-grey
+
+    CARGO:      { hex: '#9aa0a8', scale: 0.15, builder: buildCargoFreighter },
     MILITARY:   { hex: '#8aff80', scale: 0.10, builder: buildMilitaryJet },
     HELICOPTER: { hex: '#40c4ff', scale: 0.11, builder: buildHelicopter },
     GA:         { hex: '#d9b3ff', scale: 0.08, builder: buildGA },

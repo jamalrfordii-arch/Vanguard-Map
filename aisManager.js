@@ -271,7 +271,13 @@ export class AISManager {
         this.ws = new WebSocket(AIS.WS_URL);
 
         this.ws.onopen = () => {
-            this._setStatus('LIVE // GLOBAL');
+            // Status label derives from CLIENT_BBOX (the effective visible region)
+            // rather than the WS subscription BBOX (which is always global).
+            const effectiveBbox = AIS.CLIENT_BBOX || AIS.BBOX;
+            const [[latMin, lonMin], [latMax, lonMax]] = effectiveBbox;
+            const isGlobal = !AIS.CLIENT_BBOX && latMin <= -80 && latMax >= 80 && lonMin <= -170 && lonMax >= 170;
+            const regionTag = isGlobal ? 'GLOBAL' : `${latMin.toFixed(0)}–${latMax.toFixed(0)}°N / ${lonMin.toFixed(0)}–${lonMax.toFixed(0)}°E`;
+            this._setStatus(`LIVE // ${regionTag}`);
             this.ws.send(JSON.stringify({
                 APIKey:             this._apiKey,
                 BoundingBoxes:      [AIS.BBOX],
@@ -363,6 +369,13 @@ export class AISManager {
         const lon = meta.longitude;
         if (lat == null || lon == null) return;
         if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+
+        // Client-side region filter — discard messages outside CLIENT_BBOX so
+        // the map only shows the configured region even on a global WS subscription.
+        if (AIS.CLIENT_BBOX) {
+            const [[fLatMin, fLonMin], [fLatMax, fLonMax]] = AIS.CLIENT_BBOX;
+            if (lat < fLatMin || lat > fLatMax || lon < fLonMin || lon > fLonMax) return;
+        }
 
         const mmsi     = String(meta.MMSI);
         const name     = (meta.ShipName || 'UNKNOWN').trim() || 'UNKNOWN';

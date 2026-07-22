@@ -12,17 +12,58 @@ import { COPILOT } from './config.js';
 
 // ── Strategic chokepoints (lat/lon bounding boxes) ────────────────────────────
 export const CHOKEPOINTS = [
-    { name: 'STRAIT OF HORMUZ',    latMin: 26.0,  latMax: 27.5, lonMin:  55.5, lonMax:  57.5 },
-    { name: 'STRAIT OF MALACCA',   latMin:  1.0,  latMax:  6.0, lonMin:  99.0, lonMax: 104.5 },
-    { name: 'BAB-EL-MANDEB',       latMin: 11.5,  latMax: 13.5, lonMin:  42.5, lonMax:  45.0 },
+    // Widened 2026-07-21: 26.0 latMin only covered the narrow pinch point and
+    // missed the Gulf of Oman approach lanes (real transit traffic queues/goes
+    // dark as far south as ~25.0N before entering the strait proper). Every
+    // other entry in this table is already modeled as an approach zone, not a
+    // pinch point (see Malacca's 5° span) — this brings Hormuz in line and was
+    // confirmed against a live miss: a synthetic dark-vessel event at lat 25.82
+    // fell outside the old box and never got the chokepoint score/snapshot bonus.
+    { name: 'STRAIT OF HORMUZ',    latMin: 25.0,  latMax: 27.0, lonMin:  54.5, lonMax:  57.5 },
+    // Widened 2026-07-21 (same pass as Hormuz): the old lonMin=99.0 covered
+    // only the strait proper and missed the Andaman Sea approach (Preparis
+    // Channel / north of Sabang, ~95-99E) where inbound traffic queues before
+    // the pinch point — same "pinch point vs approach lane" gap as Hormuz.
+    { name: 'STRAIT OF MALACCA',   latMin:  1.0,  latMax:  6.0, lonMin:  95.0, lonMax: 104.5 },
+    // Widened 2026-07-21: old box centered tightly on the strait itself and
+    // clipped the Gulf of Aden approach (out to ~46-48E), which is where most
+    // of this corridor's actual dark-vessel/piracy-relevant activity happens,
+    // not just the ~20km pinch point between Yemen and Djibouti.
+    { name: 'BAB-EL-MANDEB',       latMin: 11.0,  latMax: 13.5, lonMin:  42.5, lonMax:  46.5 },
+    // Checked, not widened: a canal (not an open strait) has no meaningful
+    // "approach lane" ambiguity — ships transit the fixed channel or they
+    // don't. Existing box already spans Port Said to Suez plus a margin.
     { name: 'SUEZ CANAL',          latMin: 29.5,  latMax: 32.0, lonMin:  32.0, lonMax:  33.0 },
+    // Checked, not widened: real strait width (~35.9-36.0N) already sits
+    // comfortably inside the existing box with margin on both the Atlantic
+    // and Mediterranean sides.
     { name: 'STRAIT OF GIBRALTAR', latMin: 35.5,  latMax: 36.5, lonMin:  -6.5, lonMax:  -4.5 },
-    { name: 'ENGLISH CHANNEL',     latMin: 49.5,  latMax: 51.5, lonMin:  -2.5, lonMax:   2.5 },
+    // Widened 2026-07-21: old latMin=49.5/lonMin=-2.5 started east of Ushant
+    // and missed the whole western approach (Brittany/Western Approaches,
+    // down to ~48.5N/-5.5W) that Channel-bound Atlantic traffic transits
+    // before ever reaching the narrow Dover Strait end.
+    { name: 'ENGLISH CHANNEL',     latMin: 48.5,  latMax: 51.5, lonMin:  -5.5, lonMax:   2.5 },
+    // Checked, not widened: Skagerrak/Kattegat/Belts/Øresund already fit the
+    // existing box with margin.
     { name: 'DANISH STRAITS',      latMin: 54.5,  latMax: 58.0, lonMin:   8.0, lonMax:  13.0 },
-    { name: 'TAIWAN STRAIT',       latMin: 22.0,  latMax: 26.0, lonMin: 119.0, lonMax: 122.0 },
-    { name: 'LUZON STRAIT',        latMin: 18.0,  latMax: 22.5, lonMin: 119.0, lonMax: 124.0 },
+    // Tightened 2026-07-21 — real bug, not a widen: this overlapped LUZON
+    // STRAIT below by 0.5 deg of latitude (22.0-22.5N, both spanning
+    // 119-122E), so a vessel in that band double-counted in both chokepoints'
+    // traffic state and snapshot data. Taiwan's real southern tip (Eluanbi)
+    // is ~21.9N — that's the natural boundary between the two straits.
+    { name: 'TAIWAN STRAIT',       latMin: 21.9,  latMax: 26.0, lonMin: 119.0, lonMax: 122.0 },
+    // Tightened 2026-07-21 to meet Taiwan Strait's new latMin cleanly instead
+    // of overlapping it (see comment above) — latMax was 22.5, real Bashi
+    // Channel / Luzon Strait activity is south of Taiwan's tip anyway.
+    { name: 'LUZON STRAIT',        latMin: 18.0,  latMax: 21.9, lonMin: 119.0, lonMax: 124.0 },
+    // Checked, not widened: this is a rounding point, not a strait — ships
+    // already swing wide around it, and the existing box has generous margin
+    // on every side of the actual Cape (~-34.35, 18.47).
     { name: 'CAPE OF GOOD HOPE',   latMin: -35.5, latMax: -33.0,lonMin:  17.5, lonMax:  20.5 },
-    { name: 'DRAKE PASSAGE',       latMin: -62.0, latMax: -55.0,lonMin: -68.0, lonMax: -55.0 },
+    // Widened 2026-07-21: old lonMin=-68.0 clipped the western half of the
+    // passage — real Drake Passage traffic (and the Chilean archipelago side
+    // routing) extends out to roughly -72 to -75W, not just the Atlantic side.
+    { name: 'DRAKE PASSAGE',       latMin: -62.0, latMax: -55.0,lonMin: -72.0, lonMax: -55.0 },
 ];
 
 // ── AICopilot ─────────────────────────────────────────────────────────────────

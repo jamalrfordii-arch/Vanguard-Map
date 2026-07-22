@@ -6,9 +6,14 @@ import {
     AMBIENT_INTENSITY_BASE, AMBIENT_INTENSITY_BONUS,
     DIR_LIGHT_INTENSITY_MAX,
     CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY, FLIGHT_INTEGRITY, CONFLICT,
+    AIRLINE_COLORS,
+    AIRLINE_TAIL_COLORS,
+    TERRAIN_VERTICAL_SCALE,
 } from './config.js';
 import { loadAllData } from './dataLoader.js';
 import { mark as bootMark, report as bootReport } from './bootProfiler.js';   // measurement-only
+import { GaussianSplatOverlayManager } from './gaussianSplatOverlay.js';   // 3DGS hotspot layer
+import { LayerCoordinator } from './layerCoordinator.js';   // Phase 3 — layer-coordination brain
 import {
     initScene, initControls, addLights, initPostProcessing,
     createBoardPlaneAndReticle, onWindowResize
@@ -18,6 +23,7 @@ import {
     createSolidOceanFloor, createCountryBorders,
     loadNormalMap, updatePointCloud, createOceanBasinLabels, getTrueElevation
 } from './terrainBuilder.js';
+import { initTerritoryLookup } from './territoryLookup.js';
 import {
     createFlightObject, createAISVesselObject,
     createDarkVesselMarker, createVesselDot,
@@ -28,7 +34,7 @@ import { integrityManager, setElevationFn as setIntegrityElevation } from './int
 import { flightIntegrityManager } from './flightIntegrityManager.js';
 import { waveField } from './waveFieldManager.js';   // global sea-state data field (Phase A; lazy fetch)
 import { WaveFieldLayer } from './waveFieldLayer.js'; // global sea-state heatmap + contour render layer
-import { FlightManager, lonLatAltToScene } from './flightManager.js';
+import { FlightManager, lonLatAltToScene, typeCodeToVisualClass } from './flightManager.js';
 import { aircraftInstancer } from './aircraftInstancer.js';
 import { shipInstancer } from './shipInstancer.js';
 import {
@@ -36,12 +42,14 @@ import {
     onMouseMove, onDoubleClick, onClick, tickRaycasting,
     tickVesselDetail, refreshShipList, refreshFlightList,
     applySearchFilter, tickSearchVisibility, tickAlertZone,
-    showVesselDetail, hideVesselDetail, initIntegrityBoard, initDiscoveryConsole, initAltitudeWatch
+    showVesselDetail, hideVesselDetail, initIntegrityBoard, initDiscoveryConsole, initAltitudeWatch,
+    initFleetIntel, requestMapPick
 } from './uiController.js';
 import { AISManager, lonLatToScene } from './aisManager.js';
 import { simClock } from './simClock.js';
 import { quality } from './qualityManager.js';
 import { SyntheticAISSource, RecordedAISSource, AISRecorder } from './dataSource.js';
+import { ZoneRecorder } from './zoneRecorder.js';
 import { initArchivePanel } from './archiveManager.js';
 import { rfIntel, initRFIntelPanel } from './rfIntelManager.js';
 import { initVesselTab } from './vesselTab.js';
@@ -70,9 +78,12 @@ import { DiscoveryManager } from './discoveryManager.js';
 import { ChokepointManager } from './chokepointManager.js';
 import { NavLightManager } from './navLightManager.js';
 import { TileStreamManager } from './tileStreamManager.js';
+import { tileLoadTester }   from './tileLoadTester.js';
+import { terrainVisualTester } from './terrainVisualTester.js';
 import { contextCards } from './contextCardManager.js';
 import { BuildingManager } from './buildingManager.js';
 import { TransitionManager } from './transitionManager.js';
+import { FlightRouteManager } from './flightRouteManager.js';
 import { SpaceWeatherManager }     from './spaceWeatherManager.js';
 import { IonosphericLayerManager } from './ionosphericLayerManager.js';
 import { BirkelandManager }       from './birkelandManager.js';
@@ -213,6 +224,7 @@ async function init(mapData) {
     window.controls = controls;   // expose for camera panel + any UI that needs orbit control
     window.camera   = camera;     // expose for layer click-to-inspect (IBTrACS, etc.)
     window.scene    = scene;      // expose for console debugging
+    window.renderer = renderer;   // expose for console debugging (renderer.info memory/program counts)
     const { ambientLight, dirLight } = addLights(scene);
 
     // ── Selection ring ────────────────────────────────────────────────────────
@@ -342,6 +354,38 @@ async function init(mapData) {
     // ── Terrain layers ────────────────────────────────────────────────────────
     const splatCloud     = createHighFidelityPointCloud(scene);
     bootMark('point cloud built', { tier: quality.tier });
+
+    // ── 3DGS hotspot layer (Phase 2, 2026-07-15) ──────────────────────────────
+    // Photoreal Gaussian-splat captures pinned to lat/lon, fading in at close
+    // zoom on top of the point terrain. Register captures here (one .spz already
+    // in splats/). lat/lon/scale/rotation are per-capture — tune live via
+    // window.gsManager._overlays[i].cfg then reload, or edit below.
+    const gsManager = new GaussianSplatOverlayManager(scene, camera, renderer);
+    window.gsManager = gsManager;   // expose for tuning
+
+    // ── Capture manifest (Phase 4 — agent sourcing pipeline, 2026-07-15) ──────
+    // Captures are DATA-DRIVEN, not hardcoded: the sourcing pipeline just drops a
+    // .spz in splats/ and appends a 'sourced' entry to splats/manifest.json — no
+    // code change. Every sourced entry is pinned here at boot. See SOURCING.md.
+    fetch('./splats/manifest.json')
+        .then(r => r.json())
+        .then(m => {
+            const sourced = (m.captures || []).filter(c => c.status === 'sourced');
+            sourced.forEach(c => gsManager.addOverlay({
+                name:          c.name,
+                lat:           c.lat,
+                lon:           c.lon,
+                path:          c.path,
+                sceneScale:    c.sceneScale,
+                yOffset:       c.yOffset,
+                rotation:      c.rotation,
+                showCamY:      c.showCamY,
+                fullCamY:      c.fullCamY,
+                showHorizDist: c.showHorizDist,
+            }));
+            console.info(`[3DGS] manifest: ${sourced.length} capture(s) pinned, ${(m.targets || []).length} target(s) pending`);
+        })
+        .catch(e => console.warn('[3DGS] manifest load failed:', e.message));
     // Expose for live shader tuning from DevTools console:
     //   window.splatCloud.material.uniforms.uBiomeStrength.value = 0.5
     //   window.splatCloud.material.uniforms.uHemiStrength.value  = 0.0
@@ -372,6 +416,10 @@ async function init(mapData) {
 
     const { oceanFloorMesh, aquariumWalls } = createSolidOceanFloor(scene);
     const bordersGroup      = createCountryBorders(scene, mapData.worldBordersGeoJSON);
+    window.vg1Borders = bordersGroup;   // console access + terrainVisualTester.js
+    // Hover territory ID (2026-07-13) — reuses the same Natural Earth GeoJSON,
+    // zero extra network. Feeds the SENSOR ALIGNMENT "TER:" readout.
+    initTerritoryLookup(mapData.worldBordersGeoJSON);
     createOceanBasinLabels(scene);
 
     // ── Lane / entity group ───────────────────────────────────────────────────
@@ -388,6 +436,14 @@ async function init(mapData) {
     const portManager      = new PortManager(scene);
     const portMarkersGroup = portManager.group;   // backward-compat ref for setupUI
     window.portManager     = portManager;         // console access
+    // Port markers (diamonds + city/port name labels) disabled map-wide
+    // 2026-07-15 (Jamal: "delete the little diamonds and city names now that we
+    // have a country tracker"). Reversible via the ports layer toggle / setEnabled(true).
+    portManager.setEnabled(false);
+
+    // Context/tutorial cards ("THESE CIRCLES ARE VESSEL GROUPS", chokepoint, etc.)
+    // suppressed for now (2026-07-15, Jamal). Re-enable: contextCards._disabled = false.
+    contextCards._disabled = true;
 
     // ── Day / night overlay ───────────────────────────────────────────────────
     const dayNightManager = new DayNightManager(scene);
@@ -413,6 +469,11 @@ async function init(mapData) {
     transitionMgr.setClusterManager(clusterManager);
     transitionMgr.init();                       // binds #vessel-vignette DOM element
     window.transitionMgr = transitionMgr;       // exposed for uiController calls
+
+    // ── Flight route arc manager ──────────────────────────────────────────────
+    // Per-aircraft great-circle route arcs toggled from the aircraft detail card.
+    const flightRouteManager = new FlightRouteManager(scene);
+    window.flightRouteManager = flightRouteManager;  // exposed for uiController checks
 
     // ── Weather — live global GFS wind field (Open-Meteo / NOAA NCEP) ─────────
     // Animated particle streams driven by a real 5° gridded wind forecast.
@@ -504,6 +565,12 @@ async function init(mapData) {
     composer.addPass(vTiltShiftPass);
     composer.addPass(hTiltShiftPass);
     composer.addPass(bokehPass);
+    // Tilt-shift RESTORED (2026-07-18): these two passes soften the point-cloud
+    // texture into the smooth, photographic world-map look. Briefly disabled for
+    // FPS, but that removed the smoothing the user relies on, so they're back on.
+    // The other perf wins (fewer tiles, single backdrop, resolution headroom) stay.
+    vTiltShiftPass.enabled = true;
+    hTiltShiftPass.enabled = true;
 
     // ── Wake / wash ───────────────────────────────────────────────────────────
     const wakeManager = new WakeManager(scene);
@@ -524,8 +591,30 @@ async function init(mapData) {
     // Phase 2 hybrid: continent mesh stays invisible (its render is disabled
     // in continentMesh.js) but its elevation data is exposed via the height
     // sampler so any entity manager can clamp its Y to real terrain.
-    terrainHeight.init(continentMesh);
+    //
+    // Border redrape — TRIED AND REVERTED (2026-07-21). Briefly redraped every
+    // border vertex to continentMesh's sampled height here, theorizing the
+    // analytic getSceneGroundY() formula (used for the original draw at line
+    // ~417) diverged from whatever's actually on screen. Live-measured instead
+    // of assumed, at a reported-floating spot (Suez, lon 32.35/lat 30.5,
+    // camera.y=250 — the base point cloud's normal rendering altitude):
+    //   getSceneGroundY(x,z)              = -0.31788   (analytic formula)
+    //   nearest ACTUAL splatCloud point Y  = -0.31785   (what's really on screen)
+    //   sampleTerrainHeightXZ(x,z)         = +0.14951   (continentMesh grid)
+    // The analytic formula was already correct — matches the real rendered
+    // point cloud to within 0.00003 units. The continentMesh grid is a
+    // DIFFERENT, independently-computed height model (continentWorker.js vs
+    // terrainWorker.js) that disagreed with the visible surface by 0.47 units
+    // at this exact spot — the redrape was pulling borders OFF a value that
+    // matched the screen and ONTO one that didn't, at the altitude range
+    // (camera.y > ~15-25) where the point cloud is what's actually rendering,
+    // which is most of this map's normal operating range. Reverted to the
+    // plain analytic draw. redrapeToTerrainHeight() is kept in terrainBuilder.js
+    // as a general utility — just don't wire it to continentMesh's sampler for
+    // borders again without re-measuring against whatever layer is ACTUALLY
+    // visible at the altitude in question first.
     window.terrainHeight = terrainHeight;
+    terrainHeight.init(continentMesh);
 
     // ── City system — glows, labels, instanced buildings ─────────────────────
     const cityManager = new CityManager(scene, normalMapTex);
@@ -810,6 +899,55 @@ async function init(mapData) {
     // for AIS). Cheap, local, no fetch — runs on every poll for every aircraft.
     flightManager.onPositionEvaluated = (report) => flightIntegrityManager.evaluate(report);
 
+    // ── Airline livery colour lookup ──────────────────────────────────────────
+    // Two-tier: manual table for known carriers (AIRLINE_COLORS in config.js),
+    // hash-based HSL for everything else so every airline gets a unique,
+    // consistent colour automatically without manual entry. Civilian jets get full
+    // brand-colour tinting; CARGO gets brand colour only if explicitly listed
+    // (FedEx purple, UPS brown) and falls back to neutral grey otherwise.
+    // MILITARY/HELICOPTER/GA are untinted — their class material colour stands as-is.
+    const _CIVILIAN_CLASSES = new Set(['COMMERCIAL','NARROWBODY','WIDEBODY','REGIONAL','BIZJET']);
+    const _CARGO_GREY       = new THREE.Color(0x9aa0a8); // neutral steel-grey for generic freighters
+    const _airlineColorCache = new Map(); // prefix → THREE.Color (cached, never gc'd mid-session)
+    function getAircraftBodyColor(callsign, aircraftClass) {
+        const isCivilian = _CIVILIAN_CLASSES.has(aircraftClass);
+        const isCargo    = aircraftClass === 'CARGO';
+        if (!isCivilian && !isCargo) return null; // military/heli/GA → untinted
+
+        const prefix = (callsign || '').slice(0, 3).toUpperCase();
+        if (_airlineColorCache.has(prefix)) return _airlineColorCache.get(prefix);
+
+        let col;
+        if (isCargo) {
+            // Brand colour only for explicitly listed cargo carriers (FDX, UPS, etc.);
+            // everything else gets the neutral grey that reads distinctly from airline colours.
+            col = AIRLINE_COLORS[prefix] ? new THREE.Color(AIRLINE_COLORS[prefix]) : _CARGO_GREY;
+        } else if (AIRLINE_COLORS[prefix]) {
+            col = new THREE.Color(AIRLINE_COLORS[prefix]);
+        } else {
+            // djb2 hash → stable hue. S=50%, L=60% keeps colours readable on dark terrain.
+            let h = 5381;
+            for (let i = 0; i < prefix.length; i++) h = ((h << 5) + h) + prefix.charCodeAt(i);
+            col = new THREE.Color().setHSL((Math.abs(h) % 360) / 360, 0.50, 0.60);
+        }
+        _airlineColorCache.set(prefix, col);
+        return col;
+    }
+
+    // Tail / vertical-fin livery — distinct from the fuselage for airlines with
+    // high-contrast tail branding (Delta navy, Southwest gold, Spirit black, etc.).
+    // Returns null for unlisted airlines so the instancer falls back to bodyColor.
+    const _airlineTailCache = new Map();
+    function getAircraftTailColor(callsign, aircraftClass) {
+        if (!_CIVILIAN_CLASSES.has(aircraftClass)) return null;
+        const prefix = (callsign || '').slice(0, 3).toUpperCase();
+        if (_airlineTailCache.has(prefix)) return _airlineTailCache.get(prefix);
+        const hex = AIRLINE_TAIL_COLORS[prefix];
+        const col = hex ? new THREE.Color(hex) : null;
+        _airlineTailCache.set(prefix, col);
+        return col;
+    }
+
     // Tracks which aircraft currently have an active EMERGENCY flag so the
     // alert fires once on onset, not every frame the flag stays set (the
     // ring/alert split mirrors the AIS DARK_VESSEL/REAPPEAR pattern: an
@@ -847,8 +985,11 @@ async function init(mapData) {
         // frame; this initial update avoids a one-frame flash at the origin
         // (instancer slots start zero-scaled/invisible until first written).
         obj.userData.instanceHandle = aircraftInstancer.spawn(data.aircraftClass);
+        data.aircraftBodyColor = getAircraftBodyColor(data.callsign, data.aircraftClass);
+        data.aircraftTailColor = getAircraftTailColor(data.callsign, data.aircraftClass);
         aircraftInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible,
-            data.currentHeadingDeg, data.bankDeg, data.pitchDeg, data.spawnEase);
+            data.currentHeadingDeg, data.bankDeg, data.pitchDeg, data.spawnEase,
+            data.aircraftBodyColor, data.aircraftTailColor);
 
         // Registered invisible — with hundreds/thousands of live aircraft,
         // drawing every contrail at once is unreadable clutter (the long
@@ -890,8 +1031,11 @@ async function init(mapData) {
             data.threeObject = obj;
             window.aisShips.push(obj);
             obj.userData.instanceHandle = aircraftInstancer.spawn(data.aircraftClass);
+            data.aircraftBodyColor = getAircraftBodyColor(data.callsign, data.aircraftClass);
+            data.aircraftTailColor = getAircraftTailColor(data.callsign, data.aircraftClass);
             aircraftInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible,
-                data.currentHeadingDeg, data.bankDeg, data.pitchDeg, data.spawnEase);
+                data.currentHeadingDeg, data.bankDeg, data.pitchDeg, data.spawnEase,
+                data.aircraftBodyColor, data.aircraftTailColor);
 
             const col = getAltColor(data.altMeters ?? 0);
             // Registers hidden, same as onAircraftNew — this rebuilds a fresh
@@ -963,6 +1107,50 @@ async function init(mapData) {
         obj.userData.operator     = data.operator;
     };
 
+    // When the info card opens, uiController.js fetches /aircraft-reg (hexdb.io)
+    // to fill in REGISTRATION/TYPE/OPERATOR for aircraft where the live ADS-B
+    // stream didn't carry those fields (OpenSky fallback). If the returned typeCode
+    // maps to a different visual class than the current shape, we rebuild here —
+    // same logic as the reclassification inside onAircraftUpdate above, but driven
+    // by the enrichment result instead of a poll update.
+    window.addEventListener('vg1:aircraftTypeEnriched', e => {
+        const { icao24, typeCode, registration, operator } = e.detail || {};
+        if (!icao24 || !typeCode) return;
+        const data = flightManager.aircraft?.get(icao24);
+        if (!data) return;
+
+        // Update the data record
+        if (registration && !data.registration) data.registration = registration;
+        if (operator    && !data.operator)    data.operator    = operator;
+        data.typeCode = typeCode;
+
+        // Compute visual class; bail if same as current or unknown
+        const newClass = typeCodeToVisualClass(typeCode);
+        if (!newClass || newClass === data.aircraftClass) return;
+        data.aircraftClass = newClass;
+
+        let obj = data.threeObject;
+        if (!obj || obj.userData.class === newClass) return;
+
+        // Rebuild shape — identical to the reclassification block in onAircraftUpdate
+        _disposeFlightObject(obj);
+        const idx2 = window.aisShips.indexOf(obj);
+        if (idx2 !== -1) window.aisShips.splice(idx2, 1);
+        obj = createFlightObject(data, scene, laneGroup);
+        data.threeObject = obj;
+        window.aisShips.push(obj);
+        obj.userData.instanceHandle = aircraftInstancer.spawn(data.aircraftClass);
+        data.aircraftBodyColor = getAircraftBodyColor(data.callsign, data.aircraftClass);
+        data.aircraftTailColor = getAircraftTailColor(data.callsign, data.aircraftClass);
+        aircraftInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible,
+            data.currentHeadingDeg, data.bankDeg, data.pitchDeg, data.spawnEase ?? 1,
+            data.aircraftBodyColor, data.aircraftTailColor);
+        const col = getAltColor(data.altMeters ?? 0);
+        trailManager.register(obj, `#${col.getHexString()}`, false);
+        if (obj.userData.altitudeGlow) obj.userData.altitudeGlow.material.color.copy(col);
+        console.log(`[reclassify] ${icao24} ${typeCode} → ${newClass} (hexdb enrichment)`);
+    });
+
     flightManager.onAircraftRemove = (icao24) => {
         // This path only fires after FLIGHT.STALE_MS of total silence with
         // no ground report ever seen — flightManager.js now intercepts
@@ -1017,6 +1205,9 @@ async function init(mapData) {
 
     // ── Discovery console — live terminal log of every AI Discovery pass
     initDiscoveryConsole(discoveryManager);
+
+    // ── Fleet Intelligence Panel — live airline/vessel counts, left panel
+    initFleetIntel();
 
     // ── Feed — RSS aggregation, two-section layout, tag/search filtering
     initFeedManager();
@@ -1168,8 +1359,20 @@ async function init(mapData) {
     // with the occupancy/transitions render loop above.
     initAviationNewsManager();
 
+    // Zone recorder — armed, zone-scoped ship+plane capture (zoneRecorder.js).
+    // Both taps chain alongside the whole-feed AISRecorder: same raw stream,
+    // the zone recorder just ignores everything outside its armed window/zone.
+    const zoneRecorder = new ZoneRecorder();
+    const _zoneAisTap  = zoneRecorder.aisTap();
+    const _zoneFltTap  = zoneRecorder.flightTap();
+
     const _recTap = aisRecorder.tap();
-    aisManager.onRawMessage = (msg) => { _recTap(msg); };
+    aisManager.onRawMessage = (msg) => { _recTap(msg); _zoneAisTap(msg); };
+    flightManager.onRawAircraft = (state) => { _zoneFltTap(state); };
+
+    // DevTools quick reference:
+    //   vg1ZoneRec.arm({lat, lon, radiusNm, startMs, endMs}) / .status() / .disarm()
+    window.vg1ZoneRec = zoneRecorder;
 
     window.vg1Scenario = {
         async load(urlOrObj) {
@@ -1196,7 +1399,11 @@ async function init(mapData) {
 
     // Archive panel — session recorder: AIS stream + camera path, with
     // POV replay (mutes live feed, clears world, re-flies the camera).
-    initArchivePanel({ aisManager, recorder: aisRecorder, camera, controls });
+    // Now also hosts ZONE RECORD: armed zone-scoped ship+plane capture.
+    initArchivePanel({
+        aisManager, flightManager, recorder: aisRecorder, zoneRecorder,
+        camera, controls, scene, requestMapPick,
+    });
 
     // Demo mode (key prompt's "VIEW DEMO" button) — synthetic traffic, no key.
     window.addEventListener('vg1:demoMode', () => {
@@ -1317,6 +1524,10 @@ async function init(mapData) {
             case 'storm-history': ibtracsManager.setVisible(on);     break;
             case 'gps-jamming':  gpsJammingManager.setVisible(on);   break;
             case 'fog':          window.vg1_fog_enabled   = on;       break;
+            case 'ports':
+                if (portManager) portManager.setEnabled(on);
+                else if (portMarkersGroup) portMarkersGroup.visible = on;
+                break;
             case 'ais-vessels':
                 // Master switch for the vessel layer: hides/show all AIS vessels, their
                 // dots/rings/trails, AND the cluster glyphs — so the map can show only
@@ -1431,8 +1642,17 @@ async function init(mapData) {
 
     // ── Tile-streaming LOD terrain ────────────────────────────────────────────
     const tileStreamManager = new TileStreamManager(scene);
+
+    // ── Phase 3: layer-coordination brain (2026-07-15) ────────────────────────
+    // One controller fades base cloud ↔ tile points ↔ 3DGS captures so exactly
+    // one detail layer owns the ground at any view. Replaces the direct
+    // updatePointCloud() call in the loop (see below).
+    const layerCoordinator = new LayerCoordinator(tileStreamManager, gsManager);
+    window.layerCoordinator = layerCoordinator;
     tileStreamManager.enabled = true;        // multi-level LOD: zoom 6 @ y<200, zoom 8 @ y<120, zoom 10 @ y<50
     window.tileStream = tileStreamManager;   // console access
+    window.vg1TileTest = tileLoadTester;     // console: await vg1TileTest.run() — see tileLoadTester.js
+    window.vg1VisualTest = terrainVisualTester;   // console: await vg1VisualTest.run() — see terrainVisualTester.js
 
     // ── 3D building extrusion (OSM, tier-1 cities) ────────────────────────────
     const buildingManager = new BuildingManager(scene);
@@ -1608,7 +1828,8 @@ async function init(mapData) {
     });
 
     // NDC project + edge-clamp helper
-    const _ndcVec  = new THREE.Vector3();
+    const _ndcVec          = new THREE.Vector3();
+    const _lockTargetGround = new THREE.Vector3(); // scratch for locked-ship ground pivot
     function _projectToEdge(worldPos, vpW, vpH) {
         _ndcVec.copy(worldPos).project(camera);
         // On screen when all NDC coords are in [-1, 1] and in front (z <= 1)
@@ -1746,6 +1967,35 @@ async function init(mapData) {
         }
 
         controls.update();
+
+        // ── Deep-dive terrain collision (2026-07-13 near-plane surgery) ──────
+        // With the camera floor at street scale, the camera can dive INTO
+        // mountains. Clamp above the sampled ground. exag=650 is the worker's
+        // steepest divisor, so this over-estimates peak height slightly —
+        // erring the camera HIGH, never inside rock.
+        if (camera.position.y < 6) {
+            const hM     = getTrueElevation(camera.position.x, camera.position.z);
+            const dist2  = (camera.position.x / 300) ** 2 + (camera.position.z / 300) ** 2;
+            const groundY = (Math.max(0, hM) / 650) * TERRAIN_VERTICAL_SCALE - dist2 * 20 + 0.12;
+            if (camera.position.y < groundY) camera.position.y = groundY;
+        }
+
+        // ── Altitude-dynamic near plane (2026-07-13 near-plane surgery) ──────
+        // near=1 was the hard wall between the map and street-scale zoom: at
+        // y<2 the world clipped away. Scale near with altitude — high views
+        // keep near=1 EXACTLY (zero change to the tuned look), low views gain
+        // clip precision. Audited 2026-07-13: fog, clouds, tilt-shift are all
+        // depth-free (analytic / screen-space); only the optional BokehPass
+        // reads depth, and its cached nearClip is synced below.
+        const targetNear = Math.min(1.0, Math.max(0.02, camera.position.y * 0.05));
+        if (Math.abs(camera.near - targetNear) > camera.near * 0.05) {
+            camera.near = targetNear;
+            camera.updateProjectionMatrix();
+            if (bokehPass && bokehPass.uniforms && bokehPass.uniforms['nearClip']) {
+                bokehPass.uniforms['nearClip'].value = camera.near;
+                bokehPass.uniforms['farClip'].value  = camera.far;
+            }
+        }
 
         // ── FOV lerp — smooth transition between CINEMATIC / BALANCED / TACTICAL
         if (Math.abs(camera.fov - _targetFOV) > 0.08) {
@@ -1926,7 +2176,9 @@ async function init(mapData) {
             }
 
             aircraftInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible,
-                a.currentHeadingDeg, a.bankDeg, a.pitchDeg, a.spawnEase);
+                a.currentHeadingDeg, a.bankDeg, a.pitchDeg, a.spawnEase,
+                a.aircraftBodyColor ?? getAircraftBodyColor(a.callsign, a.aircraftClass),
+                a.aircraftTailColor ?? getAircraftTailColor(a.callsign, a.aircraftClass));
         });
 
         // ── Selection ring ────────────────────────────────────────────────────
@@ -1953,6 +2205,9 @@ async function init(mapData) {
         // ── Transition orchestrator (Plan 02) ─────────────────────────────────
         transitionMgr.tick(state, camera);
 
+        // ── Flight route arcs (bead-on-wire update) ───────────────────────────
+        flightRouteManager.tick();
+
         // ── Port LOD + hover + animation (Phases 1–4) ─────────────────────────
         portManager.tick(camera, mouse, delta);
 
@@ -1967,16 +2222,27 @@ async function init(mapData) {
 
         // ── Continent terrain mesh LOD + point cloud crossfade ───────────────
         continentMesh.update(camera);
-        updatePointCloud(camera);
+        // Base splat hands off ONLY over solid mesh terrain (deep-dive levels).
+        // Point-tile coverage never counts — dots over dots with the base faded
+        // left see-through black holes (2026-07-12).
+        // Phase 3 brain: fades base cloud + tile points against tile coverage and
+        // 3DGS capture presence (was a direct updatePointCloud call).
+        layerCoordinator.update(camera, controls.target);
 
         // ── City LOD + label fade + glow pulse ────────────────────────────────
         cityManager.update(camera);
 
         // ── 3D building extrusion ─────────────────────────────────────────────
-        buildingManager.update(camera);
+        // Buildings disabled 2026-07-15 (Jamal: "remove the blue cities from the
+        // entire map"). Extrusions start hidden and only appear via update(), so
+        // skipping it removes them everywhere. Re-enable by uncommenting.
+        // buildingManager.update(camera);
 
         // ── Tile-streaming LOD terrain ────────────────────────────────────────
-        tileStreamManager.update(camera);
+        tileStreamManager.update(camera, controls.target);
+
+        // ── 3DGS hotspot captures (fade in at close zoom near a pinned capture)
+        gsManager.update(camera);
 
         // ── AI Co-Pilot ───────────────────────────────────────────────────────
         aiCopilot.tick(delta);
@@ -2273,7 +2539,16 @@ async function init(mapData) {
         // on a vessel (e.g. the first ship to arrive on the live feed).
         if (_userHasInteracted) {
             if (state.lockedShip) {
-                controls.target.lerp(state.lockedShip.position, 0.08);
+                // Keep pivot at terrain level (y=0) so OrbitControls minDistance
+                // is computed from the ground, not from the plane's altitude.
+                // Without this, a plane cruising at y=10 raises the effective zoom
+                // floor by ~10 units, preventing close zoom-in after clicking.
+                _lockTargetGround.set(
+                    state.lockedShip.position.x,
+                    0,
+                    state.lockedShip.position.z
+                );
+                controls.target.lerp(_lockTargetGround, 0.08);
             } else if (state.isPanningToTerrain) {
                 controls.target.lerp(state.terrainTargetPos, 0.08);
                 if (controls.target.distanceTo(state.terrainTargetPos) < 0.5) {

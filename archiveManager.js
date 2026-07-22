@@ -10,10 +10,21 @@
 //   LIVE   — back to wall clock + live feed
 //   EXPORT — download capture as NDJSON (first line = manifest with camera track)
 //
-// Wiring (main.js): initArchivePanel({ aisManager, recorder, camera, controls })
+//   ZONE RECORD — armed, zone-scoped capture of ships AND planes:
+//     SET ZONE → click the map, a cyan disc marks the capture zone
+//     ARM      → recorder waits for the window start (sim time), records only
+//                traffic inside the zone, auto-stops at window end
+//     SAVE     → capture joins the archive list; REPLAY re-feeds both domains
+//
+// Wiring (main.js): initArchivePanel({ aisManager, flightManager, recorder,
+//                                      zoneRecorder, camera, controls, scene,
+//                                      requestMapPick })
 
+import * as THREE from 'three';
 import { simClock } from './simClock.js';
-import { RecordedAISSource } from './dataSource.js';
+import { RecordedAISSource, ZoneRecordedSource } from './dataSource.js';
+import { ZoneRecorder, ZR_STATE } from './zoneRecorder.js';
+import { MAP_WIDTH, ZONE_REC } from './config.js';
 
 // ── IndexedDB minimal promise wrapper ────────────────────────────────────────
 const DB_NAME = 'vg1-archive';
@@ -56,7 +67,8 @@ async function dbDelete(id) {
 }
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
-export function initArchivePanel({ aisManager, recorder, camera, controls }) {
+export function initArchivePanel({ aisManager, flightManager, recorder, zoneRecorder,
+                                   camera, controls, scene, requestMapPick }) {
     let replaySource = null;
     let recTimer     = null;
     let camTimer     = null;
@@ -91,6 +103,32 @@ export function initArchivePanel({ aisManager, recorder, camera, controls }) {
             <div id="arc-pov-row" style="display:none; margin-bottom:8px;">
                 <button id="arc-pov" style="${btnCss('#ffb547')}; width:100%;">▣ POV LOCKED — CLICK TO FREE CAMERA</button>
             </div>
+            <div style="border-top:1px solid rgba(64,196,255,0.15); margin-bottom:8px; padding-top:8px;">
+                <div style="color:#40c4ff; letter-spacing:2px; margin-bottom:6px;">◎ ZONE RECORD</div>
+                <div style="display:flex; gap:6px; margin-bottom:6px; align-items:center;">
+                    <button id="arc-zone-set" style="${btnCss('#40c4ff')}">SET ZONE</button>
+                    <input id="arc-zone-radius" type="number" value="${ZONE_REC.DEFAULT_RADIUS_NM}" min="5" max="600"
+                        style="width:44px; background:transparent; border:1px solid #2e4a5e; color:#cfe3f1;
+                               font-family:inherit; font-size:9px; padding:4px 3px;">
+                    <span style="color:#4a6b84;">NM</span>
+                </div>
+                <div id="arc-zone-coords" style="color:#4a6b84; letter-spacing:1px; margin-bottom:6px;">NO ZONE SET</div>
+                <div style="color:#4a6b84; margin-bottom:6px;">
+                    <div style="display:flex; gap:5px; align-items:center; margin-bottom:4px;">
+                        <span style="width:32px;">START</span>
+                        <input id="arc-zone-start" type="datetime-local" style="${dtCss()}">
+                    </div>
+                    <div style="display:flex; gap:5px; align-items:center;">
+                        <span style="width:32px;">END</span>
+                        <input id="arc-zone-end" type="datetime-local" style="${dtCss()}">
+                    </div>
+                </div>
+                <div style="display:flex; gap:6px; margin-bottom:6px;">
+                    <button id="arc-zone-arm"  style="${btnCss('#ff1744')}" disabled>◎ ARM</button>
+                    <button id="arc-zone-save" style="${btnCss('#40c4ff')}" disabled>SAVE ZONE</button>
+                </div>
+                <div id="arc-zone-status" style="min-height:13px; color:#4a6b84; letter-spacing:1px;">IDLE</div>
+            </div>
             <div id="arc-status" style="min-height:13px; color:#4a6b84; letter-spacing:1px; margin-bottom:8px;">READY</div>
             <div id="arc-list" style="max-height:180px; overflow-y:auto;"></div>
         </div>
@@ -101,6 +139,11 @@ export function initArchivePanel({ aisManager, recorder, camera, controls }) {
         return `flex:1; background:transparent; border:1px solid ${color};
                 color:${color}; padding:5px 4px; font-family:inherit; font-size:9px;
                 letter-spacing:1px; cursor:pointer;`;
+    }
+    function dtCss() {
+        return `flex:1; background:rgba(1,10,20,0.9); border:1px solid #2e4a5e;
+                color:#cfe3f1; font-family:inherit; font-size:9px; padding:3px;
+                color-scheme:dark;`;
     }
 
     const $ = (id) => document.getElementById(id);
@@ -169,6 +212,151 @@ export function initArchivePanel({ aisManager, recorder, camera, controls }) {
         refreshList();
     });
 
+    // ── Zone record ───────────────────────────────────────────────────────────
+    const zSetBtn  = $('arc-zone-set'),   zArmBtn   = $('arc-zone-arm');
+    const zSaveBtn = $('arc-zone-save'),  zStatus   = $('arc-zone-status');
+    const zCoords  = $('arc-zone-coords'), zRadius  = $('arc-zone-radius');
+    const zStart   = $('arc-zone-start'), zEnd      = $('arc-zone-end');
+
+    let zonePick   = null;   // { point: Vector3, lon, lat }
+    let zoneMeshes = null;   // { disk, ring }
+    let zCountTimer = null;
+
+    function setZStatus(text, color = '#4a6b84') {
+        zStatus.textContent = text;
+        zStatus.style.color = color;
+    }
+
+    // datetime-local helpers (values are local time; Date.parse handles them)
+    function toLocalInput(ms) {
+        const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000);
+        return d.toISOString().slice(0, 16);
+    }
+    function prefillWindow() {
+        if (!zStart.value) zStart.value = toLocalInput(simClock.now());
+        if (!zEnd.value)   zEnd.value   = toLocalInput(simClock.now() + 30 * 60000);
+    }
+    header.addEventListener('click', prefillWindow);
+
+    function clearZoneMeshes() {
+        if (!zoneMeshes || !scene) { zoneMeshes = null; return; }
+        scene.remove(zoneMeshes.disk); scene.remove(zoneMeshes.ring);
+        zoneMeshes.disk.geometry.dispose(); zoneMeshes.ring.geometry.dispose();
+        zoneMeshes = null;
+    }
+
+    // Zone disc radius in scene units: 1° lon = MAP_WIDTH/360 units = 60 nm at
+    // the equator; Mercator stretches horizontal distance by 1/cos(lat), so the
+    // drawn disc matches the true haversine filter closely enough to aim by.
+    function drawZoneMeshes() {
+        if (!zonePick || !scene) return;
+        clearZoneMeshes();
+        const radiusNm = Number(zRadius.value) || ZONE_REC.DEFAULT_RADIUS_NM;
+        const cosLat   = Math.max(0.2, Math.cos(zonePick.lat * Math.PI / 180));
+        const r        = (radiusNm / 60) * (MAP_WIDTH / 360) / cosLat;
+
+        const diskGeo = new THREE.CircleGeometry(r, 64);
+        diskGeo.rotateX(-Math.PI / 2);
+        const disk = new THREE.Mesh(diskGeo, new THREE.MeshBasicMaterial({
+            color: 0x40c4ff, transparent: true, opacity: 0.07,
+            depthWrite: false, side: THREE.DoubleSide,
+        }));
+        disk.position.copy(zonePick.point).setY(zonePick.point.y + 0.3);
+        scene.add(disk);
+
+        const ringGeo = new THREE.RingGeometry(Math.max(0.1, r - 0.4), r, 64);
+        ringGeo.rotateX(-Math.PI / 2);
+        const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+            color: 0x40c4ff, transparent: true, opacity: 0.55,
+            depthWrite: false, side: THREE.DoubleSide,
+        }));
+        ring.position.copy(zonePick.point).setY(zonePick.point.y + 0.35);
+        scene.add(ring);
+
+        zoneMeshes = { disk, ring };
+    }
+
+    zSetBtn.addEventListener('click', () => {
+        if (!requestMapPick) { setZStatus('MAP PICK UNAVAILABLE', '#ff1744'); return; }
+        zSetBtn.textContent = 'CLICK MAP...';
+        requestMapPick(({ point, lon, lat }) => {
+            zonePick = { point, lon, lat };
+            drawZoneMeshes();
+            zCoords.textContent = `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
+            zCoords.style.color = '#cfe3f1';
+            zSetBtn.textContent = 'SET ZONE';
+            zArmBtn.disabled = false;
+            prefillWindow();
+        });
+    });
+    zRadius.addEventListener('change', drawZoneMeshes);
+
+    zArmBtn.addEventListener('click', () => {
+        if (!zoneRecorder) return;
+        const st = zoneRecorder.state;
+        if (st === ZR_STATE.RECORDING) { zoneRecorder.stop(); return; }   // stop early, keep capture
+        if (st === ZR_STATE.ARMED)     { zoneRecorder.disarm(); return; } // cancel while waiting
+        if (!zonePick) return;
+        const startMs = zStart.value ? Date.parse(zStart.value) : simClock.now();
+        const endMs   = zEnd.value   ? Date.parse(zEnd.value)   : startMs + 30 * 60000;
+        try {
+            zoneRecorder.arm({
+                lat: zonePick.lat, lon: zonePick.lon,
+                radiusNm: Number(zRadius.value) || ZONE_REC.DEFAULT_RADIUS_NM,
+                startMs, endMs,
+            });
+        } catch (e) {
+            setZStatus(e.message.replace('[ZoneRecorder] arm: ', '').toUpperCase(), '#ff1744');
+        }
+    });
+
+    // State transitions arrive on the event bus; the count ticks on a timer.
+    window.addEventListener('vg1:zoneRecorder', (ev) => {
+        const { state } = ev.detail;
+        clearInterval(zCountTimer); zCountTimer = null;
+        if (state === ZR_STATE.ARMED) {
+            zArmBtn.textContent = '■ DISARM';
+            setZStatus('ARMED — WAITING FOR WINDOW', '#ffb547');
+        } else if (state === ZR_STATE.RECORDING) {
+            zArmBtn.textContent = '■ STOP';
+            zCountTimer = setInterval(() => {
+                const c = zoneRecorder.counts();
+                setZStatus(`● REC — ${c.ais} SHIP / ${c.flt} AIR MSGS`, '#ff1744');
+            }, 1000);
+            setZStatus('● REC — 0 SHIP / 0 AIR MSGS', '#ff1744');
+        } else if (state === ZR_STATE.DONE) {
+            zArmBtn.textContent = '◎ ARM';
+            const c = zoneRecorder.counts();
+            setZStatus(`DONE — ${c.ais} SHIP / ${c.flt} AIR MSGS`, '#40c4ff');
+            zSaveBtn.disabled = zoneRecorder.count() === 0;
+        } else { // IDLE (disarmed)
+            zArmBtn.textContent = '◎ ARM';
+            setZStatus('IDLE');
+            zSaveBtn.disabled = true;
+        }
+    });
+
+    zSaveBtn.addEventListener('click', async () => {
+        if (!zoneRecorder || zoneRecorder.count() === 0) return;
+        const s = zoneRecorder.status();
+        const name = prompt('Name this zone capture:',
+            `zone ${s.zone.lat.toFixed(1)},${s.zone.lon.toFixed(1)} ${new Date(s.window.startMs).toISOString().slice(0, 16).replace('T', ' ')}`) || 'unnamed zone';
+        await dbPut({
+            name, kind: 'zone', savedAt: Date.now(),
+            t0: s.window.startMs, t1: s.window.endMs,
+            count: zoneRecorder.count(),
+            zone: s.zone,
+            ndjson: zoneRecorder.toNDJSON(),
+        });
+        zoneRecorder.clear();
+        clearZoneMeshes();
+        zonePick = null;
+        zCoords.textContent = 'NO ZONE SET'; zCoords.style.color = '#4a6b84';
+        zArmBtn.disabled = true; zSaveBtn.disabled = true;
+        setZStatus('SAVED', '#40c4ff');
+        refreshList();
+    });
+
     // ── Session replay ────────────────────────────────────────────────────────
     function startPOV(track) {
         povRow.style.display = 'block';
@@ -202,17 +390,29 @@ export function initArchivePanel({ aisManager, recorder, camera, controls }) {
     });
 
     async function replay(capture) {
-        // Fresh world: mute live feed, drop existing vessels (also prevents the
-        // invariant gate rejecting replayed positions as backwards teleports),
-        // detach any prior replay source, scrub the clock.
+        // Fresh world: mute live feeds, drop existing entities (also prevents
+        // the invariant gate rejecting replayed positions as backwards
+        // teleports), detach any prior replay source, scrub the clock.
         aisManager.setLivePaused(true);
+        if (flightManager) flightManager.setLivePaused(true);
         if (replaySource) aisManager.detachSource(replaySource);
         aisManager.clearAllVessels();
+        if (flightManager) flightManager.clearAll();
         simClock.setTime(capture.t0);
 
-        const records = (capture.ndjson || '').split('\n').filter(l => l.trim())
-            .map(l => JSON.parse(l)).sort((a, b) => a.t - b.t);
-        replaySource = new RecordedAISSource(records);
+        if (capture.kind === 'zone') {
+            // Mixed ship+plane capture: manifest line is skipped by the parser;
+            // flight records re-enter through flightManager.ingest.
+            const { records } = ZoneRecorder.parseNDJSON(capture.ndjson);
+            if (records.length) simClock.setTime(records[0].t);
+            replaySource = new ZoneRecordedSource(records, {
+                flightSink: (states) => flightManager && flightManager.ingest(states),
+            });
+        } else {
+            const records = (capture.ndjson || '').split('\n').filter(l => l.trim())
+                .map(l => JSON.parse(l)).sort((a, b) => a.t - b.t);
+            replaySource = new RecordedAISSource(records);
+        }
         aisManager.attachSource(replaySource);
         replaying = true;
 
@@ -232,8 +432,12 @@ export function initArchivePanel({ aisManager, recorder, camera, controls }) {
         aisManager.detachAllSources();
         replaySource = null;
         replaying = false;
-        aisManager.clearAllVessels();   // drop replay ghosts; live feed repopulates
+        aisManager.clearAllVessels();   // drop replay ghosts; live feeds repopulate
         aisManager.setLivePaused(false);
+        if (flightManager) {
+            flightManager.clearAll();
+            flightManager.setLivePaused(false);
+        }
         simClock.goLive();
         setStatus('LIVE — CLOCK ON WALL TIME');
     });
@@ -247,10 +451,11 @@ export function initArchivePanel({ aisManager, recorder, camera, controls }) {
             const row = document.createElement('div');
             const mins = ((c.t1 - c.t0) / 60000).toFixed(1);
             const cam  = c.camTrack?.length > 1 ? ' · POV' : '';
+            const zone = c.kind === 'zone' ? ' · <span style="color:#40c4ff;">◎ ZONE</span>' : '';
             row.style.cssText = 'border-top:1px solid rgba(64,196,255,0.12); padding:6px 0;';
             row.innerHTML = `
                 <div style="color:#cfe3f1; letter-spacing:1px;">${c.name.toUpperCase()}</div>
-                <div style="color:#4a6b84;">${new Date(c.savedAt).toLocaleString()} · ${c.count} msgs · ${mins} min${cam}</div>
+                <div style="color:#4a6b84;">${new Date(c.savedAt).toLocaleString()} · ${c.count} msgs · ${mins} min${cam}${zone}</div>
                 <div style="display:flex; gap:5px; margin-top:4px;">
                     <button data-act="replay" style="${btnCss('#40c4ff')}">REPLAY</button>
                     <button data-act="export" style="${btnCss('#8aabc4')}">EXPORT</button>
@@ -259,8 +464,10 @@ export function initArchivePanel({ aisManager, recorder, camera, controls }) {
             `;
             row.querySelector('[data-act="replay"]').addEventListener('click', () => replay(c));
             row.querySelector('[data-act="export"]').addEventListener('click', () => {
-                const manifest = JSON.stringify({ type: 'vg1-capture', name: c.name, t0: c.t0, t1: c.t1, camTrack: c.camTrack ?? [] });
-                const blob = new Blob([manifest + '\n' + c.ndjson], { type: 'application/x-ndjson' });
+                // Zone captures already carry their own manifest as line 1.
+                const payload = c.kind === 'zone' ? c.ndjson :
+                    JSON.stringify({ type: 'vg1-capture', name: c.name, t0: c.t0, t1: c.t1, camTrack: c.camTrack ?? [] }) + '\n' + c.ndjson;
+                const blob = new Blob([payload], { type: 'application/x-ndjson' });
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
                 a.download = `${c.name.replace(/[^\w-]+/g, '_')}.ndjson`;

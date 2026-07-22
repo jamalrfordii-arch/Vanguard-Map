@@ -225,14 +225,28 @@ export function initSelectionRing(scene) {
             if (!_target) return;
             ring._snap();
 
+            // Scale the ring with camera altitude so it stays a sane on-screen
+            // size instead of ballooning to fill the view at close zoom, where a
+            // fixed ~3-unit radius dominates everything (2026-07-15). Full size at
+            // regional view (camY≈90), shrinking as you dive.
+            const camY = (typeof window !== 'undefined' && window.camera)
+                ? window.camera.position.y : 90;
+            // Power curve (>1) tightens the ring FASTER as you dive, so it becomes
+            // a precision cursor honing in on a specific feature rather than
+            // blanketing a hillside at close zoom (2026-07-15, Jamal's call).
+            const zoomScale = THREE.MathUtils.clamp(Math.pow(camY / 90, 1.5), 0.025, 1.15);
+            outerRing.scale.setScalar(zoomScale);
+            ticks.mesh.scale.setScalar(zoomScale);
+            needle.mesh.scale.setScalar(zoomScale);
+
             // Outer ring — slow clockwise drift
             outerRing.rotation.z -= delta * 0.30;
 
-            // Inner ring — breathe opacity + very subtle scale
+            // Inner ring — breathe opacity + very subtle scale (× zoom scale)
             const t      = elapsed * 2.0;
             const breath = Math.sin(t);                               // -1 … 1
             innerMat.opacity = 0.55 + 0.28 * breath;
-            const scl    = 1.0 + 0.045 * Math.sin(t * 0.8);
+            const scl    = (1.0 + 0.045 * Math.sin(t * 0.8)) * zoomScale;
             innerRing.scale.setScalar(scl);
 
             // ── Compass — only drawn when the target reports a heading ──────
@@ -274,8 +288,10 @@ export function initSelectionRing(scene) {
         // Snap both rings to the vessel's current world position
         _snap() {
             _target.getWorldPosition(_pos);
-            outerRing.position.set(_pos.x, _pos.y + 0.18, _pos.z);
-            innerRing.position.set(_pos.x, _pos.y + 0.22, _pos.z);
+            // Sit at the target's base ("at the bottom") rather than floating a
+            // fifth of a unit above it — reads as a ground footprint at close zoom.
+            outerRing.position.set(_pos.x, _pos.y + 0.04, _pos.z);
+            innerRing.position.set(_pos.x, _pos.y + 0.06, _pos.z);
         },
 
         get target() { return _target; },

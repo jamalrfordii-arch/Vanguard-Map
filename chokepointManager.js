@@ -382,6 +382,9 @@ export class ChokepointManager {
         this._landmarks.forEach(lm => {
             // ── Classify vessels in this chokepoint ──────────────────────────────
             let count = 0, darkCount = 0, stoppedCount = 0;
+            const vessels = []; // per-vessel detail for discoveryManager's snapshot —
+                                 // aggregate counts alone give Claude nothing to correlate
+                                 // against developingStories/RF/integrity by MMSI.
 
             for (let i = 0, n = aisShips.length; i < n; i++) {
                 const ship = aisShips[i];
@@ -392,8 +395,11 @@ export class ChokepointManager {
                     lon < lm.cp.lonMin || lon > lm.cp.lonMax) continue;
 
                 count++;
-                if (ship.userData.isDark)                                          darkCount++;
-                if ((ship.userData.speedKts ?? 99) <= STOPPED_KTS && !ship.userData.isDark) stoppedCount++;
+                const isDark   = !!ship.userData.isDark;
+                const isStopped = (ship.userData.speedKts ?? 99) <= STOPPED_KTS && !isDark;
+                if (isDark)    darkCount++;
+                if (isStopped) stoppedCount++;
+                vessels.push({ mmsi: ship.userData.id, dark: isDark, stopped: isStopped });
             }
 
             const state    = _classifyState(count, darkCount, stoppedCount);
@@ -430,9 +436,10 @@ export class ChokepointManager {
             }
 
             // ── Update hit mesh userData for click handler ───────────────────────
-            lm.hitMesh.userData.chokepointState = state;
-            lm.hitMesh.userData.chokepointCount = count;
-            lm.hitMesh.userData.chokepointDark  = darkCount;
+            lm.hitMesh.userData.chokepointState  = state;
+            lm.hitMesh.userData.chokepointCount  = count;
+            lm.hitMesh.userData.chokepointDark   = darkCount;
+            lm.hitMesh.userData.chokepointVessels = vessels;
 
             // ── Drive opacity ─────────────────────────────────────────────────────
             if (state === 'closure') {

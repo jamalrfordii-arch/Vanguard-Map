@@ -73,6 +73,33 @@ Rules:
 
 TOOL — searchHistory(mmsi, days): the snapshot only shows the CURRENT picture. If a vessel in developingStories or integrityFlagged looks suspicious and its PAST pattern (not just this moment) would change your assessment, you may request its history instead of answering. To do so, respond ONLY with raw JSON in exactly this shape: {"toolCall": {"name": "searchHistory", "args": {"mmsi": "<mmsi>", "days": 7}}}. You will then be given the result and must answer in the normal {"assessment", "actions"} shape — you may use this tool at most once per request, so only call it when the snapshot alone is genuinely insufficient.`;
 
+// VANGUARD AI Discovery — OPTIONS mode (2026-07-21). Used instead of
+// DISCOVERY_SYSTEM whenever discoveryManager.js's escalation carries a named
+// trigger type with a fixed menu (see discoveryRules.js's OPTION_MENUS). The
+// difference from DISCOVERY_SYSTEM is deliberate and narrow: Claude's job
+// here is to RANK a small analyst-written menu against the evidence, not to
+// freely compose an assessment. This is what makes the result renderable as
+// clickable option cards instead of a paragraph, and it's a harder task to
+// hallucinate on — the model can misjudge which option fits best, but it
+// can't invent a hypothesis that isn't in the menu.
+const OPTIONS_SYSTEM = `You are VANGUARD's AI Discovery layer, ranking a FIXED set of analyst-defined hypotheses against live evidence — not free-writing an assessment. You will be given a cross-domain snapshot, the specific trigger condition that fired, and a MENU of hypotheses appropriate to that trigger type.
+
+Rules:
+- Rank EVERY item in the menu — do not omit any, and do not add a hypothesis that isn't in the menu.
+- Each item gets a confidence of exactly "HIGH", "MEDIUM", or "LOW", and one sentence of reasoning grounded in a specific field from the snapshot (MMSI, flag, tier, RF event type, chokepoint name, timestamp). Never write a claim that can't be traced to a field you were given.
+- Order the array from most to least likely.
+- If nothing in the evidence actually distinguishes between menu items, say so plainly in the reasoning (e.g. "no distinguishing evidence yet") rather than fabricating a detail to justify a ranking.
+- You may also propose the operator's console take action, via "actions". Available tools:
+    - selectVessel(mmsi, openCard): pan the camera to a vessel and optionally open its detail card. Use when a specific vessel deserves the operator's immediate attention right now.
+    - addToWatchlist(mmsi): add a vessel to the persistent watchlist for ongoing monitoring. Use when the vessel's behavior warrants tracking over time, not just flagging in this one pass.
+    - flagForNextShift(mmsi, note): add to the watchlist AND leave a short note explaining the concern, for whoever picks this up next. Use when there's something specific worth putting on record, not just a vessel worth watching.
+  Only take an action when the evidence genuinely warrants it — most passes should return an empty actions array. Never invent an mmsi that isn't present in the snapshot above. At most 2 actions per response.
+- Respond ONLY with raw JSON, no markdown fences, in exactly this shape:
+{"options": [{"label": "<exact menu item text>", "confidence": "HIGH", "reasoning": "<one grounded sentence>"}], "actions": [{"tool": "addToWatchlist", "args": {"mmsi": "<mmsi>"}}]}
+- "actions" may be an empty array.
+
+TOOL — searchHistory(mmsi, days): same as before — if a vessel's PAST pattern (not just this moment) would change your ranking, you may request it once instead of answering. Respond ONLY with raw JSON: {"toolCall": {"name": "searchHistory", "args": {"mmsi": "<mmsi>", "days": 7}}}. You will then be given the result and must answer in the {"options", "actions"} shape — at most one tool call per request.`;
+
 // VANGUARD AI Discovery — direct operator Q&A. Same snapshot, same grounding
 // discipline as DISCOVERY_SYSTEM, but answering a specific question instead
 // of scanning autonomously for a correlation. Added 2026-06-21 — the pass-only
@@ -103,6 +130,43 @@ function parseDiscoveryResponse(raw) {
         // Model didn't return clean JSON — surface the text, take no action.
         return { assessment: raw, actions: [] };
     }
+}
+
+/** Parse Claude's OPTIONS-mode response — expects raw JSON per OPTIONS_SYSTEM.
+ *  Unlike parseDiscoveryResponse, there's no "fall back to raw text" path:
+ *  an options card either has valid ranked options or it doesn't render at
+ *  all (rawFallback carries the text so discoveryManager can still surface
+ *  SOMETHING rather than silently drop a spent Claude call). Malformed
+ *  individual option entries are filtered rather than failing the whole
+ *  response — a model that gets one field wrong shouldn't lose the other three.*/
+function parseOptionsResponse(raw) {
+    if (!raw) return { options: [], actions: [] };
+    try {
+        const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+        const parsed  = JSON.parse(cleaned);
+        const options = Array.isArray(parsed.options)
+            ? parsed.options
+                .filter(o => o && typeof o.label === 'string' && o.label.trim())
+                .map(o => ({
+                    label:      o.label.trim(),
+                    confidence: ['HIGH', 'MEDIUM', 'LOW'].includes(o.confidence) ? o.confidence : 'LOW',
+                    reasoning:  typeof o.reasoning === 'string' ? o.reasoning : '',
+                }))
+            : [];
+        return { options, actions: Array.isArray(parsed.actions) ? parsed.actions : [] };
+    } catch (_) {
+        return { options: [], actions: [], rawFallback: raw };
+    }
+}
+
+/** Build the OPTIONS-mode user message: the same cross-domain summary
+ *  buildDiscoverySummary produces, plus the specific trigger that fired and
+ *  the fixed menu to rank against it. */
+function buildOptionsSummary(snapshot, triggerType, triggerText, menu) {
+    const base = buildDiscoverySummary(snapshot);
+    const menuList = menu.map((m, i) => `${i + 1}. ${m}`).join('\n');
+    return `${base}\n\nTRIGGER FIRED: ${triggerType} — ${triggerText}\n\n`
+        + `MENU (rank ALL of these against the evidence above, do not add or omit any):\n${menuList}`;
 }
 
 /** Build a readable cross-domain summary for the discovery prompt. */
@@ -147,7 +211,15 @@ function buildDiscoverySummary(snapshot) {
     if (cps.length) {
         lines.push(`CHOKEPOINT VESSEL ACTIVITY (${cps.length}):`);
         for (const c of cps) {
-            lines.push(`  ${c.name}: ${c.count} vessels, state ${c.state}${c.dark ? ', ' + c.dark + ' dark' : ''}`);
+            // MMSIs (added 2026-07-21) — without these the model has an aggregate
+            // count with nothing to cross-reference against developing threads /
+            // integrity flags / RF, and correctly refuses to speculate. See
+            // memory/decisions.md for the live miss that surfaced this.
+            const vessels = c.vessels || [];
+            const mmsiList = vessels.length
+                ? ' [' + vessels.map(v => `${v.mmsi}${v.dark ? ' DARK' : ''}${v.stopped ? ' STOPPED' : ''}`).join(', ') + ']'
+                : '';
+            lines.push(`  ${c.name}: ${c.count} vessels, state ${c.state}${c.dark ? ', ' + c.dark + ' dark' : ''}${mmsiList}`);
         }
     }
 
@@ -572,22 +644,18 @@ function proxyFlightsCached(res) {
         return true;
     }
 
-    // OpenSky first (registered, much higher rate limit) when credentials are
-    // configured; falls straight through to the anonymous mirror chain if
-    // it's unset or the request fails for any reason.
-    function tryOpenSkyThenMirrors() {
-        if (!OPENSKY_CLIENT_ID || !OPENSKY_CLIENT_SECRET) return tryMirror(0);
-        fetchOpenSkyStates((err, bodyStr) => {
-            if (!err && acceptBody(bodyStr, 'OpenSky Network')) return;
-            console.warn(`[proxy] OpenSky failed (${err ? err.message : 'bad payload'}) — trying anonymous mirrors...`);
-            tryMirror(0);
-        });
-    }
-
-    // Try each anonymous ADS-B mirror in order — same schema, so the first
-    // one that returns a valid payload wins.
+    // Priority: airplanes.live → adsb.lol → OpenSky (last resort).
+    //
+    // airplanes.live and adsb.lol are ADSBExchange-compatible feeds that include
+    // the `t` (ICAO type code) and `r` (registration) fields on every state —
+    // these are what drive the aircraft shape classification system in
+    // flightManager.js (NARROWBODY / WIDEBODY / REGIONAL / BIZJET). OpenSky's
+    // /states/all endpoint does not include type codes or registrations, so it
+    // can only produce COMMERCIAL/CARGO/HELICOPTER/GA shapes. OpenSky is kept
+    // as the last-resort fallback (position data is better than nothing) but
+    // should never win when either primary mirror is reachable.
     function tryMirror(idx) {
-        if (idx >= FLIGHTS_URLS.length) return serveStaleOrEmpty();
+        if (idx >= FLIGHTS_URLS.length) return tryOpenSkyFallback();
 
         const targetUrl = FLIGHTS_URLS[idx];
         const chunks = [];
@@ -605,7 +673,21 @@ function proxyFlightsCached(res) {
         });
     }
 
-    tryOpenSkyThenMirrors();
+    // OpenSky as last resort — provides positions but NOT type codes or
+    // registrations, so shape classification degrades to class-only (COMMERCIAL
+    // for most aircraft). Only attempted when both primary mirrors fail and
+    // credentials are configured.
+    function tryOpenSkyFallback() {
+        if (!OPENSKY_CLIENT_ID || !OPENSKY_CLIENT_SECRET) return serveStaleOrEmpty();
+        console.warn('[proxy] primary mirrors failed — falling back to OpenSky (no type codes)');
+        fetchOpenSkyStates((err, bodyStr) => {
+            if (!err && acceptBody(bodyStr, 'OpenSky Network (fallback)')) return;
+            console.warn(`[proxy] OpenSky fallback also failed (${err ? err.message : 'bad payload'})`);
+            serveStaleOrEmpty();
+        });
+    }
+
+    tryMirror(0);
 }
 
 // ── Build a plain-English event summary for Claude ────────────────────────────
@@ -930,25 +1012,48 @@ const server = http.createServer((req, res) => {
                 return;
             }
 
-            let snapshot;
-            try { snapshot = JSON.parse(body).snapshot; }
-            catch (_) {
+            let snapshot, triggerType, triggerText, menu;
+            try {
+                const parsedBody = JSON.parse(body);
+                snapshot    = parsedBody.snapshot;
+                // OPTIONS mode (2026-07-21): present only when discoveryManager.js's
+                // escalation has a named trigger type with a menu attached (see
+                // discoveryRules.js's OPTION_MENUS). Absent → falls straight back to
+                // the original free-assessment DISCOVERY_SYSTEM path below, unchanged.
+                triggerType = typeof parsedBody.triggerType === 'string' ? parsedBody.triggerType : null;
+                triggerText = typeof parsedBody.triggerText === 'string' ? parsedBody.triggerText : '';
+                menu        = Array.isArray(parsedBody.menu) && parsedBody.menu.length ? parsedBody.menu : null;
+            } catch (_) {
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: 'Invalid JSON body' }));
                 return;
             }
 
-            const userMsg = buildDiscoverySummary(snapshot);
-            console.log(`[proxy] → ${AI_PROVIDER} discovery pass | stories: ${snapshot?.developingStories?.length ?? 0} | flagged: ${snapshot?.integrityFlagged?.length ?? 0}`);
+            const useOptionsMode = !!(triggerType && menu);
+            const userMsg = useOptionsMode
+                ? buildOptionsSummary(snapshot, triggerType, triggerText, menu)
+                : buildDiscoverySummary(snapshot);
+            console.log(`[proxy] → ${AI_PROVIDER} discovery pass ${useOptionsMode ? `(OPTIONS: ${triggerType})` : '(assessment)'} `
+                + `| stories: ${snapshot?.developingStories?.length ?? 0} | flagged: ${snapshot?.integrityFlagged?.length ?? 0}`);
 
             // Ground truth first — log the exact snapshot the model is about
             // to see, BEFORE the call. If the model errors out, the event is
             // still on record; if it doesn't, we have an id to tag the finding.
-            const eventId = memoryStore.appendEvent(snapshot, { kind: 'pass' });
+            const eventId = memoryStore.appendEvent(snapshot, { kind: 'pass', triggerType });
 
             try {
-                const raw    = await callLLMWithTools(DISCOVERY_SYSTEM, userMsg, 500);
-                const result = parseDiscoveryResponse(raw);
+                // Token budget (2026-07-21, live-caught): 500 was tuned for
+                // DISCOVERY_SYSTEM's short prose assessment. OPTIONS_SYSTEM has to
+                // rank every item in a 3-4 entry menu with a full grounded-reasoning
+                // sentence EACH, plus an actions array — a real live response
+                // (COORDINATED_MULTI_VESSEL trigger) measurably ran out of budget
+                // mid-way through its actions array ("Unterminated string in JSON"),
+                // silently losing the whole pass to parseOptionsResponse's
+                // rawFallback path instead of rendering cards. 1024 gives real
+                // headroom; DISCOVERY_SYSTEM keeps its original 500.
+                const raw    = await callLLMWithTools(useOptionsMode ? OPTIONS_SYSTEM : DISCOVERY_SYSTEM, userMsg, useOptionsMode ? 1024 : 500);
+                const result = useOptionsMode ? parseOptionsResponse(raw) : parseDiscoveryResponse(raw);
+                if (useOptionsMode) { result.triggerType = triggerType; result.triggerText = triggerText; }
                 memoryStore.appendFinding(eventId, result, { provider: AI_PROVIDER, kind: 'pass' });
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(result));

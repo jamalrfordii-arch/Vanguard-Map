@@ -37,7 +37,7 @@ let _readyAtMs        = 0;
  * The mesh's vertex data is populated by an off-thread worker (~800ms cold
  * start). This function polls every 200ms until the geometry is available.
  */
-export function init(continentMeshInstance) {
+export function init(continentMeshInstance, onReady) {
     _continentMeshRef = continentMeshInstance;
     let pollCount = 0;
     const check = () => {
@@ -48,6 +48,9 @@ export function init(continentMeshInstance) {
             _readyAtMs = performance.now();
             const verts = _positions.length / 3;
             console.info(`[TerrainHeight] Sampler ready — ${verts.toLocaleString()} vertices across ${SEGS}×${SEGS} grid`);
+            // 2026-07-21: lets one-time consumers (e.g. border redrape) wait for
+            // real data instead of polling isReady() themselves.
+            try { onReady?.(); } catch (err) { console.warn('[TerrainHeight] onReady callback threw:', err); }
             return;
         }
         if (pollCount++ < 100) setTimeout(check, 200);

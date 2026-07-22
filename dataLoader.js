@@ -106,12 +106,27 @@ export async function loadAllData(onProgress, opts = {}) {
     const ZOOM      = Math.max(2, Math.min(4, opts.zoom ?? 4));
     const GRID_SIZE = 1 << ZOOM;   // 2^ZOOM tiles per axis
 
+    // ── Fully-open base map (2026-07-15) ──────────────────────────────────────
+    // The base cloud is now built from token-free open data end to end:
+    //   • Elevation: AWS Terrarium tiles (already open) — Copernicus/SRTM DEM.
+    //   • Colour:    EOX Sentinel-2 cloudless — an open, CORS-readable, cloud-free
+    //                global mosaic (verified 256² + pixel-readable), replacing
+    //                ArcGIS World Imagery. Same WebMercator z/y/x tiling.
+    // No Cesium/ArcGIS token anywhere in the floor. Flip BASE_COLOR_SOURCE back to
+    // 'arcgis' to revert; bump the s2cloudless year as EOX publishes new mosaics.
+    const BASE_COLOR_SOURCES = {
+        eox:    (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/GoogleMapsCompatible/${z}/${y}/${x}.jpg`,
+        arcgis: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`,
+    };
+    const BASE_COLOR_SOURCE = 'eox';
+    const colorUrlFor = BASE_COLOR_SOURCES[BASE_COLOR_SOURCE];
+
     const demUrls = [];
     const colorUrls = [];
     for (let y = 0; y < GRID_SIZE; y++) {
         for (let x = 0; x < GRID_SIZE; x++) {
             demUrls.push(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${ZOOM}/${x}/${y}.png`);
-            colorUrls.push(`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${ZOOM}/${y}/${x}`);
+            colorUrls.push(colorUrlFor(ZOOM, x, y));
         }
     }
 

@@ -29,7 +29,7 @@ const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
 const EARTH_NM = 3440.065; // Earth radius in nautical miles
 
-function haversineNm(lat1, lon1, lat2, lon2) {
+export function haversineNm(lat1, lon1, lat2, lon2) {
     const dLat = (lat2 - lat1) * DEG2RAD;
     const dLon = (lon2 - lon1) * DEG2RAD;
     const a = Math.sin(dLat / 2) ** 2 +
@@ -244,6 +244,57 @@ export class RecordedAISSource extends DataSource {
         while (this._cursor < this._records.length && this._records[this._cursor].t <= now) {
             this._emit(this._records[this._cursor].msg);
             this._cursor++;
+        }
+        this._lastSim = now;
+    }
+}
+
+// ── ZoneRecordedSource ────────────────────────────────────────────────────────
+// Replays a mixed ship+plane zone capture (zoneRecorder.js) against simClock.
+// Records are { t, d: 'ais'|'flt', msg }, sorted by t ascending.
+//
+// AIS records flow through the normal DataSource sink (attach via
+// aisManager.attachSource, downstream identical to any other source).
+// Flight records are batched per tick and handed to `flightSink` as a
+// wire-shaped states array — wire it to flightManager.ingest in main.js.
+// Scrubbing backwards rewinds the cursor, same contract as RecordedAISSource.
+export class ZoneRecordedSource extends DataSource {
+    constructor(records, { flightSink = null } = {}) {
+        super();
+        this._records    = records; // [{t, d, msg}], sorted
+        this._flightSink = flightSink;
+        this._cursor     = 0;
+        this._lastSim    = null;
+    }
+
+    firstTimestamp() { return this._records.length ? this._records[0].t : null; }
+    lastTimestamp()  { return this._records.length ? this._records[this._records.length - 1].t : null; }
+
+    _onStart() {
+        this._lastSim = simClock.now();
+        this._seek(this._lastSim);
+    }
+
+    _seek(simMs) {
+        let lo = 0, hi = this._records.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (this._records[mid].t < simMs) lo = mid + 1; else hi = mid;
+        }
+        this._cursor = lo;
+    }
+
+    _tick() {
+        const now = simClock.now();
+        if (now < this._lastSim) this._seek(now); // scrubbed backwards
+        const flightBatch = [];
+        while (this._cursor < this._records.length && this._records[this._cursor].t <= now) {
+            const r = this._records[this._cursor++];
+            if (r.d === 'flt') flightBatch.push(r.msg);
+            else               this._emit(r.msg);
+        }
+        if (flightBatch.length && this._flightSink && this._running) {
+            this._flightSink(flightBatch);
         }
         this._lastSim = now;
     }

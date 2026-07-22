@@ -1,6 +1,7 @@
 // waterManager.js — Injects Gerstner Wave mathematics into a standard material
 import * as THREE from 'three';
 import { MAP_WIDTH, MAP_HEIGHT, WATER_OPACITY } from './config.js';
+import { getTrueElevation } from './terrainBuilder.js';
 
 // 1×1 transparent default so the uSeaState sampler is always valid (waveFieldLayer
 // swaps in the real equirectangular sea-state colour texture when its layer is on).
@@ -30,7 +31,30 @@ export function createDynamicSeaLevel(scene) {
     // 256×256 gives ~66k vertices — quarter the vertex count of 512×512 with
     // imperceptible loss of wave detail at any tactical viewing distance.
     const geo = new THREE.PlaneGeometry(MAP_WIDTH, MAP_HEIGHT, 256, 256);
-    geo.rotateX(-Math.PI / 2);
+    geo.rotateX(-Math.PI / 2);   // bakes the rotation into the vertex buffer — position.x/z below are already final world coords
+
+    // ── Land mask (2026-07-20, re-attempt) ────────────────────────────────
+    // The sea plane has no land exclusion — it relies entirely on ordinary
+    // depth-testing (opaque land sits above/in front of water) to stay
+    // hidden under continents. That breaks at low, grazing angles over
+    // near-sea-level land (real coastal basins/sabkha, sampled as low as
+    // y=-0.96 in the reported case): the flat plane, further lifted locally
+    // by Gerstner wave displacement, can rise in front of land barely above
+    // y=0, occluding it entirely. Confirmed via live A/B — toggling the sea
+    // mesh's `.visible` off revealed the land rendering completely correctly
+    // underneath (see memory/decisions.md). Same masking technique already
+    // proven in this codebase (waveFieldLayer.setElevationFn /
+    // memory/scar-tissue.md): sample real GEBCO-backed elevation per vertex,
+    // baked once at construction (static — coastlines don't move).
+    {
+        const posAttr = geo.attributes.position;
+        const landMask = new Float32Array(posAttr.count);
+        for (let i = 0; i < posAttr.count; i++) {
+            const elev = getTrueElevation(posAttr.getX(i), posAttr.getZ(i));
+            landMask[i] = elev > 0 ? 1.0 : 0.0;
+        }
+        geo.setAttribute('aLandMask', new THREE.BufferAttribute(landMask, 1));
+    }
 
     const mat = new THREE.MeshStandardMaterial({
         name:             'Water',
@@ -60,9 +84,11 @@ export function createDynamicSeaLevel(scene) {
 
         shader.vertexShader = `
             uniform float uTime;
+            attribute float aLandMask;
             varying float vWaveHeight;
             varying vec3  vWorldNormal;
             varying vec3  vWorldPos;
+            varying float vLandMask;
 
             // Gerstner Wave parameters: direction(x,y), steepness(z), wavelength(w)
             // Steepness tripled from original — makes crests clearly visible.
@@ -127,6 +153,7 @@ export function createDynamicSeaLevel(scene) {
             // into the plane geometry, giving a correct upward-facing world normal.
             vWorldNormal = normalize(mat3(modelMatrix) * waveNormal);
             vWorldPos    = (modelMatrix * vec4(p, 1.0)).xyz;
+            vLandMask    = aLandMask;
             `
         ).replace(
             `#include <beginnormal_vertex>`,
@@ -189,10 +216,20 @@ export function createDynamicSeaLevel(scene) {
             varying float vWaveHeight;
             varying vec3  vWorldNormal;
             varying vec3  vWorldPos;
+            varying float vLandMask;
             ${shader.fragmentShader}
         `.replace(
             `#include <dithering_fragment>`,
             `#include <dithering_fragment>
+
+            // ── Land mask (2026-07-20) ──────────────────────────────────────────
+            // Baked per-vertex from real GEBCO elevation (see geometry setup in
+            // createDynamicSeaLevel). Discard early so masked land pixels skip
+            // all the per-pixel sea-state/foam/fresnel/glitter/hex-grid work
+            // below. Hard cutoff (matches waveFieldLayer's masking technique) —
+            // the 256×256 grid (~1.17 scene units/cell) keeps the coastline
+            // reasonably crisp at map scale.
+            if (vLandMask > 0.5) discard;
 
             // ── Sea-state paint — significant wave height INTO the ocean ───────
             // Recolour the base water FIRST so foam / fresnel / sun-glitter / SSS

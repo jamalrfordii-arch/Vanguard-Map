@@ -28,8 +28,13 @@
 //   Old cost was O(entities × trailLen) buffer sub-data calls.
 
 import * as THREE from 'three';
+import { TRAIL_POOL } from './config.js';
 
-export const MAX_ENTITIES  = 256;  // enough for ~100 ships + ~80 aircraft + ~20 sats + margin
+// Sized from config.js's TRAIL_POOL — derived from the real per-domain caps
+// (AIS.MAX_VESSELS + FLIGHT.MAX_AIRCRAFT + satellite margin) instead of a
+// standalone guess that can drift out of sync with them. See config.js for
+// the 2026-07-21 fix note.
+export const MAX_ENTITIES  = TRAIL_POOL.MAX_ENTITIES;
 export const MAX_TRAIL_LEN = 96;   // covers ships(60), aircraft(80), sats(24), simulated(40)
 
 // ── Vertex shader ─────────────────────────────────────────────────────────────

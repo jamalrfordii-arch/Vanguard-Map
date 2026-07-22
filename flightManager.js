@@ -10,16 +10,106 @@ function shortestAngleDelta(a, b) {
     return ((b - a + 540) % 360) - 180;
 }
 
+// ── ICAO type-code → visual subclass ──────────────────────────────────────────
+// Maps the ADS-B `t` field (e.g. "B738", "A388", "C56X") to a visual class
+// that selects the correct InstancedMesh set in aircraftInstancer.js.
+// Returns null for unknown types so the caller can fall back to other signals.
+// Sets are intentionally explicit (no fuzzy prefix matching) to avoid false
+// positives — if a code is ambiguous, leave it out and let category-map handle it.
+const _TC_MILITARY = new Set([
+    'F15','F15E','F15C','F15D','F16','F16C','F16D','F18','F18C','F18D','F22','F35','F117',
+    'B1','B1B','B2','B2A','B21','B52','B52H',
+    'A10','AV8','U2','SR71',
+    'C130','C130J','C17','C17A','C5','C5M','KC135','KC46','C141','C40','C37',
+    'P3','P8','E3','E6','E8',
+    'AH64','AH6','AH1','CH47','CH47F','UH60','MH60','SH60','OH58',
+    'V22','MV22','CV22',
+    'MQ9','MQ1','RQ4','RQ7',
+    'T38','T45','T6','T6A','T1',
+]);
+const _TC_WIDEBODY = new Set([
+    'B742','B743','B744','B748',
+    'B762','B763','B764',
+    'B772','B773','B77L','B77W','B77X','B788','B789','B78X',
+    'A310',
+    'A330','A332','A333','A338','A339',
+    'A343','A345','A346',
+    'A350','A358','A359','A35K',
+    'A380','A388',
+    'IL96','AN124','IL76','AN22',
+]);
+const _TC_REGIONAL = new Set([
+    'E135','E140','E145',
+    'E170','E175','E175L',
+    'E190','E190E2','E195','E195E2',
+    'E275','E290','E295',
+    'CRJ1','CRJ2','CRJ7','CRJ9','CRJX',
+    'DH8A','DH8B','DH8C','DH8D',
+    'AT43','AT44','AT45','AT72','AT73','AT75','AT76',
+    'SF34','B190','J328',
+    'DHC6','DHC7','DHC8',
+    'F50','F70','F100',
+    'DO28','DO328',
+    'AN24','AN26','AN28',
+    'EM110','EM120',
+]);
+const _TC_BIZJET = new Set([
+    'C25A','C25B','C25C','C25M',
+    'C56X','C560','C55B','C551',
+    'C680','C68A','C700','C750',
+    'CL30','CL35','CL60',
+    'F2TH','FA10','FA50','FA7X',
+    'GL5T','GL7T','GLEX',
+    'GALX','GULF',
+    'GIV','GV','G150','G280','G350','G450','G550','G600','G650',
+    'H25A','H25B',
+    'LJ25','LJ31','LJ35','LJ45','LJ55','LJ60',
+    'PC24','PRM1','SBRL',
+    'BE40','WW24','WW23',
+    'HA4T','ASTR',
+    'E50P','E55P',
+    'JSTR','HDJT',
+]);
+const _TC_NARROWBODY = new Set([
+    'A318','A319','A320','A321','A20N','A21N',
+    'B732','B733','B734','B735','B736','B737','B738','B739','B73X',
+    'B38M','B39M',
+    'MD80','MD81','MD82','MD83','MD87','MD88','MD90',
+    'B717','DC9',
+    'B752','B753',
+    'MA60','TU154','TU204',
+]);
+
+// Returns a visual class string or null if the typeCode is unknown/unrecognised.
+// Priority in classifyAircraft: MILITARY db-flag → CARGO callsign → this fn →
+// emitter-category map → DEFAULT.
+// Exported so main.js can call it from the hexdb-enrichment reclassification path
+// (when the card opens and hexdb.io returns a typeCode that the ADS-B stream didn't
+// carry — see `vg1:aircraftTypeEnriched` event handler in main.js).
+export function typeCodeToVisualClass(typeCode) {
+    if (!typeCode) return null;
+    const t = typeCode.toUpperCase().trim();
+    if (_TC_MILITARY.has(t))   return 'MILITARY';
+    if (_TC_WIDEBODY.has(t))   return 'WIDEBODY';
+    if (_TC_REGIONAL.has(t))   return 'REGIONAL';
+    if (_TC_BIZJET.has(t))     return 'BIZJET';
+    if (_TC_NARROWBODY.has(t)) return 'NARROWBODY';
+    return null;
+}
+
 // ── Aircraft classification ───────────────────────────────────────────────────
-// Picks a visual class from raw ADS-B fields. Military (dbFlags bit) wins over
-// everything else; cargo is inferred from callsign prefix since ADS-B has no
-// direct flag for it; everything else falls back to emitter category, then
-// to the global default (COMMERCIAL — matches the old single-model behavior
-// for any aircraft we can't otherwise classify).
+// Picks a visual class from raw ADS-B fields. Priority order:
+//   1. Military dbFlags bit (most authoritative — comes from operator databases)
+//   2. Cargo callsign prefix (operator-level certainty)
+//   3. ICAO typeCode → visual subclass (shape-accurate for known types)
+//   4. Emitter category map (coarser — catches helicopters, GA, etc.)
+//   5. Default (COMMERCIAL — generic airliner shape, matches old behaviour)
 function classifyAircraft(s, callsign) {
     if (((s.dbFlags ?? 0) & AIRCRAFT_CLASSES.MILITARY_DB_FLAG) !== 0) return 'MILITARY';
     const prefix = callsign.slice(0, 3).toUpperCase();
     if (AIRCRAFT_CLASSES.CARGO_CALLSIGN_PREFIXES.includes(prefix)) return 'CARGO';
+    const tcClass = typeCodeToVisualClass(s.t);
+    if (tcClass) return tcClass;
     const cat = (s.category || '').toUpperCase();
     return AIRCRAFT_CLASSES.CATEGORY_MAP[cat] || AIRCRAFT_CLASSES.DEFAULT;
 }
@@ -76,6 +166,36 @@ export class FlightManager {
         // before scene mutation. Wired to flightIntegrityManager.evaluate in
         // main.js; kept generic so this module stays ignorant of scoring.
         this.onPositionEvaluated = null;
+        // (state) → void — every raw wire-shaped aircraft state, fired before
+        // any parsing/filtering (including ground reports, so a replay can
+        // reproduce landings faithfully). Mirrors aisManager.onRawMessage —
+        // this is the recorder tap. Zero behavior change when unset.
+        this.onRawAircraft = null;
+
+        this._livePaused = false; // true during replay: _poll() is muted
+    }
+
+    // Pause/resume the live poll without stopping the timer — used during
+    // replay so recorded and live traffic don't fight (same contract as
+    // aisManager.setLivePaused).
+    setLivePaused(v) { this._livePaused = !!v; }
+
+    // Public injection point for recorded/synthetic states — wire-shaped
+    // array (same fields as the live feed's `ac` entries). Downstream cannot
+    // tell injected traffic from a live poll.
+    ingest(states) {
+        if (!Array.isArray(states) || states.length === 0) return;
+        this._handleData({ ac: states });
+    }
+
+    // Remove every aircraft (fires onAircraftRemove for scene cleanup).
+    // Used when entering replay: a fresh sky prevents stale live aircraft
+    // lingering next to replayed ones.
+    clearAll() {
+        this.aircraft.forEach((_, icao24) => {
+            if (this.onAircraftRemove) this.onAircraftRemove(icao24);
+        });
+        this.aircraft.clear();
     }
 
     init() {
@@ -84,6 +204,7 @@ export class FlightManager {
     }
 
     async _poll() {
+        if (this._livePaused) return; // replay in progress — live feed muted
         try {
             this._setStatus('POLLING...');
             const res = await fetch(FLIGHT.API_URL, { signal: AbortSignal.timeout(15000) });
@@ -102,6 +223,10 @@ export class FlightManager {
         const now    = simClock.now();
 
         for (const s of states) {
+            // Recorder tap FIRST — raw wire shape, before any filtering, so a
+            // capture is a faithful record of what the feed actually said.
+            if (this.onRawAircraft) this.onRawAircraft(s);
+
             const icao24    = s.hex;
             const callsign  = (s.flight || '').trim().replace(/[^\x20-\x7E]/g, '') || 'UNKNOWN';
             const country   = '';
@@ -183,7 +308,23 @@ export class FlightManager {
                 // open by snapping the plane backward to it before crawling
                 // forward again — the "slow motion then snap" Jamal saw live.
                 existing.prevPos.copy(existing.currentPos);
-                existing.targetPos.copy(scenePos);
+                // Project targetPos FORWARD along the heading by ~10s of visual
+                // dead-reckoning so the lerp always travels forward, never back.
+                // Without this, GPS truth (scenePos) sits behind the visually-
+                // overshot currentPos and the lerp visibly pulls the plane back
+                // every 30-second poll before DR resumes pushing it forward.
+                {
+                    const _lerpSec  = 10;          // matches 1 / (delta * 0.1) at 60fps
+                    const _spd      = speedKts * 0.51444;
+                    const _distM    = _spd * _lerpSec;
+                    const _mPerDeg  = 111320;
+                    const _vis      = MAP_HEIGHT / (2.0 * Math.PI);
+                    const _hdgRad   = heading * (Math.PI / 180);
+                    const _dd       = (_distM / _mPerDeg) * _vis;
+                    existing.targetPos.copy(scenePos);
+                    existing.targetPos.x += Math.sin(_hdgRad) * _dd;
+                    existing.targetPos.z -= Math.cos(_hdgRad) * _dd;
+                }
                 existing.lerpAlpha  = 0;
                 existing.speedKts   = speedKts;
                 existing.headingDeg = heading;       // raw latest report — informational only now (UI mirror via main.js's obj.userData.headingDeg). Movement AND visual orientation both use currentHeadingDeg as of the 2026-06-28 heading-mismatch fix in tick() — don't reintroduce a dead-reckoning consumer of this raw field without re-checking that fix.
@@ -278,10 +419,19 @@ export class FlightManager {
                 const cosLat  = Math.cos(a.latDeg * Math.PI / 180) || 0.001;
                 const dLon    = Math.sin(hdgRad) * (distM / (mPerDeg * cosLat));
 
-                a.latDeg       += dLat;
-                a.lonDeg       += dLon;
-                a.currentPos.x += (dLon / 180.0) * (MAP_WIDTH  / 2.0);
-                a.currentPos.z -= dLat * (MAP_HEIGHT / (2.0 * Math.PI));
+                a.latDeg += dLat;
+                a.lonDeg += dLon;
+                // Visual dead-reckoning: apply a unified scale (MAP_HEIGHT / 2π ≈ 47.75)
+                // to BOTH axes so direction is exact (sin/cos heading ratio preserved) and
+                // planes are visibly traversing the map between 30-second GPS polls.
+                // The lerp at each new poll re-anchors currentPos to GPS truth, so the
+                // accumulated visual overshoot is corrected every poll cycle.
+                // (Applying the old Z-only scale to just Z made planes drift toward north
+                // regardless of heading — the 57× Z vs 1× X imbalance was the direction bug.)
+                const visScale = MAP_HEIGHT / (2.0 * Math.PI);
+                const distDeg  = distM / mPerDeg;
+                a.currentPos.x += Math.sin(hdgRad) * distDeg * visScale;
+                a.currentPos.z -= Math.cos(hdgRad) * distDeg * visScale;
             }
 
             // ── Visual flight dynamics (heading ease, bank, pitch) ──────────
