@@ -131,7 +131,24 @@ function operatorFromCallsign(callsign) {
 // reference grids at the exact same heights aircraft actually render at,
 // instead of duplicating this formula and risking drift between the two.
 export function altitudeMetersToY(altMeters) {
-    return altMeters > 50 ? 2.0 + (altMeters / 12000) * 20 : 2.0;
+    // At/below the tracking floor (MIN_ALT_M, the same threshold that governs
+    // appear/disappear) an aircraft sits on the ground plane. Above it, altitude
+    // maps linearly to scene Y, CLAMPED at ALT_CEIL_M so a bad-data altitude
+    // (ADS-B sentinel / geometric-alt spike) can't launch a plane off-scale.
+    if (!(altMeters > FLIGHT.MIN_ALT_M)) return FLIGHT.ALT_Y_BASE;
+    const clamped = Math.min(altMeters, FLIGHT.ALT_CEIL_M);
+    return FLIGHT.ALT_Y_BASE + clamped * (FLIGHT.ALT_Y_SPAN_UNITS / FLIGHT.ALT_Y_SPAN_M);
+}
+
+// Which flight-level band an altitude falls in, given ascending band CEILINGS
+// (ft). Returns the index of the first band whose ceiling ≥ altFt; clamps to the
+// top band above the highest ceiling. This is a CONTAINING-band test, not a
+// nearest-value one: the altitude decks are labeled as ranges, so FL330 belongs
+// to the 29,000–41,000 band — not the numerically-nearest FL290 line. Exported so
+// altitudeDeckManager highlights the correct deck without duplicating the rule.
+export function altitudeBandIndex(altFt, ceilingsFt) {
+    for (let i = 0; i < ceilingsFt.length; i++) if (altFt <= ceilingsFt[i]) return i;
+    return ceilingsFt.length - 1;
 }
 
 export function lonLatAltToScene(lon, lat, altMeters) {

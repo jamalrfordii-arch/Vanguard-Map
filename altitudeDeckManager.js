@@ -53,7 +53,7 @@ import * as THREE from 'three';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
-import { altitudeMetersToY }    from './flightManager.js';
+import { altitudeMetersToY, altitudeBandIndex } from './flightManager.js';
 
 const FT_TO_M = 0.3048;
 
@@ -252,12 +252,11 @@ export class AltitudeDeckManager {
         this.group.position.set(locked.position.x, 0, locked.position.z);
 
         const altFt = (locked.userData.altMeters ?? 0) / FT_TO_M;
-        let nearest = null;
-        let bestDelta = Infinity;
-        for (const d of this._decks) {
-            const delta = Math.abs(d.config.altFt - altFt);
-            if (delta < bestDelta) { bestDelta = delta; nearest = d; }
-        }
+        // Highlight the band the aircraft is IN (containing-band), not the deck
+        // whose flight level is numerically nearest — the latter mis-selects
+        // across the lower half of each band (e.g. FL330 → wrong "18–29k" deck).
+        const idx = altitudeBandIndex(altFt, this._decks.map(d => d.config.altFt));
+        const nearest = this._decks[idx];
 
         for (const d of this._decks) {
             const on = d === nearest;

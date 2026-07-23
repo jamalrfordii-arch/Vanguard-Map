@@ -289,6 +289,7 @@ export const FLIGHT_INTEGRITY = {
         EMERGENCY:        50,   // squawk 7500/7600/7700 or ADS-B emergency field set
         IMPOSSIBLE_SPEED: 35,   // teleport-grade position jump between polls
         ALTITUDE_JUMP:    25,   // climb/descent rate implied between polls is impossible
+        IMPOSSIBLE_ALTITUDE: 25, // absolute altitude above the operational ceiling (sentinel / geometric-alt spike)
         ICAO_INVALID:     20,   // malformed/null hex24 (000000, FFFFFF, not 6 hex chars)
         SPEED_MISMATCH:   20,   // reported ground speed << implied speed from track
         EXCESSIVE_SPEED:  15,   // implied speed exceeds plausible-aircraft ceiling
@@ -304,6 +305,7 @@ export const FLIGHT_INTEGRITY = {
     SPEED_MISMATCH_MIN_KTS: 100,  // only check mismatch above this implied speed (avoid low-speed GPS noise)
     SPEED_MISMATCH_FACTOR:  1.6,  // implied speed must exceed reported gs by this factor to flag
     ALTITUDE_JUMP_FPM:  12000,  // implied climb/descent rate (ft/min) beyond this is impossible
+    IMPOSSIBLE_ALT_FT:  60000,  // absolute altitude above this (~FL600) is bad data, not a real civil/most-military aircraft
     TICK_MS:            5000,   // periodic flag-decay cadence
 };
 
@@ -371,6 +373,17 @@ export const FLIGHT = {
     ALT_LOW_MAX:    2000,            // m — solid yellow below this
     ALT_MID_MAX:    6000,            // m — yellow→white gradient
     ALT_CRUISE_MAX: 10000,           // m — light grey; cyan gradient above
+
+    // Vertical scene-scale for aircraft (altitudeMetersToY in flightManager.js).
+    // sceneY = ALT_Y_BASE + min(altM, ALT_CEIL_M) * (ALT_Y_SPAN_UNITS / ALT_Y_SPAN_M)
+    // for altitudes above the tracking floor (MIN_ALT_M); at/below the floor an
+    // aircraft sits at ALT_Y_BASE. Promoted out of a hardcoded formula (2026-07-22)
+    // per the "no magic constants in a manager" rule — this defines the entire
+    // vertical geometry of the airspace and the altitude decks read from it.
+    ALT_Y_BASE:       2.0,           // scene Y of the ground/near-ground floor
+    ALT_Y_SPAN_M:     12000,         // metres mapped across ALT_Y_SPAN_UNITS…
+    ALT_Y_SPAN_UNITS: 20,            // …scene units (→ 1 scene unit ≈ 600 m ≈ 1,970 ft)
+    ALT_CEIL_M:       18300,         // ~FL600 — clamp so bad-data altitudes can't fly off-scale
 };
 
 // ── Trail pool sizing (trailManager.js) ───────────────────────────────────────

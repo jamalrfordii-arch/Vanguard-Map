@@ -33,6 +33,7 @@ const HUMAN = {
     EMERGENCY:        'Emergency squawk or ADS-B emergency flag set',
     IMPOSSIBLE_SPEED: 'Teleport-grade position jump between polls',
     ALTITUDE_JUMP:    'Climb/descent rate implied between polls is impossible',
+    IMPOSSIBLE_ALTITUDE: 'Reported altitude above the operational ceiling (bad data)',
     SPEED_MISMATCH:   'Reported ground speed inconsistent with track-implied speed',
     EXCESSIVE_SPEED:  'Implied speed exceeds plausible-aircraft ceiling',
     DARK:             'ADS-B transponder went silent',
@@ -162,6 +163,20 @@ class FlightIntegrityManager {
                         this._clearFlag(r, 'ALTITUDE_JUMP');
                     }
                 }
+            }
+        }
+
+        // Absolute-altitude sanity — independent of poll history. A report above
+        // the operational ceiling is bad data (sentinel / geometric-alt spike),
+        // not a real aircraft; flag it rather than let it render off-scale
+        // (altitudeMetersToY clamps the visual Y so it no longer floats away).
+        if (report.altMeters != null) {
+            const altFt = report.altMeters * 3.28084;
+            if (altFt > FLIGHT_INTEGRITY.IMPOSSIBLE_ALT_FT) {
+                this._setFlag(r, 'IMPOSSIBLE_ALTITUDE',
+                    `reports ${altFt.toFixed(0)}ft — above ${FLIGHT_INTEGRITY.IMPOSSIBLE_ALT_FT}ft ceiling`);
+            } else {
+                this._clearFlag(r, 'IMPOSSIBLE_ALTITUDE');
             }
         }
 
