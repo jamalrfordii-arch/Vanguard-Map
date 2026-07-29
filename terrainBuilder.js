@@ -108,6 +108,80 @@ export function getGEBCOElevation(x, z) {
     return (_gebcoData[idx] * 256.0 + _gebcoData[idx + 1] + _gebcoData[idx + 2] / 256.0) - 32768.0;
 }
 
+// Scratch for the pooled sampler's deviation pass. Module-scope and reused:
+// this runs ~263k times during terrain build and a per-call allocation would
+// hand the GC a stall in the middle of startup.
+const _pooledScratch = new Float64Array(64);
+
+/**
+ * Area-pooled GEBCO sample over a footprint, instead of one texel.
+ *
+ * WHY: the ocean-floor mesh is 513×513 while GEBCO here is 8192×4096, so each
+ * mesh vertex stands for roughly 128 texels — and point-sampling threw away 127
+ * of them. Two consequences:
+ *
+ *   1. SPIRES. Whichever single texel a vertex happened to land on became the
+ *      truth, so a vertex over a seamount spiked with no neighbour supporting
+ *      it. That artefact is what the old 6× Gaussian was flattening the whole
+ *      seafloor to suppress.
+ *   2. MISSING EXTREMES. Narrow features are only a few texels wide. The
+ *      Challenger Deep is statistically unlikely to be hit at all, so the
+ *      deepest trench on Earth simply was not in the mesh.
+ *
+ * Returns BOTH mean and min so the caller can decide. Mean alone erases
+ * trenches; min alone deepens everything and makes the abyssal plain lumpy.
+ *
+ * @param {number} halfX,halfZ  half-footprint in SCENE units
+ * @param {number} cap          max samples per axis (build-time cost guard)
+ * @returns {{mean:number, min:number, n:number}}
+ */
+export function getGEBCOElevationPooled(x, z, halfX, halfZ, cap = 6) {
+    if (!_gebcoData) return { mean: 0, min: 0, n: 0 };
+    // z → equirectangular row is non-linear (Mercator), so derive the row span
+    // from the actual edges rather than scaling a constant.
+    const rowOf = (zz) => {
+        const mercY  = -(2.0 * Math.PI * zz) / MAP_HEIGHT;
+        const latRad = 2.0 * Math.atan(Math.exp(mercY)) - Math.PI / 2.0;
+        return (0.5 - latRad / Math.PI) * (_gebcoH - 1);
+    };
+    const colOf = (xx) => (xx / MAP_WIDTH + 0.5) * (_gebcoW - 1);
+
+    let u0 = colOf(x - halfX), u1 = colOf(x + halfX);
+    let v0 = rowOf(z + halfZ), v1 = rowOf(z - halfZ);   // +z is south → lower row
+    if (u1 < u0) { const t = u0; u0 = u1; u1 = t; }
+    if (v1 < v0) { const t = v0; v0 = v1; v1 = t; }
+
+    const nu = Math.max(1, Math.min(cap, Math.round(u1 - u0)));
+    const nv = Math.max(1, Math.min(cap, Math.round(v1 - v0)));
+    const du = nu > 1 ? (u1 - u0) / (nu - 1) : 0;
+    const dv = nv > 1 ? (v1 - v0) / (nv - 1) : 0;
+
+    let sum = 0, min = Infinity, n = 0;
+    const buf = _pooledScratch;
+    for (let j = 0; j < nv; j++) {
+        let v = Math.round(v0 + j * dv);
+        v = v < 0 ? 0 : v > _gebcoH - 1 ? _gebcoH - 1 : v;
+        for (let i = 0; i < nu; i++) {
+            let u = Math.round(u0 + i * du);
+            u = u < 0 ? 0 : u > _gebcoW - 1 ? _gebcoW - 1 : u;
+            const idx = (v * _gebcoW + u) * 4;
+            const h = (_gebcoData[idx] * 256.0 + _gebcoData[idx + 1] + _gebcoData[idx + 2] / 256.0) - 32768.0;
+            if (n < buf.length) buf[n] = h;
+            sum += h; n++;
+            if (h < min) min = h;
+        }
+    }
+    if (!n) return { mean: 0, min: 0, mad: 0, n: 0 };
+    const mean = sum / n;
+    // Mean absolute deviation — a robust spread measure used to decide what
+    // counts as an outlier. Cheaper than a real median/MAD and good enough to
+    // separate "this vertex sits on a slope" from "this vertex hit a spike".
+    let dev = 0;
+    const m = Math.min(n, buf.length);
+    for (let i = 0; i < m; i++) dev += Math.abs(buf[i] - mean);
+    return { mean, min, mad: m ? dev / m : 0, n };
+}
+
 // Best available elevation at (x, z):
 //   Ocean pixels  → GEBCO (450 m resolution, authoritative bathymetry)
 //   Land  pixels  → Terrarium (satellite imagery compensates for coarser DEM)
@@ -218,6 +292,11 @@ export function createHighFidelityPointCloud(scene) {
             // behaviour at altitude). Driven down at close range in
             // updatePointCloud — see the uniform's comment in the vertex shader.
             uOutsideCap:    { value: 1.0 },
+            // Ocean-point opacity. 1.0 = always opaque (REQUIRED — they fill
+            // the coastal seam the floor mesh and carved tiles both miss).
+            // 0.0 culls them and reproduces black notches along shorelines.
+            // Live A/B: splatCloud.material.uniforms.uOceanFade.value
+            uOceanFade:     { value: 1.0 },
             uTilt:          { value: 0.0 },  // 0=top-down, 1=horizontal — drives oblique brightness boost
             // ── Hemisphere lighting — slope-direction dependent fill ──────────
             // uHemiStrength: 0=off (flat AMBIENT), 1=full hemisphere effect.
@@ -334,6 +413,7 @@ export function createHighFidelityPointCloud(scene) {
             // The correct fix is real per-tile coverage in the shader instead of a
             // circle; this is a bounded approximation of it. See decisions.md.
             uniform float uOutsideCap;
+            uniform float uOceanFade;
             // uFade is also declared in the fragment shader. It has to be declared
             // in BOTH: the two stages are compiled as separate programs, so a
             // uniform used in each needs its own declaration. Omitting it here gave
@@ -479,10 +559,34 @@ export function createHighFidelityPointCloud(scene) {
                 // draw. That is the reported "black gap between the tile land and
                 // the continent".
                 //
-                // aHeight is the pre-curve terrain height, so <= 0 is sea level or
-                // below. Those points are the only thing rendering the ocean now,
-                // and nothing else can cover them, so they must always stay lit.
-                if (aHeight <= 0.0) vFadeLocal = 1.0;
+                // RE-TESTED 2026-07-27 — the rule above is CORRECT, but its
+                // stated reason is only half right. Recording both so nobody
+                // (including me) re-litigates this a third time.
+                //
+                // WRONG in the original: "nothing else can cover them".
+                // createSolidOceanFloor's mesh spans the whole map and draws
+                // every pixel below sea level. Hiding the splat cloud entirely
+                // at camera.y=18 leaves open ocean fully rendered — with MORE
+                // bathymetric detail, since these coarse points overlay a
+                // 263k-vertex mesh that resolves the seabed far better.
+                //
+                // RIGHT in the original: the COASTLINE still needs them. The
+                // floor mesh discards at elevation >= 0 and the streamed tiles
+                // are carved to the coastline by tileLandMask, so a thin seam
+                // exists where neither surface draws. Culling ocean points
+                // (uOceanFade = 0) reproduces the reported black notches along
+                // the shore immediately — verified by A/B screenshot off West
+                // Africa.
+                //
+                // And it buys nothing: culling every ocean point measured +3%,
+                // -5%, -3% fps at camera.y 18 / 118 / 250 — inside the noise. The
+                // splat cloud is not the bottleneck, so there is no upside to
+                // trade against a known visual regression.
+                //
+                // uOceanFade stays 1.0. A surgical version — keep ocean points
+                // only within a few km of land, cull them in open water — would
+                // be safe, but only worth building if a real cost is ever found.
+                if (aHeight <= 0.0) vFadeLocal = uOceanFade;
 
                 // Collapse fully-faded points to zero size. The GPU skips
                 // rasterising zero-size points, so the covered footprint costs no
@@ -871,6 +975,55 @@ export function createHighFidelityPointCloud(scene) {
     return splatCloud;
 }
 
+// Number of 3×3 median passes over ocean vertices. 1 is correct for
+// point-sampling artefacts; raise ONLY if real spires survive, and expect each
+// extra pass to start rounding genuine ridge crests. Set to 0 to see the raw
+// GEBCO sampling (useful for judging whether a feature is data or artefact).
+export const OCEAN_DESPIKE_PASSES = 1;
+
+/**
+ * In-place 3×3 median de-spike over OCEAN vertices only.
+ *
+ * Pure (no THREE, no DOM) so it can be tested directly — see
+ * tests/oceanDespike.test.mjs, which asserts the two properties this function
+ * exists for: an isolated spike is removed, and a step edge (shelf break) is
+ * preserved to the metre.
+ *
+ * @param {Float32Array} rawY        vertex heights, modified in place
+ * @param {Float32Array} elevations  metres; >= 0 marks land and is left alone
+ * @param {number} verts             vertices per axis (row stride)
+ * @param {number} passes            median iterations
+ */
+export function medianDespikeOcean(rawY, elevations, verts, passes = 1) {
+    if (!(passes > 0)) return rawY;
+    const out = new Float32Array(rawY);
+    // Reused scratch — allocating a 9-array per vertex would mean ~263k
+    // allocations per pass and hand the GC a stall during terrain build.
+    const w = new Float64Array(9);
+
+    for (let pass = 0; pass < passes; pass++) {
+        for (let row = 1; row < verts - 1; row++) {
+            for (let col = 1; col < verts - 1; col++) {
+                const i = row * verts + col;
+                if (elevations[i] >= 0) continue;      // land — untouched
+                w[0] = rawY[i - verts - 1]; w[1] = rawY[i - verts]; w[2] = rawY[i - verts + 1];
+                w[3] = rawY[i - 1];         w[4] = rawY[i];         w[5] = rawY[i + 1];
+                w[6] = rawY[i + verts - 1]; w[7] = rawY[i + verts]; w[8] = rawY[i + verts + 1];
+                // Insertion sort — optimal for n=9 and branch-predictable.
+                for (let a = 1; a < 9; a++) {
+                    const v = w[a];
+                    let b = a - 1;
+                    while (b >= 0 && w[b] > v) { w[b + 1] = w[b]; b--; }
+                    w[b + 1] = v;
+                }
+                out[i] = w[4];
+            }
+        }
+        rawY.set(out);
+    }
+    return rawY;
+}
+
 export function createSolidOceanFloor(scene) {
     // 512×512 segments — enough resolution to show mid-ocean ridges and trench
     // walls clearly, while keeping the vertex count at 262k (vs 1M at 1024).
@@ -885,10 +1038,51 @@ export function createSolidOceanFloor(scene) {
     const elevations = new Float32Array(pos.count);
     const rawY       = new Float32Array(pos.count);
 
+    // Half a vertex spacing — the footprint each vertex is responsible for.
+    const HALF_X = (MAP_WIDTH  / SEGS) * 0.5;
+    const HALF_Z = (MAP_HEIGHT / SEGS) * 0.5;
+    // Outlier rejection band, in multiples of the footprint's mean absolute
+    // deviation. The point sample is KEPT unless it falls outside mean ± this.
+    //
+    // An earlier version blended mean and min on every vertex, which fixed the
+    // spires but visibly softened the seabed as you zoomed in — averaging is a
+    // low-pass filter and it removed exactly the high-frequency detail that
+    // reads as "sharp" up close. Same mistake as the Gaussian, one stage
+    // earlier: a global smoother applied to fix a local defect.
+    //
+    // Clamping instead keeps every vertex's own sample bit-for-bit unless it is
+    // genuinely anomalous, so detail survives and only spikes are removed.
+    const OUTLIER_MAD = 2.5;
+    // How far a rejected sample is pulled toward the deepest texel rather than
+    // the mean — narrow trenches are real features that read as outliers, so a
+    // rejected DEEP sample should not simply be flattened to the average.
+    const TRENCH_KEEP = 0.35;
+
     for (let i = 0; i < pos.count; i++) {
         const x       = pos.getX(i);
         const z       = pos.getZ(i);
-        const hMeters = getBestElevation(x, z);
+        let   hMeters = getBestElevation(x, z);
+
+        // Ocean vertices: replace the single texel with an area sample. This is
+        // the root fix for the spires the median filter treats downstream — an
+        // outlier can no longer BE the answer, only contribute to it.
+        if (hMeters < 0) {
+            const p = getGEBCOElevationPooled(x, z, HALF_X, HALF_Z);
+            if (p.n > 1 && p.mad > 0) {
+                const band = p.mad * OUTLIER_MAD;
+                if (hMeters > p.mean + band) {
+                    hMeters = p.mean + band;                       // spurious shallow spike
+                } else if (hMeters < p.mean - band) {
+                    // Spurious deep spike — but a real trench also looks like
+                    // one, so land between the clamp and the deepest texel
+                    // rather than discarding the depth entirely.
+                    const clamped = p.mean - band;
+                    hMeters = clamped * (1 - TRENCH_KEEP) + p.min * TRENCH_KEEP;
+                }
+                // else: sample is consistent with its neighbourhood — keep it
+                // EXACTLY as sampled. This is what preserves close-zoom detail.
+            }
+        }
         elevations[i] = hMeters;
 
         const dist   = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
@@ -897,28 +1091,33 @@ export function createSolidOceanFloor(scene) {
                                : (hMeters / 1000.0) * TERRAIN_VSCALE_LAND) + curveY - 0.2;
     }
 
-    // ── Pass 2: 6-iteration Gaussian-weighted smoothing (ocean only) ────────
-    // 5-point equal-weight cross wasn't enough for GEBCO's steepest shelf-break
-    // walls.  Switching to a 9-point weighted kernel (centre×4, edge×2, corner×1
-    // normalised to 16) and running 6 passes eliminates the remaining spires
-    // while preserving the broad shape of ridges and trenches.
-    const tmpY = new Float32Array(rawY);
-    for (let pass = 0; pass < 6; pass++) {
-        for (let row = 1; row < VERTS - 1; row++) {
-            for (let col = 1; col < VERTS - 1; col++) {
-                const i = row * VERTS + col;
-                if (elevations[i] >= 0) continue;   // land — leave untouched
-                // 3×3 Gaussian weights: centre=4, edges=2, corners=1, sum=16
-                const tl = rawY[i - VERTS - 1], tc = rawY[i - VERTS], tr = rawY[i - VERTS + 1];
-                const ml = rawY[i - 1],         mc = rawY[i],          mr = rawY[i + 1];
-                const bl = rawY[i + VERTS - 1], bc = rawY[i + VERTS],  br = rawY[i + VERTS + 1];
-                tmpY[i] = (tl + tr + bl + br
-                         + (tc + ml + mr + bc) * 2.0
-                         +  mc                 * 4.0) / 16.0;
-            }
-        }
-        rawY.set(tmpY);
-    }
+    // ── Pass 2: 3×3 MEDIAN de-spike (ocean only) ────────────────────────────
+    // Replaced a 6-iteration 3×3 Gaussian, 2026-07-27.
+    //
+    // WHY THE GAUSSIAN WAS THE WRONG TOOL
+    // The artefact it was fighting is IMPULSE noise: each vertex takes ONE
+    // GEBCO sample to stand for a footprint containing ~30,000 source pixels
+    // (78 km across at the equator vs GEBCO's ~450 m). A vertex that happens to
+    // land on a seamount or inside a trench returns an extreme value with no
+    // neighbours supporting it — a "spire".
+    //
+    // A Gaussian cannot tell an impulse from a genuine step edge; it attenuates
+    // both. Six passes of the (1,2,1) kernel is sigma ~1.73 vertices — FWHM
+    // ~319 km. A continental shelf break is 10–50 km wide, so the blur was
+    // roughly 11x wider than the feature, and the steepest, most dramatic
+    // bathymetry on the map was the first thing to disappear. The old comment
+    // said as much: the kernel was escalated precisely BECAUSE of "GEBCO's
+    // steepest shelf-break walls".
+    //
+    // A median filter is the textbook answer for impulse noise: it removes
+    // isolated outliers COMPLETELY while preserving step edges EXACTLY, because
+    // the median of a neighbourhood straddling a cliff is still a value from one
+    // side of that cliff — never an average across it. One pass rejects up to 4
+    // outliers in any 3×3 neighbourhood, which is more than a point-sampling
+    // artefact ever produces.
+    //
+    // Verified in tests/oceanDespike.test.mjs: spike removed, shelf break kept.
+    medianDespikeOcean(rawY, elevations, VERTS, OCEAN_DESPIKE_PASSES);
 
     // Apply smoothed heights and build colour / elevation arrays
     const colors = [];
@@ -948,36 +1147,73 @@ export function createSolidOceanFloor(scene) {
             // structure ~25% deeper/darker so the ocean reads as a calm backdrop
             // and the DATA (vessels/alerts, all cyan-family) is the brightest
             // thing on screen. MUST match terrainWorker's ocean bands exactly.
+            // ── DEPTH → COLOUR (rebuilt 2026-07-27) ──────────────────────────────
+            // Depth is now carried mainly by HUE; brightness is left free to carry FORM.
+            //
+            // The previous ramp held saturation at 93-96% and varied hue by only 15 deg
+            // across 10 km of depth — one colour dimmed, not a colour ramp. Two problems:
+            //
+            //   1. It looked generated. Real shallows are DESATURATED (sediment and
+            //      chlorophyll), not electric — and the land beside it is natural-colour
+            //      satellite imagery, so the two halves of the map were built on opposite
+            //      philosophies.
+            //   2. More seriously, depth and relief were fighting over the same channel.
+            //      Hillshade works by modulating brightness, and the old ramp left only 5%
+            //      value at hadal depth — a 30% shading darkening there lands at 3.5%,
+            //      invisible. The deepest trench walls could not read no matter how good
+            //      the geometry was.
+            //
+            // Hue now rotates 176 deg (coastal teal) -> 264 deg (violet-black), following
+            // the order water actually absorbs light: red first, then orange, then green.
+            // Not photoreal — the seafloor below ~200 m is unlit, and strictly "realistic"
+            // would be black — but principled rather than arbitrary, which is what a
+            // bathymetric chart wants.
+            //
+            // Value floor raised 5% -> 17%: 3.4x more brightness headroom for relief at
+            // hadal depth, 1.7x at 6 km.
+            //
+            // MUST match the other copy exactly (terrainBuilder.createSolidOceanFloor <->
+            // terrainWorker). Change both together or the floor mesh and the splat cloud
+            // disagree at the seam.
             if (d < 200) {
-                // Shelf — still the brightest band, no longer electric.
+                // Shelf — coastal teal, low saturation (sediment + chlorophyll).
                 const t = d / 200;
-                r = 0.050 - t * 0.025;   // 0.050 → 0.025
-                g = 0.250 - t * 0.130;   // 0.250 → 0.120
-                b = 0.600 - t * 0.180;   // 0.600 → 0.420
+                r = 0.279 - t * 0.102;   // 0.279 -> 0.177
+                g = 0.620 - t * 0.192;   // 0.620 -> 0.428
+                b = 0.597 - t * 0.077;   // 0.597 -> 0.520
             } else if (d < 2000) {
-                // Slope — endpoints match shelf (top) and abyss (bottom).
+                // Slope — teal rotating into true blue.
                 const t = (d - 200) / 1800;
-                r = 0.025 - t * 0.012;   // 0.025 → 0.013
-                g = 0.120 - t * 0.070;   // 0.120 → 0.050
-                b = 0.420 - t * 0.140;   // 0.420 → 0.280
+                r = 0.177 - t * 0.109;   // 0.177 -> 0.068
+                g = 0.428 - t * 0.266;   // 0.428 -> 0.162
+                b = 0.520 - t * 0.140;   // 0.520 -> 0.380
             } else if (d < 6000) {
-                // Abyss — deep blue-indigo.
+                // Abyss — blue into indigo.
                 const t = (d - 2000) / 4000;
-                r = 0.013 - t * 0.007;   // 0.013 → 0.006
-                g = 0.050 - t * 0.028;   // 0.050 → 0.022
-                b = 0.280 - t * 0.130;   // 0.280 → 0.150
+                r = 0.068 - t * 0.014;   // 0.068 -> 0.054
+                g = 0.162 - t * 0.123;   // 0.162 -> 0.039
+                b = 0.380 - t * 0.120;   // 0.380 -> 0.260
             } else {
-                // Hadal — trenches visibly darker than abyss.
-                const t = Math.min(1.0, (d - 6000) / 4000);
-                r = 0.006 - t * 0.003;   // 0.006 → 0.003
-                g = 0.022 - t * 0.011;   // 0.022 → 0.011
-                b = 0.150 - t * 0.100;   // 0.150 → 0.050
+                // Hadal — indigo into violet. RED RISES here: that is the hue rotating
+                // past blue toward violet, not a sign error.
+                const t = Math.min(1.0, (d - 6000) / 5000);
+                r = 0.054 + t * 0.043;   // 0.054 -> 0.097
+                g = 0.039 + t * 0.009;   // 0.039 -> 0.048
+                b = 0.260 - t * 0.090;   // 0.260 -> 0.170
             }
             colors.push(r, g, b);
         } else {
-            // Land vertices — placeholder only; discarded in the fragment shader
-            // so they never occlude the point cloud above them.
-            colors.push(0.0, 0.0, 0.0);
+            // Land vertices — never rendered directly (fragment discard at
+            // vTrueElevation >= 0), BUT their colour still interpolates into
+            // the KEPT ocean-side fragments of mixed coastal triangles. The
+            // old (0,0,0) placeholder dragged those fragments toward black —
+            // at 512 segments each triangle is ~78 km, so steep coastal drops
+            // (Boso / Japan Trench) rendered sharp BLACK TRIANGULAR WEDGES
+            // exactly one mesh face wide (diagnosed live 2026-07-28; they
+            // predate every tile-layer change that evening). Use the
+            // shelf-start colour (the d→0 endpoint of the depth ramp above)
+            // so the interpolated blend reads as coastal shallows instead.
+            colors.push(0.279, 0.620, 0.597);
         }
     }
 
@@ -986,13 +1222,101 @@ export function createSolidOceanFloor(scene) {
     geo.setAttribute('aTrueElevation', new THREE.Float32BufferAttribute(elevations,            1));
     geo.computeVertexNormals();
 
+    // ── Fixed-azimuth relief shading, BAKED into the vertex colours ──────────
+    // The seafloor must not be lit by the sun.
+    //
+    // main.js drives the scene lights from solar elevation:
+    //     dirLight.intensity = pow(dayFactor, 0.7) * MAX   → 0 at night
+    //     ambientLight       = BASE (uniform)              → normals irrelevant
+    // so on the night side the directional term vanishes and only uniform
+    // ambient remains. Uniform light means vertex normals stop mattering and ALL
+    // relief shading disappears — roughly half the ocean had no cliff shading at
+    // any moment, with the dead half sweeping around behind the terminator.
+    //
+    // It is also wrong on its own terms: the deep seafloor is never sunlit. Real
+    // bathymetric charts light relief from a CONVENTIONAL fixed source —
+    // north-west, 45° altitude — precisely because no real illumination exists
+    // down there. Doing the same makes a trench wall read identically at 03:00
+    // and at noon.
+    //
+    // Baked into vertex colour rather than done in the shader because the mesh
+    // is static: the normals never change, so this is a build-time cost of zero
+    // per frame, and it needs no GLSL hook (this file's history with hook
+    // ordering — see the waterManager note in CLAUDE.md — argues for not adding
+    // one where a CPU pass will do).
+    {
+        // Scene axes: +X east, +Z south, +Y up. North-west at 45° elevation.
+        const LX = -0.5, LY = 0.7071, LZ = -0.5;   // already unit length
+        const nrm = geo.attributes.normal;
+        const col = geo.attributes.color;
+        // Relief strength. 0.55 keeps deep water from crushing to black while
+        // still giving slopes obvious form; the flat abyssal plain lands near
+        // 1.0 and is left essentially untouched.
+        const AMBIENT = 0.45, DIRECT = 0.55;
+
+        // ── Landform emphasis by CURVATURE ───────────────────────────────────
+        // Replaces a depth-keyed "mid-ocean ridge glow" that used to live in the
+        // fragment shader:  exp(-pow((absD - 2200)/800, 2))
+        // That brightened anything which merely SAT at ~2 200 m, so it lit flat
+        // abyssal plain at that depth and missed every ridge shallower or deeper.
+        // It was depth cosplaying as landform.
+        //
+        // The real discriminator is the sign of the curvature: crests and
+        // seamounts are convex, trench floors and channels concave. A discrete
+        // Laplacian gives that directly —
+        //     L = (sum of 4 neighbours) - 4 × centre
+        // L < 0 → centre sits above its surroundings → crest
+        // L > 0 → centre sits below its surroundings → trough
+        // and on flat seabed L ≈ 0, so plains are left alone by construction.
+        //
+        // Done here rather than in GLSL because fwidth() is unsigned: the
+        // fragment stage can measure HOW MUCH the surface bends but not WHICH
+        // WAY, which is the only part that matters here.
+        const CURV_GAIN = 55.0;   // Laplacian is tiny in scene units
+        const lap = new Float32Array(col.count);
+        for (let row = 1; row < VERTS - 1; row++) {
+            for (let c = 1; c < VERTS - 1; c++) {
+                const i = row * VERTS + c;
+                if (elevations[i] >= 0) continue;
+                lap[i] = (rawY[i - 1] + rawY[i + 1] + rawY[i - VERTS] + rawY[i + VERTS])
+                       - 4 * rawY[i];
+            }
+        }
+
+        for (let i = 0; i < col.count; i++) {
+            // Land vertices are shaded too (2026-07-28): they are never drawn
+            // directly, but their placeholder colour interpolates into kept
+            // ocean-side fragments of coastal triangles, and an UNSHADED
+            // full-bright corner would make those fragments pop against their
+            // relief-shaded neighbours. Their lap[] is 0 (skipped in the
+            // curvature pass), so only the NdotL term applies.
+            const ndl = Math.max(0, nrm.getX(i) * LX + nrm.getY(i) * LY + nrm.getZ(i) * LZ);
+            let shade = AMBIENT + DIRECT * ndl;
+
+            // Crest (L<0) lifts, trough (L>0) deepens. Clamped so a single sharp
+            // vertex cannot blow out or black out.
+            const k = Math.max(-1, Math.min(1, lap[i] * CURV_GAIN));
+            shade *= 1.0 - k * 0.22;
+
+            col.setXYZ(i, col.getX(i) * shade, col.getY(i) * shade, col.getZ(i) * shade);
+        }
+        col.needsUpdate = true;
+    }
+
     const mat = new THREE.MeshStandardMaterial({
         name: 'OceanFloor',
         vertexColors: true, roughness: 0.72, metalness: 0.12, flatShading: false,
         emissive:          new THREE.Color(0x002244),
         // 0.70 → 0.45 (2026-07-13 mission 3): the floor's blue self-glow was a
         // major source of "the ocean competes with the data".
-        emissiveIntensity: 0.45,
+        // 0.45 → 0.12 (2026-07-27): emissive is ADDED after lighting, so it sets
+        // a floor under every shaded pixel. That directly cancels the brightness
+        // headroom the new depth ramp was rebuilt to create — a slope darkened
+        // 30% by hillshade gets lifted straight back toward flat. Keeping a
+        // little (0.12) preserves the sense that deep water glows faintly rather
+        // than reading as dead black; taking it to 0 makes the hadal bands look
+        // like holes in the map.
+        emissiveIntensity: 0.12,
         // alphaTest required so the land-discard in onBeforeCompile doesn't
         // leave ghost depth writes that occlude the point cloud behind them.
         alphaTest: 0.01,
@@ -1056,18 +1380,26 @@ export function createSolidOceanFloor(scene) {
                 }
             }
 
-            // ── Per-depth emissive accent ─────────────────────────────────────
+            // Landform emphasis is NOT done here — it is baked into the vertex
+            // colours at build time (see the curvature pass in
+            // createSolidOceanFloor). Curvature needs a SECOND derivative to
+            // separate convex crests from concave troughs, and fwidth() returns
+            // an unsigned magnitude, so a fragment-stage version cannot tell a
+            // ridge from a trench. The CPU has the whole grid and can compute a
+            // proper discrete Laplacian exactly.
+
             if (vTrueElevation < -50.0) {
                 float absD = abs(vTrueElevation);
-                // Shallow shelf — soft cyan lift (sunlit water)
-                float shelfT  = clamp(1.0 - absD / 300.0, 0.0, 1.0);
+                // Shallow shelf — soft lift, sunlit-water cue. Kept: this one is
+                // genuinely a depth phenomenon, not a landform one.
+                float shelfT = clamp(1.0 - absD / 300.0, 0.0, 1.0);
                 gl_FragColor.rgb += vec3(0.010, 0.030, 0.060) * shelfT;
-                // Mid-ocean ridge glow — peaks around 2 000–2 500 m
-                float ridgeT  = exp(-pow((absD - 2200.0) / 800.0, 2.0)) * 0.35;
-                gl_FragColor.rgb += vec3(0.004, 0.018, 0.055) * ridgeT;
-                // Hadal darkening > 6 000 m
+                // Hadal darkening softened 0.30 → 0.16: the rebuilt ramp already
+                // carries depth in hue, and the old value ate the brightness
+                // headroom that relief shading now needs at exactly the depths
+                // where the biggest walls are.
                 float trenchT = clamp((absD - 6000.0) / 3000.0, 0.0, 1.0);
-                gl_FragColor.rgb *= 1.0 - trenchT * 0.30;
+                gl_FragColor.rgb *= 1.0 - trenchT * 0.16;
             }
             `
         );

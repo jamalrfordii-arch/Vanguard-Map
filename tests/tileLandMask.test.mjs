@@ -205,4 +205,83 @@ test('the mask culls a meaningful share of the globe at z10', () => {
         + 'below 25% suggests land is being culled, above 55% suggests the bake did nothing');
 });
 
+// ── (4) v2 land plane — fetch ≠ paint ─────────────────────────────────────────
+// The fetch plane includes the ±1 dilation ring (an error margin for FETCHING).
+// The v2 land plane has no dilation: it answers "may points be painted here?".
+// Cesium ocean tiles decode at the GEOID (+11..+20 m near Japan — above sea
+// level), so without this distinction every dilation-ring water tile painted a
+// full slab of water imagery: the ocean checkerboard (2026-07-28).
+console.log('\nv2 land plane (fetch is not a licence to paint)');
+
+test('a v1 asset still parses, and hasLand fails SAFE (true) without a land plane', () => {
+    // Minimal v1: z3 only, every bit set.
+    const planeLen = (2 ** 4 * 2 ** 3) / 8;                  // 16 B
+    const buf = new ArrayBuffer(36 + planeLen);
+    const b = new Uint8Array(buf), dv = new DataView(buf);
+    'VG1TMASK'.split('').forEach((c, i) => { b[i] = c.charCodeAt(0); });
+    dv.setUint32(8, 1, true);  dv.setUint32(12, 3, true); dv.setUint32(16, 3, true);
+    dv.setUint32(20, 1, true); dv.setUint32(24, 0, true);
+    dv.setUint32(28, 36, true); dv.setUint32(32, planeLen, true);
+    b.fill(0xff, 36);
+    tileLandMask.ingest(buf);
+    assert.equal(tileLandMask.ready, true);
+    assert.equal(tileLandMask.shouldFetch(3, 2, 2), true);
+    // No land plane shipped → suppression must never fire.
+    assert.equal(tileLandMask.hasLand(3, 2, 2), true);
+    assert.equal(tileLandMask.hasLand(12, 5000, 2000), true);
+});
+
+// Restore the real asset for the remaining assertions (and any later section).
+tileLandMask.ingest(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+
+test('real asset is v2: land planes shipped', () => {
+    assert.ok(tileLandMask._landPlanes.size > 0,
+        'no land planes — was the asset rebaked with the v2 tool?');
+});
+
+test('every MUST_FETCH place has LAND, not just a fetch bit', () => {
+    for (const [name, [lat, lon]] of Object.entries(MUST_FETCH)) {
+        for (const z of [8, 9, 10]) {
+            const { tx, ty } = tileOf(lat, lon, z);
+            assert.equal(tileLandMask.hasLand(z, tx, ty), true,
+                `${name} has no land bit at z${z} (${tx}/${ty}) — paint suppression would erase it`);
+        }
+    }
+});
+
+test('open ocean has no land bit', () => {
+    for (const [name, [lat, lon]] of Object.entries(MUST_SKIP)) {
+        const { tx, ty } = tileOf(lat, lon, 10);
+        assert.equal(tileLandMask.hasLand(10, tx, ty), false, `${name} claims land`);
+    }
+});
+
+test('the dilation ring exists: fetched-but-landless tiles are real', () => {
+    // Around Japan (the live-diagnosed case): there must be z8 tiles the mask
+    // fetches (coastal margin) that contain NO land — exactly the tiles the
+    // geoid-ocean gate suppresses. If this count is 0 the two planes are
+    // identical and v2 changed nothing.
+    let fetchOnly = 0, land = 0;
+    for (let lat = 30; lat <= 38; lat += 0.35) {
+        for (let lon = 138; lon <= 144; lon += 0.35) {
+            const { tx, ty } = tileOf(lat, lon, 8);
+            const f = tileLandMask.shouldFetch(8, tx, ty);
+            const l = tileLandMask.hasLand(8, tx, ty);
+            if (l) land++;
+            if (f && !l) fetchOnly++;
+            // land ⇒ fetch, always — painting where we never fetched is absurd.
+            if (l) assert.equal(f, true, `land tile ${tx}/${ty} not fetched`);
+        }
+    }
+    assert.ok(land > 0, 'no land tiles found around Japan — grid mapping broken');
+    assert.ok(fetchOnly > 0, 'no fetch-only tiles — land plane identical to fetch plane');
+});
+
+test('Malé keeps its land bit at z11/z12 (labelled-place force-keep survives v2)', () => {
+    for (const z of [11, 12]) {
+        const { tx, ty } = tileOf(4.1755, 73.5093, z);
+        assert.equal(tileLandMask.hasLand(z, tx, ty), true, `Malé landless at z${z}`);
+    }
+});
+
 console.log(`\n${passed} passed`);

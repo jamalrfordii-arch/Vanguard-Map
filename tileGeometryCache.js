@@ -30,8 +30,15 @@
 /** Bump when buildTilePoints' OUTPUT changes for identical inputs.
  *  Changing sampling, the palette, procedural relief, or the elevation transform
  *  all qualify. When in doubt, bump: a wasted rebuild costs a second, a stale
- *  cache costs a bug you will not see. */
-export const SCHEMA_VERSION = 1;
+ *  cache costs a bug you will not see.
+ *  v2 (2026-07-28): per-sample geoid-water carve from the baked land plane —
+ *  coastal tiles now omit their water-fraction points, so every v1 record is
+ *  stale by construction.
+ *  v3 (2026-07-28): surf cells colour-blend toward the ocean palette and skip
+ *  procedural land texture — coastal tiles' bytes changed again.
+ *  v4 (2026-07-28): carve gated on getBestElevation so cells the floor mesh
+ *  discards stay painted (Tokyo Bay black rectangle) — carve grids changed. */
+export const SCHEMA_VERSION = 4;
 
 const DB_NAME  = 'vg1-tile-geometry';
 const STORE    = 'tiles';

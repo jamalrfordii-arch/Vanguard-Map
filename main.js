@@ -23,7 +23,7 @@ import {
 import {
     initTerrainData, createHighFidelityPointCloud,
     createSolidOceanFloor, createCountryBorders,
-    loadNormalMap, updatePointCloud, createOceanBasinLabels, getTrueElevation
+    updatePointCloud, createOceanBasinLabels, getTrueElevation
 } from './terrainBuilder.js';
 // The tile stream's elevation transform. main.js needs it so the camera's
 // ground floor matches the surface the tiles actually draw at close zoom —
@@ -105,6 +105,7 @@ import { NavLightManager } from './navLightManager.js';
 import { ClimbRibbonManager } from './climbRibbonManager.js';
 import { TileStreamManager } from './tileStreamManager.js';
 import { tileLoadTester }   from './tileLoadTester.js';
+import { coverageScanner } from './tileCoverageScanner.js';
 import { terrainVisualTester } from './terrainVisualTester.js';
 import { contextCards } from './contextCardManager.js';
 import { BuildingManager } from './buildingManager.js';
@@ -631,14 +632,27 @@ async function init(mapData) {
     // ── Wake / wash ───────────────────────────────────────────────────────────
     const wakeManager = new WakeManager(scene);
 
-    // ── Normal map (optional high-res terrain shading) ───────────────────────
-    // Generated once by running tools/generate_normals.py.  If the file is
-    // absent, loadNormalMap() resolves to null and both systems fall back to
-    // smooth vertex normals — no visual regression, just less fine detail.
-    // Skipped on LOW: it's a 17 MB blocking download, and LOW trades fine shading
-    // for fast load (graceful null fallback to smooth normals).
-    const normalMapTex = quality.tier === 'LOW' ? null : await loadNormalMap('./terrain_normals.png');
-    bootMark(quality.tier === 'LOW' ? 'normal map skipped (LOW)' : 'normal map loaded (BLOCKING)');
+    // ── Normal map — NOT LOADED (2026-07-28) ─────────────────────────────────
+    // This was `await loadNormalMap('./terrain_normals.png')`: a 17 MB BLOCKING
+    // download costing 578 ms — the single largest stage in a ~2.7 s boot, per
+    // bootProfiler. It fed exactly two consumers and BOTH are dead:
+    //
+    //   • ContinentMesh(scene, mapData, _normalMapTex) — the underscore is
+    //     literal. Its own comment: "accepted silently", never read again.
+    //   • CityManager(scene, normalMapTex) — stores it, but the only reader is
+    //     _buildTerrainPatches(), commented out at cityManager.js:90 when the
+    //     city patch layer was disabled 2026-07-12 (the "mud smudge" call).
+    //
+    // So the texture was decoded into memory and immediately discarded, every
+    // boot, on every tier above LOW. Passing null is what both call sites
+    // already receive on LOW tier, so this path is the supported, tested one.
+    //
+    // loadNormalMap() is deliberately KEPT exported in terrainBuilder.js — if
+    // the city terrain patches are ever restyled and re-enabled, re-import it
+    // from './terrainBuilder.js', await it HERE, and hand it to CityManager
+    // ONLY. Do not reinstate it for ContinentMesh; that parameter is vestigial.
+    const normalMapTex = null;
+    bootMark('normal map skipped (no live consumer)');
 
     // ── Global continent terrain mesh — satellite + geographic 3D character ──
     // Built in continentWorker.js off-thread; fades in at continent zoom
@@ -1999,6 +2013,7 @@ async function init(mapData) {
     const tileWarmer = new TileWarmer(tileStreamManager._caches);
     window.vg1Warmer = tileWarmer;   // console access
     window.vg1TileTest = tileLoadTester;     // console: await vg1TileTest.run() — see tileLoadTester.js
+    window.vg1CoverageScan = coverageScanner; // console: await vg1CoverageScan.run() — global tile-hole scan, see tileCoverageScanner.js
     window.vg1VisualTest = terrainVisualTester;   // console: await vg1VisualTest.run() — see terrainVisualTester.js
 
     // ── 3D building extrusion (OSM, tier-1 cities) ────────────────────────────

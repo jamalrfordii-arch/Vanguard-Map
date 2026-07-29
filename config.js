@@ -101,6 +101,28 @@ export const TILESTREAM = {
     //   waterline. Keep it small; it is an error bar, not a coastal band.
     LAND_MARGIN_M:       0,
     SHORELINE_EPSILON_M: -5,
+    // GEOID-FLAT OCEAN gate (2026-07-28). Cesium World Terrain has NO bathymetry
+    //   at these levels over most open water — an ocean tile decodes as the flat
+    //   GEOID surface, which sits ABOVE the ellipsoid by up to ~+85 m (and below
+    //   by up to ~−107 m elsewhere). "Below −5 m = ocean" is therefore FALSE over
+    //   the open sea: near Japan the Pacific decodes at +11..+20 m and passed
+    //   every elevation guard, painting full-budget water-imagery slabs over the
+    //   bathymetry mesh (the tile-shaped ocean checkerboard). A tile is treated
+    //   as geoid-flat ocean ONLY when BOTH keys agree: the baked land plane says
+    //   no land (tileLandMask.hasLand, v2 asset, labelled places force-kept) AND
+    //   its whole height range fits the flat-geoid envelope below. Real coasts
+    //   have relief > RELIEF_MAX or peaks > ABS_MAX; Malé-class atolls are
+    //   protected by the labelled-places land bit, not by height.
+    GEOID_RELIEF_MAX_M: 60,   // max (maxHeight − minHeight) for "flat"
+    GEOID_ABS_MAX_M:    120,  // |minHeight|,|maxHeight| must fit within ±this
+    // Surf-fringe colour (2026-07-28): samples in SURF carve cells (water kept
+    // by the ~10 km coastline-overlap ring) blend toward the ocean palette at
+    // SURF_DEPTH_M, keeping SURF_PHOTO_BLEND of their photo colour. Off deep
+    // coasts the imagery is near-black abyssal water; this lifts the painted
+    // fringe to the floor mesh's bathymetric blue while reefs/harbours keep
+    // most of their photo character.
+    SURF_DEPTH_M:       -80,
+    SURF_PHOTO_BLEND:   0.45,
     POINT_SIZE:       0.014,  // world-units, size-attenuated with distance
     POINT_OPACITY:    0.92,   // max opacity of streamed points once faded in
     // Photo-colored points (2026-07-12): sample each point's color from the

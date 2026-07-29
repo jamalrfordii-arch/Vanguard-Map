@@ -675,3 +675,70 @@ moved numbers anyway.
   exhausted; live wind data unconfirmed until quota reset.
 • Tile seams: median 4.7m (sub-texel, invisible) but p95 ~52m — a real tail,
   likely _flatQM fallback tiles meeting real QM neighbours.
+
+
+## 2026-07-28 — Cesium's ocean is ABOVE sea level (the geoid trap)
+
+Cesium World Terrain has no bathymetry at z6–z8 over most open water. An ocean
+tile there decodes as the flat GEOID surface — up to ~+85 m ABOVE the ellipsoid
+(+11..+20 m measured off Japan), not 0 and not negative. Consequence: every
+"elevation < −5 m = ocean" guard in the tile builder PASSED open-water tiles as
+low-lying land, and each painted a full budget of water-imagery points over the
+bathymetry mesh — the tile-shaped ocean checkerboard. "Depth is not land" has a
+twin: **height is not land either.** Never classify water by elevation alone.
+
+Second half of the same bug: the baked land mask's bits INCLUDED the ±1 coastal
+dilation ring, so `isWaterOnly` said "land" for every near-coast water tile —
+fetch margin silently became a painting licence. Fix: mask v2 ships TWO planes —
+FETCH (dilated, unchanged semantics) and LAND (undilated, labelled places
+stamped with a ±1 ring because Malé city and MLE airport straddle two z12 tiles
+— the first v2 bake proved it by failing its own test). Suppression requires
+BOTH keys: land plane says water AND heights fit the geoid envelope
+(config GEOID_RELIEF_MAX_M / GEOID_ABS_MAX_M). Either alone deletes islands or
+misses ocean. Verified live: 197 tiles suppressed around Tokyo, one straggler
+(malformed QM → _flatQM rescue path consulting only the 9.8 km DEM mask) traced
+and the rescue branch now checks the land plane too.
+
+Debugging lessons paid for tonight, again:
+- The camera target must sit ON the curved surface (`curveOffset(x,z)`, ≈ −3.2
+  at Japan). Framing a view at target y=0 makes the world read dim/sunken and
+  sends you chasing lighting bugs that don't exist. The droop is design-wide
+  (vessels, buildings, camera clamp) — not a bug, don't "fix" it.
+- Hidden tab AGAIN produced fake evidence ("all opacities stuck at 0", "loading
+  grew to 54") — check document.visibilityState BEFORE trusting any live number.
+- Colour heuristics lied AGAIN: "blue-dominant avg" flagged dark Kii cedar
+  forest as ocean. Positions (all points at y≈−3) were the honest signal.
+- Hot-evicting live tiles to force rebuilds poisons per-tile state; reload
+  instead. And background `nohup` does not survive between sandbox bash calls —
+  run long jobs foreground or checkpointed.
+
+
+## 2026-07-28 — The black coastal wedges: one symptom, THREE authors
+
+Sharp black triangles/rectangles at coasts turned out to be three separate
+mechanisms, peeled in order:
+
+1. **Interpolation from a discarded vertex.** The ocean-floor mesh gives LAND
+   vertices a placeholder colour and discards their fragments — but a coastal
+   triangle mixes land and ocean vertices, and the KEPT ocean-side fragments
+   interpolate toward the land corner's colour. Placeholder was (0,0,0) →
+   black triangles exactly one ~78 km mesh face wide at steep drops. A
+   "never rendered" vertex still renders through interpolation. Placeholder is
+   now the shelf-start teal, and land vertices get the same NdotL relief shade
+   so the blended corner matches its neighbours.
+2. **Two authorities declining to paint the same spot.** The floor mesh
+   discards where the coarse DEM says land (≥0); the tile carve removes points
+   where the fine land plane says water. In narrow bays (Tokyo Bay) the DEM
+   reads the water as land → BOTH bowed out → a black rectangle with two
+   authors. Rule now enforced in _carveFor: a cell may only be carved when
+   getBestElevation — the SAME function the floor's discard derives from —
+   also says water there. Never let two painters each assume the other covers
+   a pixel; gate one on the other's actual predicate, not on a parallel
+   approximation of it.
+3. **Genuinely dark shading** on hadal-band trench walls facing away from the
+   fixed NW relief light (band colour × 0.45 ambient) — thin slivers remain
+   and are arguably correct chart shading; left alone deliberately.
+
+Meta-lesson, again: the wedges predated the evening's tile work and were
+initially misattributed to it. Screenshot archaeology (the artifact appears in
+the FIRST screenshot of the session) is the fastest innocence proof there is.

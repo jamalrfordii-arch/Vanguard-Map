@@ -472,26 +472,59 @@ self.onmessage = function(e) {
             // DATA (vessels/alerts, all cyan-family) is the brightest thing on
             // screen. Endpoints stay continuous. MUST match terrainBuilder's
             // createSolidOceanFloor bands exactly.
+            // ── DEPTH → COLOUR (rebuilt 2026-07-27) ──────────────────────────────
+            // Depth is now carried mainly by HUE; brightness is left free to carry FORM.
+            //
+            // The previous ramp held saturation at 93-96% and varied hue by only 15 deg
+            // across 10 km of depth — one colour dimmed, not a colour ramp. Two problems:
+            //
+            //   1. It looked generated. Real shallows are DESATURATED (sediment and
+            //      chlorophyll), not electric — and the land beside it is natural-colour
+            //      satellite imagery, so the two halves of the map were built on opposite
+            //      philosophies.
+            //   2. More seriously, depth and relief were fighting over the same channel.
+            //      Hillshade works by modulating brightness, and the old ramp left only 5%
+            //      value at hadal depth — a 30% shading darkening there lands at 3.5%,
+            //      invisible. The deepest trench walls could not read no matter how good
+            //      the geometry was.
+            //
+            // Hue now rotates 176 deg (coastal teal) -> 264 deg (violet-black), following
+            // the order water actually absorbs light: red first, then orange, then green.
+            // Not photoreal — the seafloor below ~200 m is unlit, and strictly "realistic"
+            // would be black — but principled rather than arbitrary, which is what a
+            // bathymetric chart wants.
+            //
+            // Value floor raised 5% -> 17%: 3.4x more brightness headroom for relief at
+            // hadal depth, 1.7x at 6 km.
+            //
+            // MUST match the other copy exactly (terrainBuilder.createSolidOceanFloor <->
+            // terrainWorker). Change both together or the floor mesh and the splat cloud
+            // disagree at the seam.
             if (d < 200) {
+                // Shelf — coastal teal, low saturation (sediment + chlorophyll).
                 const t = d / 200;
-                r = 0.050 - t * 0.025;
-                g = 0.250 - t * 0.130;
-                b = 0.600 - t * 0.180;
+                r = 0.279 - t * 0.102;   // 0.279 -> 0.177
+                g = 0.620 - t * 0.192;   // 0.620 -> 0.428
+                b = 0.597 - t * 0.077;   // 0.597 -> 0.520
             } else if (d < 2000) {
+                // Slope — teal rotating into true blue.
                 const t = (d - 200) / 1800;
-                r = 0.025 - t * 0.012;
-                g = 0.120 - t * 0.070;
-                b = 0.420 - t * 0.140;
+                r = 0.177 - t * 0.109;   // 0.177 -> 0.068
+                g = 0.428 - t * 0.266;   // 0.428 -> 0.162
+                b = 0.520 - t * 0.140;   // 0.520 -> 0.380
             } else if (d < 6000) {
+                // Abyss — blue into indigo.
                 const t = (d - 2000) / 4000;
-                r = 0.013 - t * 0.007;
-                g = 0.050 - t * 0.028;
-                b = 0.280 - t * 0.130;
+                r = 0.068 - t * 0.014;   // 0.068 -> 0.054
+                g = 0.162 - t * 0.123;   // 0.162 -> 0.039
+                b = 0.380 - t * 0.120;   // 0.380 -> 0.260
             } else {
-                const t = Math.min(1.0, (d - 6000) / 4000);
-                r = 0.006 - t * 0.003;
-                g = 0.022 - t * 0.011;
-                b = 0.150 - t * 0.100;
+                // Hadal — indigo into violet. RED RISES here: that is the hue rotating
+                // past blue toward violet, not a sign error.
+                const t = Math.min(1.0, (d - 6000) / 5000);
+                r = 0.054 + t * 0.043;   // 0.054 -> 0.097
+                g = 0.039 + t * 0.009;   // 0.039 -> 0.048
+                b = 0.260 - t * 0.090;   // 0.260 -> 0.170
             }
 
             // ── Write ─────────────────────────────────────────────────────────

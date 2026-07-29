@@ -45,17 +45,27 @@ Matches tileStreamManager's geographic TMS grid exactly:
 Levels nest exactly (a zoom-N tile is 4 zoom-N+1 tiles), so every level except
 the finest is a 2× block-max of the level below — no resampling error.
 
-OUTPUT  data/tile-land-mask.bin   (~341 KB for z3–z10, gzips to far less)
+OUTPUT  data/tile-land-mask.bin
 ────────────────────────────────
     magic   8 bytes  "VG1TMASK"
-    u32     version (1)
+    u32     version (2)
     u32     minZoom
     u32     maxZoom
     u32     dilation rings
     u32     flags (reserved, 0)
-    then (maxZoom−minZoom+1) × u32 pairs: byteOffset, byteLength
+    then (maxZoom−minZoom+1) × u32 QUADS: fetchOffset, fetchLength, landOffset, landLength
     then the packed bitplanes, LSB-first, bit index = ty * (2^(zoom+1)) + tx.
-    1 = fetch this tile, 0 = water only, never fetch.
+
+    FETCH plane: 1 = fetch this tile's terrain/imagery (land ∪ dilation ∪ labelled
+    places). The dilation ring is an ERROR MARGIN for fetching — it keeps
+    coastline tiles whole when the rasters misregister by a tile.
+    LAND plane:  1 = this tile actually CONTAINS land (land ∪ labelled places,
+    NO dilation). Added v2 (2026-07-28) because the runtime needs to distinguish
+    "fetch it to be safe" from "may paint points here": Cesium's ocean tiles
+    decode at the GEOID surface (+11..+20 m near Japan, ABOVE sea level), so
+    every dilation-ring water tile passed the builder's elevation guards and
+    painted a full budget of water-imagery points over the bathymetry mesh —
+    the tile-shaped ocean checkerboard, live-diagnosed 2026-07-28.
 
 USAGE
 ─────
@@ -81,7 +91,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAP_WIDTH = 300.0
 MAP_HEIGHT = 300.0
 MAGIC = b"VG1TMASK"
-VERSION = 1
+VERSION = 2
 
 
 # ── grid helpers (mirror tilePointsBuilder.js exactly) ────────────────────────
@@ -273,21 +283,24 @@ def pack_bits(grid):
     return np.packbits(grid.reshape(-1), bitorder="little").tobytes()
 
 
-def write_asset(path, planes, min_zoom, max_zoom, dilation):
+def write_asset(path, fetch_planes, land_planes, min_zoom, max_zoom, dilation):
+    """v2: per zoom, TWO planes — fetch (dilated) and land (undilated)."""
     n = max_zoom - min_zoom + 1
-    header_len = len(MAGIC) + 4 * 5 + 8 * n
+    header_len = len(MAGIC) + 4 * 5 + 16 * n     # 4 u32 per zoom in the table
     offset = header_len
     table, blobs = [], []
     for z in range(min_zoom, max_zoom + 1):
-        blob = pack_bits(planes[z])
-        table.append((offset, len(blob)))
-        blobs.append(blob)
-        offset += len(blob)
+        fblob = pack_bits(fetch_planes[z])
+        lblob = pack_bits(land_planes[z])
+        table.append((offset, len(fblob), offset + len(fblob), len(lblob)))
+        blobs.append(fblob)
+        blobs.append(lblob)
+        offset += len(fblob) + len(lblob)
     with open(path, "wb") as f:
         f.write(MAGIC)
         f.write(struct.pack("<IIIII", VERSION, min_zoom, max_zoom, dilation, 0))
-        for off, ln in table:
-            f.write(struct.pack("<II", off, ln))
+        for foff, fln, loff, lln in table:
+            f.write(struct.pack("<IIII", foff, fln, loff, lln))
         for blob in blobs:
             f.write(blob)
     return offset
@@ -384,12 +397,23 @@ def main():
 
     print("  \u00b7 labelled places from the app's own data \u2026")
     q = land_from_labelled_places(tpx, tpy)
-    print(f"    adds {int((q & ~land).sum()):,} tiles")
+    # Stamp each place with a \u00b11 ring AT THE FINEST LEVEL before the union.
+    # A labelled coordinate is a point (an airport on one islet, a city centre
+    # 2 km away on the next); without the ring, the v2 LAND plane \u2014 which has
+    # no dilation of its own \u2014 protects only the exact tile the label falls in,
+    # and the neighbouring tile holding the actual town gets suppressed by the
+    # geoid-ocean gate. Mal\u00e9 city vs MLE airport straddle two z12 tiles; the
+    # coverage test caught it on the first v2 bake (2026-07-28). ~9 tiles per
+    # place is noise in the totals and pure safety for atolls.
+    q = dilate_rings(q, 1)
+    print(f"    adds {int((q & ~land).sum()):,} tiles (incl. 1-ring stamp)")
     land |= q
     print(f"  union land tiles: {land.sum():,} ({land.mean():.1%})")
 
     # Build every level from the finest by exact 2× block-max, then dilate each
     # level separately — a "1 tile ring" is a different distance at every zoom.
+    # v2 keeps BOTH: the undilated planes ship as the LAND planes (may points be
+    # painted here?), the dilated ones as the FETCH planes (should terrain load?).
     planes, undilated = {}, {max_z: land}
     for z in range(max_z - 1, args.min_zoom - 1, -1):
         p = undilated[z + 1]
@@ -398,7 +422,7 @@ def main():
         planes[z] = dilate_rings(undilated[z], args.dilation)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    size = write_asset(args.out, planes, args.min_zoom, max_z, args.dilation)
+    size = write_asset(args.out, planes, undilated, args.min_zoom, max_z, args.dilation)
     print(f"\n  wrote {args.out}  ({size / 1024:.1f} KB)")
 
     print(f"\n  {'zoom':>5s} {'tiles':>10s} {'fetch':>10s} {'skip':>10s} {'skipped':>8s}")

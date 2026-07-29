@@ -79,10 +79,11 @@ class TilePointsPool {
     /**
      * @returns {Promise<{positions,colors,count}|null>} null if evicted for space.
      */
-    build(cfg, tx, ty, qmData, imgData, priority = 0, landMask = null, imgRect = null) {
+    build(cfg, tx, ty, qmData, imgData, priority = 0, landMask = null, imgRect = null,
+          geoCarve = null) {
         if (!this.available) {
             // Synchronous fallback — same function the workers call.
-            try { return Promise.resolve(buildTilePoints(cfg, tx, ty, qmData, imgData, landMask, imgRect)); }
+            try { return Promise.resolve(buildTilePoints(cfg, tx, ty, qmData, imgData, landMask, imgRect, geoCarve)); }
             catch (err) { return Promise.reject(err); }
         }
         return new Promise((resolve) => {
@@ -90,8 +91,9 @@ class TilePointsPool {
             // NOTE: qmData and imgData are CLONED, not transferred. qmData is reused
             // by the caller for the imagery rebuild pass, and transferring would
             // neuter it on the main thread — the second build would then see an
-            // empty buffer and silently produce a blank tile.
-            const msg = { id, cfg, tx, ty, qmData, imgData, landMask, imgRect };
+            // empty buffer and silently produce a blank tile. geoCarve is tiny
+            // (≤ 32×32 bytes) and cloning keeps it reusable by the caller too.
+            const msg = { id, cfg, tx, ty, qmData, imgData, landMask, imgRect, geoCarve };
             if (this._queue.length >= MAX_QUEUE) {
                 let wi = 0;
                 for (let i = 1; i < this._queue.length; i++)

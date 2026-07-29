@@ -1287,135 +1287,20 @@ export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
 //  fabricated-military taxonomy; no callers. Live entities come only from real
 //  AIS and flight feeds.)
 
-// --- ORBITAL ASSET BUILDERS ---
-
-function _buildKennenSatellite() {
-    const group = new THREE.Group();
-    const bodyGeo = new THREE.CylinderGeometry(0.8, 0.8, 4, 16);
-    bodyGeo.rotateX(Math.PI / 2);
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.9, roughness: 0.2 });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    const panelGeo = new THREE.PlaneGeometry(8, 2.5);
-    const panelMat = new THREE.MeshBasicMaterial({ color: 0x40c4ff, side: THREE.DoubleSide, wireframe: true, transparent: true, opacity: 0.8 });
-    const panel1 = new THREE.Mesh(panelGeo, panelMat);
-    panel1.position.set(4.5, 0, 0);
-    const panel2 = new THREE.Mesh(panelGeo, panelMat);
-    panel2.position.set(-4.5, 0, 0);
-    const armGeo = new THREE.CylinderGeometry(0.15, 0.15, 10, 8);
-    armGeo.rotateZ(Math.PI / 2);
-    const arm = new THREE.Mesh(armGeo, bodyMat);
-    group.add(body, panel1, panel2, arm);
-    return { group, color: 0xffffff, prefix: "KH-11 KENNEN" };
-}
-
-function _buildLacrosseSatellite() {
-    const group = new THREE.Group();
-    const bodyGeo = new THREE.CylinderGeometry(0.5, 0.9, 3.5, 12);
-    bodyGeo.rotateX(Math.PI / 2);
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x607d8b, metalness: 0.7, roughness: 0.4 });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    const dishGeo = new THREE.SphereGeometry(1.2, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2.5);
-    const dishMat = new THREE.MeshBasicMaterial({ color: 0xff5e00, side: THREE.DoubleSide, wireframe: true, transparent: true, opacity: 0.7 });
-    const dish = new THREE.Mesh(dishGeo, dishMat);
-    dish.position.z = 1.8;
-    dish.rotation.x = -Math.PI / 2;
-    group.add(body, dish);
-    return { group, color: 0xff5e00, prefix: "LACROSSE" };
-}
-
-function _buildStarshieldSatellite() {
-    const group = new THREE.Group();
-    const bodyGeo = new THREE.BoxGeometry(1.5, 0.3, 1.5);
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x424242, metalness: 0.6, roughness: 0.5 });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    const antennaGeo = new THREE.CylinderGeometry(0.05, 0.05, 1.2, 6);
-    const antennaMat = new THREE.MeshBasicMaterial({ color: 0xccff90 });
-    const antenna = new THREE.Mesh(antennaGeo, antennaMat);
-    antenna.position.y = 0.6;
-    const panelGeo = new THREE.PlaneGeometry(3.5, 1.0);
-    const panelMat = new THREE.MeshBasicMaterial({ color: 0xccff90, side: THREE.DoubleSide, wireframe: true, transparent: true, opacity: 0.6 });
-    const panel1 = new THREE.Mesh(panelGeo, panelMat);
-    panel1.position.set(2.5, 0, 0);
-    const panel2 = new THREE.Mesh(panelGeo, panelMat);
-    panel2.position.set(-2.5, 0, 0);
-    group.add(body, antenna, panel1, panel2);
-    return { group, color: 0xccff90, prefix: "STARSHIELD" };
-}
-
-function _buildOrbitCurve(peakY, inclinationRad, phaseOffsetRad = 0) {
-    const points = [];
-    const segments = 64;
-    const radiusX = MAP_WIDTH * 0.95;
-    const radiusZ = MAP_HEIGHT * 0.95;
-
-    for (let i = 0; i <= segments; i++) {
-        const t = (i / segments) * Math.PI * 2 + phaseOffsetRad;
-        let x = Math.cos(t) * radiusX;
-        let z = Math.sin(t) * radiusZ;
-        let y = Math.sin(t) * peakY * 0.5 + peakY * 0.5;
-        const cosI = Math.cos(inclinationRad);
-        const sinI = Math.sin(inclinationRad);
-        const xRot = x * cosI - y * sinI;
-        const yRot = x * sinI + y * cosI;
-        const finalY = Math.max(yRot, 70);  // raised from 25 — prevents orbit lines clipping through continents at poles
-        points.push(new THREE.Vector3(xRot, finalY, z));
-    }
-
-    return new THREE.CatmullRomCurve3(points, true);
-}
-
-export function createOrbitalAssets(scene, laneGroup, aisShips) {
-    const planes = [
-        { inclination: 0,            peakY: 110, builder: _buildKennenSatellite },
-        { inclination: Math.PI / 4,  peakY: 95,  builder: _buildLacrosseSatellite },
-        { inclination: -Math.PI / 6, peakY: 85,  builder: _buildStarshieldSatellite }
-    ];
-
-    planes.forEach((plane, planeIdx) => {
-        const orbitCurve = _buildOrbitCurve(plane.peakY, plane.inclination);
-        const orbitGeo = new THREE.BufferGeometry().setFromPoints(orbitCurve.getPoints(200));
-        const sample = plane.builder();
-        const orbitMat = new THREE.LineDashedMaterial({ color: sample.color, dashSize: 3, gapSize: 4, opacity: 0.2, transparent: true });
-        const orbitLine = new THREE.Line(orbitGeo, orbitMat);
-        orbitLine.computeLineDistances();
-        orbitLine.visible = false;  // hidden — full-map-radius rings overlay continents at all altitudes
-        laneGroup.add(orbitLine);
-
-        for (let i = 0; i < 2; i++) {
-            const built = plane.builder();
-            const satGroup = built.group;
-
-            satGroup.children.forEach(child => {
-                child.userData.baseMaterial = child.material;
-            });
-
-            const trailMat = new THREE.LineBasicMaterial({ color: built.color, transparent: true, opacity: 0.5 });
-            const trailLine = new THREE.Line(new THREE.BufferGeometry(), trailMat);
-            scene.add(trailLine);
-
-            let baseSpeed = 0.0012;
-            if (built.prefix === "STARSHIELD") baseSpeed = 0.0020;
-            if (built.prefix === "LACROSSE")   baseSpeed = 0.0014;
-
-            satGroup.userData = {
-                id: `${built.prefix}-${Math.floor(prng() * 9000 + 1000)}`,
-                class: "ORBITAL",
-                htmlColor: "#" + built.color.toString(16).padStart(6, "0"),
-                speedKts: 17500,
-                isRealAIS: false,
-                progress: i * 0.5 + planeIdx * 0.15,
-                speed: baseSpeed,
-                curve: orbitCurve,
-                history: [],
-                trail: trailLine
-            };
-
-            satGroup.scale.set(2.0, 2.0, 2.0);
-            laneGroup.add(satGroup);
-            aisShips.push(satGroup);
-        }
-    });
-}
+// ── ORBITAL ASSETS — REMOVED 2026-07-27 ──────────────────────────────────────
+// Deleted: _buildKennenSatellite / _buildLacrosseSatellite /
+// _buildStarshieldSatellite / _buildOrbitCurve / createOrbitalAssets (~129 lines).
+//
+// createOrbitalAssets was EXPORTED BUT NEVER IMPORTED — the satellite feature
+// was never wired into main.js (see the retired SAT FEED row in index.html).
+// So none of this rendered.
+//
+// Removed rather than left dormant because the three builders were the only
+// `wireframe: true` materials in the codebase. Dead code that LOOKS generated is
+// worse than no code: anyone reading the file finds wireframe satellites and
+// concludes the app is scaffolding, even though nothing ever drew them.
+// Rebuild from git history if the TLE backend (flight-proxy /satellites) is
+// ever revived.
 
 // ── Port Markers ──────────────────────────────────────────────────────────────
 const MAJOR_PORTS = [

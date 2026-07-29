@@ -184,28 +184,21 @@ export function initPostProcessing(renderer, scene, camera) {
     return { composer, bloomPass, bokehPass, ssaoPass, vTiltShiftPass, hTiltShiftPass };
 }
 
-export function createSeaLevel(scene) {
-    const seaLevelGroup = new THREE.Group();
-    scene.add(seaLevelGroup);
-
-    // seaPlane REMOVED. It was a flat MeshBasicMaterial PlaneGeometry at
-    // Y=0.3 covering MAP_WIDTH × MAP_HEIGHT with color #004488 and opacity
-    // 0.80 — a "seal" for coastal-transition geometry that produced the
-    // same hard rectangular edge the aquarium walls and washPlane had. The
-    // wave-shader seaMesh in waterManager.js (Y=-0.2, has Gerstner waves
-    // AND a built-in edge fade) is the real water surface and stays.
-
-    const seaGrid = new THREE.GridHelper(MAP_WIDTH, 60, 0x40c4ff, 0x004488);
-    seaGrid.position.y = 0.05;
-    seaGrid.material.opacity = 0.11;
-    seaGrid.material.transparent = true;
-    seaLevelGroup.add(seaGrid);
-
-    // Second polar grid (at Y=-15, opacity 0.11) REMOVED alongside the
-    // waterManager polar grid — same concentric-circles-clutter rationale.
-
-    return seaLevelGroup;
-}
+// ── createSeaLevel() — REMOVED 2026-07-27 ────────────────────────────────────
+// Deleted along with its last remaining child, a
+// THREE.GridHelper(MAP_WIDTH, 60, 0x40c4ff, 0x004488) at y=0.05, opacity 0.11.
+//
+// EXPORTED BUT NEVER CALLED — nothing imported it, so the grid never rendered.
+// (Do not confuse this with waterManager.createDynamicSeaLevel(), which builds
+// the REAL 256×256 Gerstner ocean mesh and is the group actually named
+// 'dynamicSeaLevel' in the scene. That one stays.)
+//
+// Removed on principle as well as hygiene: GridHelper is a THREE *debug* helper.
+// Shipping one as scenery is the scaffolding becoming the aesthetic — and it was
+// drawn in the same 0x40c4ff cyan that was retired from the UI chrome in the
+// token sweep. This function was already the last survivor of a cleanup in
+// progress: its own comments record a seaPlane and two PolarGridHelpers removed
+// earlier for "concentric-circles-clutter". This finishes that job.
 
 export function createBoardPlaneAndReticle(scene) {
     const boardPlane = new THREE.Mesh(

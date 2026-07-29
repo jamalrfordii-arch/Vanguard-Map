@@ -2501,3 +2501,77 @@ plausible reasoning FIVE times today (concurrency, shared ancestor LRU,
 uniform ring gate, colour-variance metric, interim dwell numbers). Measure a
 baseline before changing anything here, and verify with the app's own counters,
 never with inferred metrics.
+
+
+## 2026-07-28 — Mid-zoom clarity: z7/z8 to 512px; geoid-ocean gate + land-mask v2
+
+Jamal picked "mid-zoom sharpness (z8/z9)" as the clarity target. Measured live:
+the mid-zoom band is drawn by exactly z7+z8, the ladder's last 256px-imagery
+levels (everything adjacent is 512). Fix: imgSize 256→512 on both (zero
+per-frame GPU cost — same point count, truer colour per point; fingerprint
+includes imgSize so stale cache entries rebuild themselves). Verified live over
+Tokyo; matches the 2026-07-13 z5/z6 precedent.
+
+Second fix, found chasing "ocean checkerboard": the geoid-flat ocean gate +
+tile-land-mask v2 (fetch plane vs land plane). Full mechanism and its traps in
+scar-tissue.md (2026-07-28 entry). Asset rebaked z3–z12 (10.9 MB, fetch
+fractions unchanged from v1). isGeoidFlatOcean() predicate in tilePointsBuilder
+(tested); gate in _buildPoints covers BOTH the real-QM branch and the
+_flatQM-rescue branch. hasLand() fails SAFE (v1 asset / unloaded → no
+suppression). 34/34 test files green.
+
+Known residual, deliberately deferred: land-BEARING coastal tiles still paint
+their water fraction (per-sample carve against the land plane is the follow-up
+if Jamal wants the last rectangles gone). And the LIGHTING ONLY scrub state
+persists across reloads — flying at night-lit hours can read as "map got dark";
+check the clock chip before diagnosing colour.
+
+
+## 2026-07-28 (later) — Per-sample water carve + surf ring
+
+Jamal: "I want them gone" (the coastal water rectangles). Shipped the per-sample
+carve: manager builds a ≤32×32 carve grid per tile from the baked LAND plane's
+finest useful ancestor (~4.9 km cells), threads it through pool→worker→
+buildTilePoints (new trailing geoCarve param, cloned not transferred), and the
+builder skips samples in water cells ONLY when the height sits inside the geoid
+envelope — real relief always survives, so unmapped islands keep their
+mountains. Geometry-cache SCHEMA_VERSION bumped 1→2 (all v1 records stale by
+construction; warmth re-accumulates on revisit).
+
+THE SURF RING, learned live within minutes of the first carve: carved water
+must keep ~one 9.8 km DEM texel clear of any land cell. The base cloud's
+coastline comes from that coarse DEM and bleeds land seaward; on tile handoff
+the base fades there, and if the (much tighter, GSHHG-based) carve also removes
+tile points in the strip, NOBODY paints it — jagged black wedges hugging the
+Boso coast. _carveFor now samples an expanded (n+2r)² grid (neighbor tiles
+included; out-of-range fails safe to land) and dilates land by ring cells
+before cropping. Two coastline authorities must always OVERLAP, never abut.
+
+Verified live at Tokyo: open-ocean rectangles gone, coastal fringe painted,
+41 builder tests incl. 3 new carve tests, 34/34 files green. Remaining known
+aesthetics, deferred: ArcGIS abyssal imagery is near-black and the painted surf
+fringe inherits it off deep coasts (a colour treatment question, not a hole);
+and whether day-side land brightness at local noon is right is still an open
+thread (terminator shading of tile points was never separately verified).
+
+
+## 2026-07-28 (later still) — Surf-fringe colour treatment
+
+The painted surf ring inherited ArcGIS's near-black abyssal imagery off deep
+coasts (Boso/Japan Trench) — black borders around coastlines. Fix: the carve
+grid now carries three values (0 water-carved / 1 land / 2 SURF), and the
+builder blends surf samples' colour toward elevToColor(SURF_DEPTH_M −80 m),
+keeping SURF_PHOTO_BLEND (0.45) of the photo so reefs/harbours stay
+photographic while abyssal black lifts to the floor mesh's bathymetric blue.
+Surf samples also skip the procedural land relief/colour noise (geoid height
+is not ground). Cache SCHEMA_VERSION 2→3. Two new builder tests (tint fires
+on surf+dark imagery, never on real relief); 34/34 files green. Verified live
+at the Boso coast: fringe reads as stepped blue shallows.
+
+OPEN (pre-existing, not from tonight's work): sharp BLACK TRIANGULAR WEDGES at
+steep coastal drops (Boso east ~140.6E/35.4N, south coast) — present in every
+screenshot since before the 512px/carve changes. Raycast shows the same
+geometry stack under wedges and healthy ocean (picking plane at y=0, water
+shader at −0.19, #1b4fa0 backing at −0.2; floor mesh not raycastable), so it
+is a floor-mesh/shading question at trench faces, not a tile hole. Next
+session: probe the ocean-floor mesh's shading/normals at those faces.

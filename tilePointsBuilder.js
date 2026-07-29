@@ -45,6 +45,32 @@ export function curveOffset(sceneX, sceneZ) {
     return -Math.pow(dist, 2) * 20.0;
 }
 
+/**
+ * Is this tile's height range the flat GEOID surface Cesium serves over open
+ * water where it has no bathymetry?
+ *
+ * Cesium World Terrain ocean tiles do NOT decode at 0 m — they decode at the
+ * geoid, which sits up to ~+85 m above / ~−107 m below the ellipsoid depending
+ * on where you are (+11..+20 m near Japan, measured live 2026-07-28). So
+ * "elevation < −5 m = ocean" is FALSE over the open sea, and such tiles passed
+ * every elevation guard and painted full-budget water-imagery slabs.
+ *
+ * This predicate is ONE of TWO keys — the caller must ALSO check the baked
+ * land plane (tileLandMask.hasLand). Height alone cannot tell an atoll from
+ * the geoid (both are within metres of sea level); the land plane's
+ * labelled-places bits are what protect Malé-class islands. Requiring both
+ * keys honors both standing scars: "depth is not land" and "don't delete
+ * islands". Tests: tests/tilePointsBuilder.test.mjs.
+ */
+export function isGeoidFlatOcean(minHeight, maxHeight,
+                                 reliefMax = TILESTREAM.GEOID_RELIEF_MAX_M,
+                                 absMax    = TILESTREAM.GEOID_ABS_MAX_M) {
+    if (!Number.isFinite(minHeight) || !Number.isFinite(maxHeight)) return false;
+    return (maxHeight - minHeight) < reliefMax
+        && maxHeight <  absMax
+        && minHeight > -absMax;
+}
+
 export function geoTileBounds(tx, ty, zoom) {
     const dLon = 360 / (2 ** (zoom + 1));
     const dLat = 180 / (2 ** zoom);
@@ -263,7 +289,7 @@ export function elevToColor(elev) {
 // already trusts for the whole-tile decision. This applies it per sample, so the
 // tile is carved to the real coastline regardless of what its header claims.
 export function buildTilePoints(cfg, tx, ty, qmData, imgData = null, landMask = null,
-                                imgRect = null) {
+                                imgRect = null, geoCarve = null) {
         const b  = geoTileBounds(tx, ty, cfg.zoom);
         let x0 = lonToSceneX(b.west),  x1 = lonToSceneX(b.east);
         let z0 = latToSceneZ(b.north), z1 = latToSceneZ(b.south);
@@ -299,6 +325,16 @@ export function buildTilePoints(cfg, tx, ty, qmData, imgData = null, landMask = 
         // vivid boost; coarse world-view tiles keep the original calibrated palette.
         const _deep      = cfg.zoom >= 6;   // 8→6 (2026-07-18): bring the bright, photographic "close-up" palette (more real imagery, more colour) in at a HIGHER altitude — z6/z7 now match the z8/z9 look, so the good render appears sooner as you descend. z3-z5 (world view) stay on the calmer far palette to avoid the desert gold-cast.
         const photoBlend = imgData ? (_deep ? TILESTREAM.PHOTO_BLEND : (TILESTREAM.PHOTO_BLEND_FAR ?? 0.80)) : 0;
+        // Surf-fringe colour (2026-07-28): samples in SURF cells (water kept by
+        // the carve's ring so the two coastline authorities overlap) blend their
+        // photo colour toward the map's own ocean palette at a fixed shallow
+        // depth. Off deep coasts the ArcGIS imagery is near-BLACK (abyssal
+        // water), and painting the fringe with it drew black borders around
+        // coastlines; the palette tint lifts those to the same bathymetric blue
+        // the floor mesh shows, while genuinely colourful shallow imagery
+        // (reefs, harbours) keeps most of its photo character via _surfW.
+        const _surfW = TILESTREAM.SURF_PHOTO_BLEND ?? 0.45;
+        const _surfC = elevToColor(TILESTREAM.SURF_DEPTH_M ?? -80);
 
         // Where this tile sits inside `imgData`. Identity = the image IS this
         // tile's own imagery. A sub-rect means we are borrowing an ancestor's.
@@ -471,13 +507,43 @@ export function buildTilePoints(cfg, tx, ty, qmData, imgData = null, landMask = 
                     if (landMask[mv * maskN + mu] === 0) continue;
                 }
 
+                // ── Per-sample water carve from the baked land plane (2026-07-28)
+                // Land-BEARING coastal tiles used to paint their whole budget,
+                // water fraction included — Cesium serves the flat GEOID over
+                // water it has no bathymetry for (+11..+20 m near Japan, up to
+                // ±~100 m globally), so those samples pass every height guard
+                // and render as speckled imagery rectangles over the sea. The
+                // carve grid is built by the manager from the baked land plane
+                // (GSHHG 0.9 km + labelled-place stamps, ~4.9 km cells): a
+                // sample is skipped ONLY when its cell holds no land AND its
+                // height sits inside the geoid envelope. Real relief (el ≥
+                // bandM) always survives, so an island the plane missed keeps
+                // its mountains even where the sea around it is carved. Same
+                // grid orientation as landMask above: row 0 = north.
+                // Cell values: 0 = water (carve), 1 = land, 2 = surf — water
+                // kept by the ring; painted, but colour-treated below.
+                let _surf = false;
+                if (geoCarve && el < geoCarve.bandM) {
+                    const gn = geoCarve.n;
+                    const gu = Math.min(gn - 1, Math.max(0,
+                        Math.floor(((sx - bx0) / (bx1 - bx0)) * gn)));
+                    const gv = Math.min(gn - 1, Math.max(0,
+                        Math.floor(((sz - bz0) / (bz1 - bz0)) * gn)));
+                    const cv = geoCarve.mask[gv * gn + gu];
+                    if (cv === 0) continue;
+                    _surf = cv === 2;
+                }
+
                 // Same elevation treatment as the mesh path: ocean clamps to sea
                 // level, shoreline tapers, land scales. Shared with main.js's
                 // collision clamp via elevToSceneY — do not inline it again.
                 let elevY = elevToSceneY(el);
 
                 // ── Procedural sub-DEM micro-relief (synthesized, land only) ──────
-                if (_procOn && el > 0) {
+                // Surf samples are excluded: their el > 0 is the geoid surface,
+                // not ground, and land-texture noise on water reads as chop
+                // frozen mid-frame.
+                if (_procOn && el > 0 && !_surf) {
                     elevY += (_pFbm(sx * _procFreq, sz * _procFreq) - 0.5) * _procRelief;
                 }
 
@@ -516,8 +582,15 @@ export function buildTilePoints(cfg, tx, ty, qmData, imgData = null, landMask = 
                     g  = g  * (1 - photoBlend) + pg * photoBlend;
                     cb = cb * (1 - photoBlend) + pb * photoBlend;
                 }
+                // Surf tint — see _surfW/_surfC above. After the photo blend so
+                // the tint moderates whatever the imagery contributed.
+                if (_surf) {
+                    r  = _surfC.r * (1 - _surfW) + r  * _surfW;
+                    g  = _surfC.g * (1 - _surfW) + g  * _surfW;
+                    cb = _surfC.b * (1 - _surfW) + cb * _surfW;
+                }
                 // ── Procedural surface-texture colour variation (land only) ───────
-                if (_procOn && el > 0) {
+                if (_procOn && el > 0 && !_surf) {
                     const _pt = 1 + (_pFbm(sx * _procFreq * 3.1 + 17.0, sz * _procFreq * 3.1 + 9.0) - 0.5) * _procColor;
                     r *= _pt; g *= _pt; cb *= _pt;
                 }

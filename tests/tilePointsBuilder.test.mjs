@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { buildTilePoints, geoTileBounds, lonToSceneX, latToSceneZ, elevToColor,
-         elevToSceneY, curveOffset }
+         elevToSceneY, curveOffset, isGeoidFlatOcean }
     from '../tilePointsBuilder.js';
 
 let passed = 0;
@@ -534,6 +534,130 @@ test('INTEGRATION — built point heights match elevToSceneY, so the floor track
     assert.ok(worst < TOL,
         `built heights drifted ${worst.toFixed(4)} from elevToSceneY (tolerance ${TOL}) — ` +
         `the camera floor no longer matches the rendered surface`);
+});
+
+// ── Geoid-flat ocean predicate ───────────────────────────────────────────────
+// Cesium World Terrain has no bathymetry at these levels: open-water tiles
+// decode as the flat GEOID surface, which is NOT 0 m — it ranges ~−107..+85 m
+// against the ellipsoid (+11..+20 m measured near Japan, 2026-07-28). So this
+// predicate must accept the whole geoid envelope as "flat ocean" while
+// rejecting anything with real relief. It is one of TWO keys — the land plane
+// is the other — so its job is height-shape only, not land detection.
+console.log('\ngeoid-flat ocean predicate');
+
+test('the measured Japan case (+10.9..+19.5 m) reads as geoid-flat', () => {
+    assert.equal(isGeoidFlatOcean(10.9, 19.5), true);
+});
+
+test('geoid extremes are inside the envelope', () => {
+    assert.equal(isGeoidFlatOcean(80, 85), true,      'high geoid (Indonesia-ish)');
+    assert.equal(isGeoidFlatOcean(-107, -100), true,  'low geoid (Indian Ocean low)');
+    assert.equal(isGeoidFlatOcean(-3, 2), true,       'near-zero geoid');
+});
+
+test('real relief is NOT geoid-flat', () => {
+    assert.equal(isGeoidFlatOcean(35.8, 1240.5), false, 'the Kii Peninsula tile');
+    assert.equal(isGeoidFlatOcean(0, 90), false,        '90 m of relief is a coast, not a surface');
+    assert.equal(isGeoidFlatOcean(-4000, -3900), false, 'real bathymetry sits outside ±ABS_MAX');
+    assert.equal(isGeoidFlatOcean(150, 160), false,     'a 150 m plateau is land even though flat');
+});
+
+test('non-finite heights are never "ocean" (suppression needs positive evidence)', () => {
+    assert.equal(isGeoidFlatOcean(NaN, 10), false);
+    assert.equal(isGeoidFlatOcean(0, Infinity), false);
+    assert.equal(isGeoidFlatOcean(undefined, 5), false);
+});
+
+// ── Per-sample water carve ───────────────────────────────────────────────────
+// Land-bearing coastal tiles must not paint their water fraction. The carve
+// grid marks water cells (0) and the builder skips samples there — but ONLY
+// when the sample's height is inside the geoid envelope (bandM). Real relief
+// survives even in a water cell, so an island the land plane missed keeps its
+// mountains. Grid row 0 = north, same as landMask.
+console.log('\nper-sample water carve');
+
+// A 2×2 carve grid: west column water, east column land.
+const carveWestWater = { mask: new Uint8Array([0, 1, 0, 1]), n: 2, bandM: 120 };
+
+test('geoid-height samples in water cells are carved; land cells keep theirs', () => {
+    // Whole tile at geoid heights (+10..+20) — every sample is inside bandM.
+    const r = buildTilePoints(cfg(), 100, 200, fakeQM({ minHeight: 10, maxHeight: 20 }),
+                              null, null, null, carveWestWater);
+    assert.ok(r.count > 200, `only ${r.count} points built`);
+    const b = geoTileBounds(100, 200, 9);
+    const xMid = (lonToSceneX(b.west) + lonToSceneX(b.east)) / 2;
+    let west = 0, east = 0;
+    for (let i = 0; i < r.count; i++) {
+        (r.positions[i * 3] < xMid ? west++ : east++);
+    }
+    // Seam-overlap widening lets a thin fringe of points spill past the cell
+    // edge, so demand a strong asymmetry rather than an absolute zero.
+    assert.ok(west < r.count * 0.05,
+        `${west}/${r.count} points in the carved water half — carve not applied`);
+    assert.ok(east > r.count * 0.9, `east (land) half unexpectedly thin: ${east}`);
+});
+
+test('relief above the band is NEVER carved — unmapped islands survive', () => {
+    // Same water-west carve, but the tile is a mountain (+200..+900 m).
+    const r = buildTilePoints(cfg(), 100, 200, fakeQM({ minHeight: 200, maxHeight: 900 }),
+                              null, null, null, carveWestWater);
+    const b = geoTileBounds(100, 200, 9);
+    const xMid = (lonToSceneX(b.west) + lonToSceneX(b.east)) / 2;
+    let west = 0;
+    for (let i = 0; i < r.count; i++) if (r.positions[i * 3] < xMid) west++;
+    assert.ok(west > r.count * 0.3,
+        `mountain west half lost its points (${west}/${r.count}) — height guard broken`);
+});
+
+test('no carve grid → identical output to before (determinism preserved)', () => {
+    const a = buildTilePoints(cfg(), 100, 200, fakeQM(), null, null, null, null);
+    const c = buildTilePoints(cfg(), 100, 200, fakeQM(), null, null, null);
+    assert.equal(a.count, c.count);
+    assert.deepEqual(Array.from(a.positions.slice(0, 30)), Array.from(c.positions.slice(0, 30)));
+});
+
+// ── Surf-fringe colour treatment ─────────────────────────────────────────────
+// Surf cells (value 2) are water the ring kept painted. Off deep coasts the
+// imagery there is near-BLACK abyssal water; the builder must lift those
+// samples toward the ocean palette instead of drawing black borders around
+// every coastline. Land cells with the same dark imagery must NOT be lifted —
+// a dark forest is allowed to be dark.
+console.log('\nsurf-fringe colour');
+
+function darkImage(N) {
+    const d = new Uint8ClampedArray(N * N * 4);
+    for (let i = 0; i < d.length; i += 4) { d[i] = 3; d[i+1] = 5; d[i+2] = 10; d[i+3] = 255; }
+    return d;
+}
+
+test('surf samples over abyssal-dark imagery are lifted toward ocean blue', () => {
+    const qm  = fakeQM({ minHeight: 10, maxHeight: 20 });      // geoid band
+    const img = darkImage(256);
+    const surf = buildTilePoints(cfg(), 100, 200, qm, img, null, null,
+                                 { mask: new Uint8Array([2]), n: 1, bandM: 120 });
+    const land = buildTilePoints(cfg(), 100, 200, qm, img, null, null,
+                                 { mask: new Uint8Array([1]), n: 1, bandM: 120 });
+    assert.ok(surf.count > 200 && land.count > 200);
+    const mean = (r) => {
+        let cr = 0, cg = 0, cb = 0;
+        for (let i = 0; i < r.count; i++) { cr += r.colors[i*3]; cg += r.colors[i*3+1]; cb += r.colors[i*3+2]; }
+        return { r: cr / r.count / 255, g: cg / r.count / 255, b: cb / r.count / 255 };
+    };
+    const ms = mean(surf), ml = mean(land);
+    assert.ok(ms.b > ml.b + 0.05,
+        `surf blue ${ms.b.toFixed(3)} not lifted above land ${ml.b.toFixed(3)}`);
+    assert.ok(ms.b > ms.r, `surf tint not blue-dominant (r ${ms.r.toFixed(3)} b ${ms.b.toFixed(3)})`);
+});
+
+test('surf tint never fires on real relief — mountains in a surf cell stay photographic', () => {
+    const img = darkImage(256);
+    const mountain = buildTilePoints(cfg(), 100, 200, fakeQM({ minHeight: 200, maxHeight: 900 }),
+                                     img, null, null, { mask: new Uint8Array([2]), n: 1, bandM: 120 });
+    const control  = buildTilePoints(cfg(), 100, 200, fakeQM({ minHeight: 200, maxHeight: 900 }),
+                                     img, null, null, null);
+    assert.equal(mountain.count, control.count, 'relief above bandM must be untouched by the carve');
+    assert.deepEqual(Array.from(mountain.colors.slice(0, 30)), Array.from(control.colors.slice(0, 30)),
+        'colours differ — the tint leaked past the height guard');
 });
 
 console.log(`\n${passed} passed`);

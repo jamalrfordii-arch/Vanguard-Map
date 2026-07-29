@@ -19,14 +19,14 @@
 
 import * as THREE from 'three';
 import { MAP_WIDTH, MAP_HEIGHT, TERRAIN_VERTICAL_SCALE, TILESTREAM, SPLAT_LAND_GRID } from './config.js';
-import { getTrueElevation } from './terrainBuilder.js';
+import { getTrueElevation, getBestElevation } from './terrainBuilder.js';
 import { quality } from './qualityManager.js';
 import { hitchRecorder } from './hitchRecorder.js';
 // Moved to a pure module 2026-07-24 so a Worker can run the heavy half; imported
 // back here because several other call sites in this file still use them.
 import { clampPointSize } from './tilePointsBuilder.js';
 import { buildTilePoints, geoTileBounds, lonToSceneX, latToSceneZ,
-         elevToColor, _pFbm, curveOffset } from './tilePointsBuilder.js';
+         elevToColor, _pFbm, curveOffset, isGeoidFlatOcean } from './tilePointsBuilder.js';
 import { tilePointsPool } from './tilePointsPool.js';
 import { ImageryCircuitBreaker } from './imageryCircuitBreaker.js';
 import { isBeyondTerrainCoverage } from './terrainCoverage.js';
@@ -717,8 +717,14 @@ const LOD_LEVELS = [
     // DENSITY PASS 2026-07-15: budgets ~2× — building is 2.5ms/tile (measured),
     // so density is nearly free; the sparse-dots-in-flats look was under-sampling,
     // not a speed limit. Network is the only cost and density doesn't add fetches.
-    { zoom:  7, showAlt: 13.0, fadeBand: 4.0,  maxActive: 60, loadRadius: 3, render: 'points', ptsBudget: 26000, ptSize: 0.0150, imgSize: 256 },   // tile 1.2u
-    { zoom:  8, showAlt:  7.5, fadeBand: 2.2,  maxActive: 60, loadRadius: 3, render: 'points', ptsBudget: 30000, ptSize: 0.0135, imgSize: 256 },   // tile 0.6u
+    // imgSize 256→512 on z7/z8 too (2026-07-28): these were the ladder's last
+    // 256px levels, and they are EXACTLY the pair on screen in the mid-zoom band
+    // (measured live at eff-alt 6: z7 opac 0.92 + z8 0.63, nothing else) — the
+    // reported mid-zoom softness. Zero per-frame GPU cost (same point count,
+    // better colour per point); fingerprint includes imgSize so stale 256px
+    // geometry-cache entries miss and rebuild automatically.
+    { zoom:  7, showAlt: 13.0, fadeBand: 4.0,  maxActive: 60, loadRadius: 3, render: 'points', ptsBudget: 26000, ptSize: 0.0150, imgSize: 512 },   // tile 1.2u
+    { zoom:  8, showAlt:  7.5, fadeBand: 2.2,  maxActive: 60, loadRadius: 3, render: 'points', ptsBudget: 30000, ptSize: 0.0135, imgSize: 512 },   // tile 0.6u
     // imgSize 256→512 on the close levels (2026-07-15): per-point satellite
     // colour was low-res upscaled at close zoom = smeary flats. 512 sharpens the
     // colour; the SW cache absorbs the one-time extra fetch cost on revisits.
@@ -2347,10 +2353,33 @@ class TileCache {
             // Every cell reads ocean AND the tile has no real heights of its own:
             // nothing to draw. Deliberately NOT applied to tiles with genuine
             // relief — that is what removed the islands.
-            if (m.landCells === 0) {
+            //
+            // ALSO honor the v2 land plane here (2026-07-28): the 32×32 DEM mask
+            // has 9.8 km texels, so one coastal texel bleeding into a 78 km z8
+            // tile "rescues" a pure-water tile into a full imagery slab (seen
+            // live: 8/451/176, a malformed-QM fallback off the Kii coast). The
+            // baked land plane is strictly better information — GSHHG at 0.9 km
+            // plus labelled-place stamps — and fails SAFE toward keeping.
+            if (m.landCells === 0
+                || !tileLandMask.hasLand(this._cfg.zoom, tx, ty)) {
                 this._pureOcean.add(`${this._cfg.zoom}/${tx}/${ty}`);
                 return null;
             }
+        } else if (isGeoidFlatOcean(qmData.minHeight, qmData.maxHeight)
+                   && !tileLandMask.hasLand(this._cfg.zoom, tx, ty)) {
+            // ── GEOID-FLAT OCEAN gate (2026-07-28) ──────────────────────────
+            // Real QM, but its whole height range is the flat geoid surface
+            // Cesium serves where it has no bathymetry (+11..+20 m near Japan
+            // — ABOVE sea level, so every depth-based guard passes it) AND the
+            // baked land plane says the tile contains no land. These two keys
+            // together — never either alone — mark a tile whose full point
+            // budget would be water imagery painted over the bathymetry mesh:
+            // the tile-shaped ocean checkerboard, live-diagnosed 2026-07-28.
+            // hasLand fails SAFE (v1 asset / unloaded → true → no suppression),
+            // and its labelled-places bits are what keep Malé-class atolls,
+            // which height cannot distinguish from open water.
+            this._pureOcean.add(`${this._cfg.zoom}/${tx}/${ty}`);
+            return null;
         }
 
         // ── Built-geometry cache lookup ──────────────────────────────────
@@ -2366,7 +2395,8 @@ class TileCache {
             if (hit) return this._meshFromBuilt(hit);
         }
 
-        const built = await tilePointsPool.build(this._cfg, tx, ty, qmData, imgData, priority, landMask, imgRect);
+        const built = await tilePointsPool.build(this._cfg, tx, ty, qmData, imgData, priority, landMask, imgRect,
+                                                 this._carveFor(tx, ty));
         // Store BEFORE the mesh is made — _meshFromBuilt subarrays the buffers.
         // Fire-and-forget: a cache write must never delay a tile appearing, and a
         // quota failure must never propagate into the tile pipeline.
@@ -2660,6 +2690,104 @@ class TileCache {
         this._lruOrder.push(key);
         const e = this._tiles.get(key);
         if (e) e.lastAccess = performance.now();
+    }
+
+    /**
+     * Per-sample water-carve grid for this tile, from the baked LAND plane
+     * (2026-07-28). Cells come from the finest useful ancestor of the z12 land
+     * plane (≤ 32×32 per tile, ~4.9 km at full resolution): 1 = land may be
+     * painted, 0 = water — the builder skips 0-cells ONLY for samples inside
+     * the geoid height envelope, so real relief always survives (see
+     * buildTilePoints). Returns null when it cannot help: v1 asset / mask not
+     * loaded (fails SAFE toward painting), z ≥ 12 (tile-level gate already
+     * decided), or the tile is fully land (nothing to carve).
+     */
+    _carveFor(tx, ty) {
+        const z = this._cfg.zoom;
+        if (z >= 12 || !tileLandMask.ready || tileLandMask._landPlanes.size === 0) return null;
+        const bits = Math.min(5, 12 - z);          // cells per axis = 2^bits ≤ 32
+        const n    = 1 << bits;
+        const zq   = z + bits;                     // land plane consulted (block-max of z12)
+
+        // SURF RING (2026-07-28, same evening as the carve itself): carved water
+        // must keep ~10 km clear of any land cell. The BASE cloud's land/water
+        // boundary comes from the 9.8 km DEM, whose land bleeds up to a texel
+        // seaward; on tile handoff the base fades its "land" there. If the carve
+        // (whose GSHHG coastline is much tighter) removes the tile points in that
+        // same strip, NOBODY paints it — seen live as jagged black wedges hugging
+        // the Boso coast minutes after the first carve shipped. Keeping a
+        // one-DEM-texel surf ring painted costs a sliver of water fringe and
+        // guarantees the two coastline authorities always overlap.
+        const cellKm = 111 * (180 / 2 ** zq);      // ≈ km per zq cell (latitude)
+        const ring   = Math.max(1, Math.ceil(9.8 / cellKm));
+        const m      = n + 2 * ring;               // expanded grid: neighbors matter
+        const txB    = (tx << bits) - ring;
+        const tyB    = (ty << bits) - ring;
+        const grid   = new Uint8Array(m * m);
+        for (let gv = 0; gv < m; gv++) {
+            // Grid row 0 = NORTH (matches the landMask orientation in the
+            // builder); TMS ty grows northward, so invert. Out-of-range queries
+            // fail SAFE to land inside hasLand, which only widens the ring.
+            const tyq = tyB + (m - 1 - gv);
+            for (let gu = 0; gu < m; gu++) {
+                grid[gv * m + gu] = tileLandMask.hasLand(zq, txB + gu, tyq) ? 1 : 0;
+            }
+        }
+        const orig = grid.slice();                 // pre-dilation truth: real land
+        for (let r = 0; r < ring; r++) {           // dilate land into the water
+            const src = grid.slice();
+            for (let v = 0; v < m; v++) {
+                for (let u = 0; u < m; u++) {
+                    if (src[v * m + u]) continue;
+                    let any = 0;
+                    for (let dv = -1; dv <= 1 && !any; dv++) {
+                        for (let du = -1; du <= 1 && !any; du++) {
+                            const vv = v + dv, uu = u + du;
+                            if (vv >= 0 && vv < m && uu >= 0 && uu < m && src[vv * m + uu]) any = 1;
+                        }
+                    }
+                    if (any) grid[v * m + u] = 1;
+                }
+            }
+        }
+        // Crop the centre n×n, classifying three ways: 1 = real land,
+        // 2 = SURF (water kept — painted but colour-treated, see
+        // buildTilePoints), 0 = carved water.
+        //
+        // CARVE ONLY WHERE THE FLOOR MESH WILL PAINT (2026-07-28, the Tokyo
+        // Bay black rectangle). The floor mesh discards fragments where its
+        // getBestElevation-derived height is ≥ 0, and the coarse DEM reads
+        // narrow bays and coastal strips as LAND even where the (much finer)
+        // land plane correctly says water. In that disagreement zone the carve
+        // removed the tile points AND the floor declined to paint — a black
+        // hole with two authors. So a cell may only be carved when
+        // getBestElevation — the SAME function the floor's discard is built
+        // from — also says water there. Cells the floor would discard stay
+        // painted as SURF. Non-finite elevation (DEM not ready) fails SAFE to
+        // painted.
+        const b2  = geoTileBounds(tx, ty, z);
+        const cx0 = lonToSceneX(b2.west),  cx1 = lonToSceneX(b2.east);
+        const cz0 = latToSceneZ(b2.north), cz1 = latToSceneZ(b2.south);
+        const mask = new Uint8Array(n * n);
+        let carved = 0;
+        for (let gv = 0; gv < n; gv++) {
+            for (let gu = 0; gu < n; gu++) {
+                const gi = (gv + ring) * m + (gu + ring);
+                let v = orig[gi] ? 1 : (grid[gi] ? 2 : 0);
+                if (v === 0) {
+                    let el = NaN;
+                    try {
+                        el = getBestElevation(cx0 + ((gu + 0.5) / n) * (cx1 - cx0),
+                                              cz0 + ((gv + 0.5) / n) * (cz1 - cz0));
+                    } catch (_) { /* DEM not ready — fail safe below */ }
+                    if (!Number.isFinite(el) || el >= 0) v = 2;   // floor won't paint → we must
+                    else carved++;
+                }
+                mask[gv * n + gu] = v;
+            }
+        }
+        if (mask.every(c => c === 1)) return null;   // fully land — carve is a no-op
+        return { mask, n, bandM: TILESTREAM.GEOID_ABS_MAX_M };
     }
 
     _evict(key) {

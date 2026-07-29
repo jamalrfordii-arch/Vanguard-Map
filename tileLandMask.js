@@ -41,7 +41,8 @@ class TileLandMask {
         this.minZoom   = 0;
         this.maxZoom   = 0;
         this.dilation  = 0;
-        this._planes   = new Map();   // zoom → Uint8Array bitplane
+        this._planes   = new Map();   // zoom → Uint8Array FETCH bitplane (land ∪ dilation)
+        this._landPlanes = new Map(); // zoom → Uint8Array LAND bitplane (no dilation; v2 only)
         this._loading  = null;
         this.stats     = { queries: 0, skipped: 0 };
     }
@@ -77,19 +78,30 @@ class TileLandMask {
             if (bytes[i] !== MAGIC.charCodeAt(i)) throw new Error('bad magic');
         }
         const version = dv.getUint32(8, true);
-        if (version !== 1) throw new Error(`unsupported version ${version}`);
+        if (version !== 1 && version !== 2) throw new Error(`unsupported version ${version}`);
         this.minZoom  = dv.getUint32(12, true);
         this.maxZoom  = dv.getUint32(16, true);
         this.dilation = dv.getUint32(20, true);
         const n = this.maxZoom - this.minZoom + 1;
         this._planes.clear();
+        this._landPlanes.clear();
+        // v1: table of u32 pairs (fetchOff, fetchLen). v2: u32 quads
+        // (fetchOff, fetchLen, landOff, landLen) — see the bake's docstring.
+        const stride = version === 2 ? 16 : 8;
         for (let i = 0; i < n; i++) {
-            const off = dv.getUint32(28 + i * 8, true);
-            const len = dv.getUint32(32 + i * 8, true);
+            const base = 28 + i * stride;
+            const off  = dv.getUint32(base, true);
+            const len  = dv.getUint32(base + 4, true);
             const zoom = this.minZoom + i;
             const expect = ((2 ** (zoom + 1)) * (2 ** zoom)) / 8;
             if (len !== expect) throw new Error(`z${zoom} plane is ${len} B, expected ${expect}`);
             this._planes.set(zoom, bytes.subarray(off, off + len));
+            if (version === 2) {
+                const loff = dv.getUint32(base + 8, true);
+                const llen = dv.getUint32(base + 12, true);
+                if (llen !== expect) throw new Error(`z${zoom} land plane is ${llen} B, expected ${expect}`);
+                this._landPlanes.set(zoom, bytes.subarray(loff, loff + llen));
+            }
         }
         this._bytes = bytes.length;
         this.ready  = true;
@@ -113,23 +125,49 @@ class TileLandMask {
     shouldFetch(zoom, tx, ty) {
         if (!this.ready) return true;                       // fail open
         this.stats.queries++;
-        let z = zoom, x = tx, y = ty;
-        while (z > this.maxZoom) { z--; x >>= 1; y >>= 1; }
-        if (z < this.minZoom) return true;                  // coarser than baked
-        const plane = this._planes.get(z);
-        if (!plane) return true;
-        const tpx = 2 ** (z + 1);
-        const tpy = 2 ** z;
-        x = ((x % tpx) + tpx) % tpx;                        // longitude wraps
-        if (y < 0 || y >= tpy) return true;                 // off-grid — let the caller decide
-        const bit = y * tpx + x;
-        const hit = (plane[bit >> 3] >> (bit & 7)) & 1;
+        const hit = this._bitAt(this._planes, zoom, tx, ty);
+        if (hit === null) return true;
         if (!hit) this.stats.skipped++;
         return hit === 1;
     }
 
     /** Inverse of shouldFetch, for call sites that read better in the negative. */
     isWaterOnly(zoom, tx, ty) { return this.ready && !this.shouldFetch(zoom, tx, ty); }
+
+    /**
+     * Does this tile actually CONTAIN land (or a labelled place)?
+     *
+     * Distinct from shouldFetch: that plane includes the ±1 dilation ring, which
+     * is an error margin for FETCHING — near-coast pure-water tiles pass it by
+     * design. This plane has no dilation, so it answers the question the POINT
+     * BUILDER needs: may terrain points be painted here at all?
+     *
+     * FAILS SAFE toward painting: a v1 asset (no land plane), an unloaded mask,
+     * or an off-grid query all return true — suppression requires positive
+     * evidence of water, never its absence. See the geoid-ocean gate in
+     * tileStreamManager (2026-07-28) for the caller this exists for.
+     */
+    hasLand(zoom, tx, ty) {
+        if (!this.ready || this._landPlanes.size === 0) return true;
+        const hit = this._bitAt(this._landPlanes, zoom, tx, ty);
+        return hit === null ? true : hit === 1;
+    }
+
+    /** Shared bit lookup. Returns 1, 0, or null for "cannot answer" (caller
+     *  decides the failure direction — fetch fails open, land fails safe). */
+    _bitAt(planes, zoom, tx, ty) {
+        let z = zoom, x = tx, y = ty;
+        while (z > this.maxZoom) { z--; x >>= 1; y >>= 1; }
+        if (z < this.minZoom) return null;                  // coarser than baked
+        const plane = planes.get(z);
+        if (!plane) return null;
+        const tpx = 2 ** (z + 1);
+        const tpy = 2 ** z;
+        x = ((x % tpx) + tpx) % tpx;                        // longitude wraps
+        if (y < 0 || y >= tpy) return null;                 // off-grid
+        const bit = y * tpx + x;
+        return (plane[bit >> 3] >> (bit & 7)) & 1;
+    }
 
     /** Fraction of tiles kept at a zoom — a cheap sanity read from DevTools. */
     fetchFraction(zoom) {
