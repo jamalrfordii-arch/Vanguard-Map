@@ -2,6 +2,8 @@
 // BRIEF view: generates on tab click from live watchlist, alerts, and feed data
 // LOG view:   placeholder for analyst journal (next build)
 
+import { entityStore } from './entityStore.js';   // live entity lookups (was window.aisShips)
+
 const LS_LAST_VISIT  = 'vg1_sitrep_last_visit';
 const LS_LAST_STATE  = 'vg1_sitrep_last_state';
 const LS_WATCHLIST   = 'vg1_watchlist_mmsis';
@@ -38,7 +40,7 @@ function _getWatchedVessels() {
     if (!mmsis.length) return [];
 
     return mmsis.map(mmsi => {
-        const ship = window.aisShips?.find(s => String(s.userData?.id) === String(mmsi));
+        const ship = entityStore.byId(mmsi);
         const ud   = ship?.userData || {};
         const cachedName = window.watchlist?.getCachedName(mmsi) || String(mmsi);
         const name = (ud.displayName && ud.displayName !== String(mmsi))

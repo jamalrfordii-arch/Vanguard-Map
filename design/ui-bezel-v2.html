@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VANGUARD1 — Bezel v2 (modal chrome)</title>
+<!--
+  DOCKED BEZEL v2 — 2026-07-26
+  Fixes the over-commitment in v1: chrome is now MODAL, not permanent.
+
+  THE FIX
+  ───────
+  v1 kept a 296px selection dock on screen at all times — ~15% of a 1080p
+  viewport spent on a panel that is empty whenever nothing is selected.
+  Jamal's objection ("floating grants our map full attention") was right
+  about that specific cost, wrong about the mechanism. So:
+
+      OPERATE   rails only (11.0% of viewport @ 1920×1080). Default state.
+      INSPECT   rails + selection dock. Only while something is selected.
+      CINEMATIC everything collapses to zero. directorManager owns the screen.
+
+  Rails are cheap and predictable, so they persist. The dock is expensive,
+  so it is transient. Cinematic exists because floating/full-bleed IS the
+  right answer when the map is the experience rather than the instrument.
+
+  SEMANTIC REGIONS — this is what makes the AR port possible
+  ──────────────────────────────────────────────────────────
+  Regions are named by MEANING, not by screen position:
+
+      global-state  → what is true across the whole theatre
+      tools         → what the operator can do
+      selection     → what is currently under examination
+      time          → where we are in the record
+
+  On desktop these render as top rail / left rail / right dock / bottom rail.
+  In AR the same four render as world-locked slabs and object-anchored
+  callouts. Do not bake "top" or "right" into the region names.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=Martian+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+
+  :root {
+    --bg-void:  #06080a;
+    --bg-rail:  #0a0d10;
+    --bg-dock:  #0c0f13;
+    --line:     #1c2126;
+    --line-sub: #14181c;
+    --lift:     rgba(255,255,255,0.045);
+    --t-hi:     #f4f7fa;
+    --t-mid:    #98a3ad;
+    --t-lo:     #626c76;
+    --t-dim:    #3b434b;
+    --accent:   #00e5a0;
+    --alert:    #ff2d6f;
+    --warn:     #ffb020;
+  }
+
+  body.pair-1 { --sans:"Barlow Condensed",sans-serif; --mono:"Martian Mono",ui-monospace,monospace;
+                --lbl-sz:12px; --lbl-track:.11em; --mono-sz:9.5px; --mono-track:-.02em; --title-track:.13em; --title-sz:13px; }
+  body.pair-2 { --sans:"IBM Plex Sans Condensed",sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+                --lbl-sz:11px; --lbl-track:.08em; --mono-sz:11px; --mono-track:0; --title-track:.11em; --title-sz:11.5px; }
+  body.pair-3 { --sans:"Space Grotesk",sans-serif; --mono:"JetBrains Mono",ui-monospace,monospace;
+                --lbl-sz:10.5px; --lbl-track:.05em; --mono-sz:10.5px; --mono-track:-.01em; --title-track:.09em; --title-sz:11px; }
+
+  body { margin:0; background:var(--bg-void); color:var(--t-mid); font-family:var(--sans);
+         padding:20px; -webkit-font-smoothing:antialiased; }
+
+  /* ═══ page furniture ═══ */
+  .meta { max-width:1240px; margin:0 auto 14px; display:flex; align-items:flex-end; justify-content:space-between; gap:20px; flex-wrap:wrap; }
+  .meta h1 { font-size:13px; letter-spacing:.12em; text-transform:uppercase; color:var(--t-hi); margin:0 0 5px; font-weight:600; }
+  .meta p { font-size:12.5px; line-height:1.6; margin:0; color:var(--t-lo); max-width:64ch; font-family:ui-sans-serif,system-ui,sans-serif; }
+  .ctrls { display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap; }
+  .ctrl-grp > span { display:block; font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--t-dim);
+                     margin-bottom:5px; font-family:ui-sans-serif,system-ui,sans-serif; }
+  .ctrl-grp { display:flex; flex-direction:column; }
+  .btns { display:flex; gap:5px; }
+  .btns button { font-family:ui-monospace,Consolas,monospace; font-size:10px; background:#0d1114; color:var(--t-lo);
+                 border:1px solid var(--line); padding:7px 10px; cursor:pointer; letter-spacing:.06em; line-height:1.35; text-align:left; }
+  .btns button:hover { color:var(--t-mid); border-color:#2a3138; }
+  .btns button.on { color:var(--t-hi); border-color:var(--accent); background:#0b1512; }
+  .btns button i { display:block; font-style:normal; opacity:.5; font-size:9px; margin-top:2px; }
+
+  /* ═══════════ THE BEZEL — modal ═══════════ */
+  .app {
+    max-width:1240px; margin:0 auto; height:680px; position:relative;
+    display:grid;
+    grid-template-areas: "top top top" "left well dock" "bot bot bot";
+    background:var(--bg-rail); border:1px solid var(--line); overflow:hidden;
+    transition: grid-template-columns .34s cubic-bezier(.4,0,.2,1),
+                grid-template-rows    .34s cubic-bezier(.4,0,.2,1);
+  }
+  /* OPERATE — rails only. Dock collapsed to zero. */
+  body.mode-operate  .app { grid-template-columns:48px 1fr 0;    grid-template-rows:36px 1fr 58px; }
+  /* INSPECT — dock summoned by a selection. */
+  body.mode-inspect  .app { grid-template-columns:48px 1fr 296px; grid-template-rows:36px 1fr 58px; }
+  /* CINEMATIC — chrome gone. directorManager owns the frame. */
+  body.mode-cinema   .app { grid-template-columns:0 1fr 0;        grid-template-rows:0 1fr 0; }
+
+  .top,.left,.dock,.bot { transition:opacity .22s ease; min-width:0; min-height:0; overflow:hidden; }
+  body.mode-cinema  .top, body.mode-cinema .left,
+  body.mode-cinema  .dock, body.mode-cinema .bot { opacity:0; }
+  body.mode-operate .dock { opacity:0; }
+
+  /* ── viewport budget readout (page furniture, not UI) ── */
+  .budget { max-width:1240px; margin:9px auto 0; display:flex; gap:18px; font-family:ui-monospace,Consolas,monospace;
+            font-size:10.5px; color:var(--t-dim); letter-spacing:.04em; }
+  .budget b { color:var(--accent); font-weight:400; }
+
+  /* ═══ MAP WELL ═══ */
+  .well { grid-area:well; background:var(--bg-void); position:relative; display:flex; align-items:center; justify-content:center; }
+  .well-ghost { text-align:center; color:#1a2026; user-select:none; font-size:10px; letter-spacing:.26em; text-transform:uppercase; }
+  .well-ghost b { display:block; font-size:12px; color:#232b32; font-weight:600; margin-bottom:6px; }
+  .well-ghost i { display:block; font-style:normal; font-size:9.5px; letter-spacing:.09em; color:#161c22; margin-top:8px; }
+  .well::before,.well::after { content:''; position:absolute; width:13px; height:13px; border-color:#232b32; }
+  .well::before { top:9px; left:9px; border-top:1px solid; border-left:1px solid; }
+  .well::after  { bottom:9px; right:9px; border-bottom:1px solid; border-right:1px solid; }
+
+  /* CINEMATIC overlay — the only chrome that survives */
+  .cine {
+    position:absolute; left:18px; bottom:16px; z-index:5; opacity:0; pointer-events:none;
+    transition:opacity .3s ease .12s;
+  }
+  body.mode-cinema .cine { opacity:1; }
+  .cine .t { font-size:var(--title-sz); letter-spacing:var(--title-track); text-transform:uppercase; color:rgba(244,247,250,.62); font-weight:600; }
+  .cine .c { font-family:var(--mono); font-size:var(--mono-sz); color:rgba(152,163,173,.42); margin-top:3px; letter-spacing:var(--mono-track); }
+
+  /* ═══ REGION: global-state  (desktop → top rail) ═══ */
+  .top { grid-area:top; display:flex; align-items:stretch; border-bottom:1px solid var(--line);
+         background:var(--bg-rail); box-shadow:inset 0 1px 0 var(--lift); }
+  .brand { display:flex; align-items:center; gap:8px; padding:0 12px; border-right:1px solid var(--line-sub); }
+  .brand .mk { font-size:var(--title-sz); font-weight:700; letter-spacing:var(--title-track); color:var(--t-hi); text-transform:uppercase; }
+  .brand .v { font-family:var(--mono); font-size:8.5px; color:var(--t-dim); }
+  .theatre { display:flex; align-items:center; gap:9px; padding:0 14px; border-right:1px solid var(--line-sub); }
+  .theatre .lbl { font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--t-dim); }
+  .theatre .nm { font-size:var(--lbl-sz); letter-spacing:var(--lbl-track); color:var(--t-hi); text-transform:uppercase; font-weight:500; }
+  .feeds { display:flex; align-items:center; gap:16px; padding:0 14px; border-right:1px solid var(--line-sub); }
+  .fd { display:flex; align-items:center; gap:7px; }
+  .fd .fn { font-size:9px; letter-spacing:.14em; color:var(--t-dim); text-transform:uppercase; }
+  .fd .fc { font-family:var(--mono); font-size:var(--mono-sz); color:var(--t-hi); letter-spacing:var(--mono-track); }
+  .pip { width:6px; height:6px; position:relative; flex-shrink:0; }
+  .pip b { position:absolute; inset:1px; border-radius:50%; background:var(--accent); display:block; }
+  .pip s { position:absolute; inset:0; border-radius:50%; border:1px solid var(--accent); display:block;
+           animation:sweep 2.8s cubic-bezier(.2,.6,.3,1) infinite; }
+  @keyframes sweep { 0%{transform:scale(.5);opacity:.85} 70%,100%{transform:scale(2.6);opacity:0} }
+  .fd.deg .pip b { background:var(--warn); } .fd.deg .pip s { animation:none; opacity:0; } .fd.deg .fc { color:var(--t-lo); }
+  .top-right { margin-left:auto; display:flex; align-items:center; }
+  .perf { display:flex; align-items:center; gap:9px; padding:0 14px; border-left:1px solid var(--line-sub); }
+  .perf .n { font-family:var(--mono); font-size:var(--mono-sz); color:var(--t-mid); letter-spacing:var(--mono-track); }
+  .perf .n u { text-decoration:none; color:var(--t-dim); font-size:8.5px; }
+
+  /* ═══ REGION: tools  (desktop → left rail) ═══ */
+  .left { grid-area:left; border-right:1px solid var(--line); display:flex; flex-direction:column;
+          align-items:center; padding:7px 0; gap:3px; background:var(--bg-rail); }
+  .tool { width:34px; height:34px; display:grid; place-items:center; border:1px solid transparent; cursor:pointer; position:relative; flex-shrink:0; }
+  .tool svg { stroke:var(--t-lo); fill:none; stroke-width:1.3; }
+  .tool:hover svg { stroke:var(--t-mid); }
+  .tool.on { border-color:var(--line); background:#10151a; }
+  .tool.on svg { stroke:var(--t-hi); }
+  .tool.on::before { content:''; position:absolute; left:-7px; top:50%; transform:translateY(-50%); width:2px; height:15px; background:var(--accent); }
+  .rail-gap { flex:1; }
+
+  /* ═══ REGION: selection  (desktop → right dock, TRANSIENT) ═══ */
+  .dock { grid-area:dock; border-left:1px solid var(--line); background:var(--bg-dock);
+          display:flex; flex-direction:column; box-shadow:inset 1px 0 0 var(--lift); width:296px; }
+  .dock-head { padding:10px 13px 9px; border-bottom:1px solid var(--line); position:relative; }
+  .dock-close { position:absolute; top:9px; right:11px; width:17px; height:17px; display:grid; place-items:center;
+                border:1px solid var(--line); color:var(--t-lo); font-size:11px; cursor:pointer; line-height:1; font-family:var(--mono); }
+  .dock-close:hover { color:var(--t-hi); border-color:#2a3138; }
+  .dock-eyebrow { font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--t-dim); margin-bottom:4px; }
+  .dock-name { font-size:15px; font-weight:600; color:var(--t-hi); letter-spacing:.015em; line-height:1.15; }
+  .dock-sub { font-family:var(--mono); font-size:var(--mono-sz); color:var(--t-lo); margin-top:4px; letter-spacing:var(--mono-track); }
+  .dock-body { padding:12px 13px 14px; overflow:auto; flex:1; }
+  .sec { font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--t-dim); margin:15px 0 8px; display:flex; align-items:center; gap:8px; }
+  .sec:first-child { margin-top:0; }
+  .sec::after { content:''; flex:1; height:1px; background:var(--line-sub); }
+  .row { display:flex; justify-content:space-between; align-items:baseline; gap:10px; padding:3.5px 0; }
+  .row .k { font-size:var(--lbl-sz); letter-spacing:var(--lbl-track); color:var(--t-lo); flex-shrink:0; }
+  .row .v { font-family:var(--mono); font-size:var(--mono-sz); color:var(--t-mid); letter-spacing:var(--mono-track); text-align:right; font-variant-numeric:tabular-nums; }
+  .row .v.hi { color:var(--t-hi); }
+  .instr { display:flex; gap:13px; align-items:center; margin-bottom:4px; }
+  .gauges { flex:1; min-width:0; display:flex; flex-direction:column; gap:10px; }
+  .g-lbl { font-size:8.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--t-dim); display:flex; justify-content:space-between; }
+  .g-val { font-family:var(--mono); font-size:15px; color:var(--t-hi); letter-spacing:-.02em; line-height:1.1; font-variant-numeric:tabular-nums; }
+  .g-val u { text-decoration:none; font-size:9px; color:var(--t-lo); margin-left:2px; }
+  .anom { margin-top:11px; border-left:2px solid var(--alert); background:rgba(255,45,111,.07); padding:7px 10px; }
+  .anom-top { display:flex; justify-content:space-between; align-items:baseline; }
+  .anom-l { font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--alert); font-weight:600; }
+  .anom-v { font-family:var(--mono); font-size:var(--mono-sz); color:var(--alert); letter-spacing:var(--mono-track); }
+  .anom-f { font-size:10px; color:rgba(255,45,111,.6); margin-top:4px; line-height:1.4; }
+
+  /* ═══ REGION: time  (desktop → bottom rail) ═══ */
+  .bot { grid-area:bot; border-top:1px solid var(--line); background:var(--bg-rail); display:flex;
+         align-items:center; gap:14px; padding:0 13px; box-shadow:inset 0 1px 0 var(--lift); }
+  .transport { display:flex; align-items:center; gap:5px; flex-shrink:0; }
+  .tbtn { width:26px; height:26px; display:grid; place-items:center; border:1px solid var(--line); background:#10151a; cursor:pointer; }
+  .tbtn svg { fill:var(--t-mid); } .tbtn.on svg { fill:var(--accent); }
+  .rate { font-family:var(--mono); font-size:var(--mono-sz); color:var(--t-hi); border:1px solid var(--line); padding:5px 8px; letter-spacing:var(--mono-track); }
+  .clock-now { font-family:var(--mono); font-size:12px; color:var(--t-hi); letter-spacing:var(--mono-track); flex-shrink:0; font-variant-numeric:tabular-nums; }
+  .clock-now u { text-decoration:none; color:var(--t-dim); font-size:8.5px; margin-left:4px; }
+  .track { flex:1; min-width:0; }
+
+  .foot { max-width:1240px; margin:20px auto 0; font-size:12.5px; line-height:1.7; color:var(--t-lo); font-family:ui-sans-serif,system-ui,sans-serif; }
+  .foot strong { color:var(--t-hi); font-weight:600; }
+  .foot ul { padding-left:18px; margin:8px 0 0; } .foot li { margin-bottom:6px; }
+  .foot code { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; color:var(--accent); }
+</style>
+</head>
+<body class="pair-1 mode-operate">
+
+<div class="meta">
+  <div>
+    <h1>Bezel v2 · modal chrome</h1>
+    <p>Rails are cheap and predictable, so they persist. The selection dock is expensive, so it only exists while something is selected. Cinematic collapses everything — because full-bleed <em>is</em> right when the map is the experience. Switch modes to see the cost.</p>
+  </div>
+  <div class="ctrls">
+    <div class="ctrl-grp"><span>Mode</span><div class="btns" id="modes">
+      <button class="on" data-mode="operate"><b>Operate</b><i>rails only</i></button>
+      <button data-mode="inspect"><b>Inspect</b><i>+ selection</i></button>
+      <button data-mode="cinema"><b>Cinematic</b><i>chrome off</i></button>
+    </div></div>
+    <div class="ctrl-grp"><span>Type</span><div class="btns" id="pairs">
+      <button class="on" data-pair="1"><b>1</b><i>Barlow</i></button>
+      <button data-pair="2"><b>2</b><i>Plex</i></button>
+      <button data-pair="3"><b>3</b><i>Grotesk</i></button>
+    </div></div>
+  </div>
+</div>
+
+<div class="app">
+
+  <!-- ════ REGION: global-state ════ -->
+  <div class="top">
+    <div class="brand"><span class="mk">Vanguard</span><span class="v">1</span></div>
+    <div class="theatre"><span class="lbl">Theatre</span><span class="nm">Singapore Strait</span></div>
+    <div class="feeds">
+      <div class="fd"><span class="pip"><s></s><b></b></span><span class="fn">AIS</span><span class="fc">2 884</span></div>
+      <div class="fd"><span class="pip"><s></s><b></b></span><span class="fn">AIR</span><span class="fc">528</span></div>
+      <div class="fd deg"><span class="pip"><s></s><b></b></span><span class="fn">CBL</span><span class="fc">standby</span></div>
+    </div>
+    <div class="feeds">
+      <div class="fd"><span class="fn">Dark</span><span class="fc" style="color:var(--alert)">7</span></div>
+      <div class="fd"><span class="fn">Assets</span><span class="fc">3 412</span></div>
+    </div>
+    <div class="top-right"><div class="perf">
+      <svg width="72" height="18" viewBox="0 0 72 18">
+        <polyline fill="none" stroke="#00e5a0" stroke-width="1" opacity=".85"
+          points="0,12 4,11 8,13 12,10 16,12 20,11 24,9 28,12 32,10 36,13 40,11 44,10 48,12 52,14 56,11 60,4 64,9 68,11 72,10"/>
+        <circle cx="60" cy="4" r="1.6" fill="#ffb020"/>
+      </svg>
+      <span class="n">58<u> FPS</u></span><span class="n" style="color:var(--t-dim)">17.2<u> MS</u></span>
+    </div></div>
+  </div>
+
+  <!-- ════ REGION: tools ════ -->
+  <div class="left">
+    <div class="tool on" title="Layers"><svg width="17" height="17" viewBox="0 0 17 17"><path d="M8.5 2 15 5.5 8.5 9 2 5.5z"/><path d="M2 8.5 8.5 12 15 8.5"/><path d="M2 11.5 8.5 15 15 11.5"/></svg></div>
+    <div class="tool" title="Search"><svg width="17" height="17" viewBox="0 0 17 17"><circle cx="7.5" cy="7.5" r="4.5"/><path d="M11 11l4 4"/></svg></div>
+    <div class="tool" title="Measure"><svg width="17" height="17" viewBox="0 0 17 17"><path d="M2 11 11 2l4 4-9 9z"/><path d="M5 8l1.5 1.5M7.5 5.5 9 7"/></svg></div>
+    <div class="tool" title="Alert zones"><svg width="17" height="17" viewBox="0 0 17 17"><circle cx="8.5" cy="8.5" r="6"/><circle cx="8.5" cy="8.5" r="2"/></svg></div>
+    <div class="tool" title="Zone record"><svg width="17" height="17" viewBox="0 0 17 17"><circle cx="8.5" cy="8.5" r="6"/><circle cx="8.5" cy="8.5" r="2.6" fill="#ff2d6f" stroke="none"/></svg></div>
+    <div class="rail-gap"></div>
+    <div class="tool" title="Camera"><svg width="17" height="17" viewBox="0 0 17 17"><rect x="2" y="5" width="13" height="9"/><path d="M6 5l1.5-2h2L11 5"/><circle cx="8.5" cy="9.5" r="2.4"/></svg></div>
+    <div class="tool" title="Settings"><svg width="17" height="17" viewBox="0 0 17 17"><circle cx="8.5" cy="8.5" r="2.4"/><path d="M8.5 1.5v2M8.5 13.5v2M1.5 8.5h2M13.5 8.5h2M3.6 3.6l1.4 1.4M12 12l1.4 1.4M13.4 3.6 12 5M5 12l-1.4 1.4"/></svg></div>
+  </div>
+
+  <!-- ════ MAP WELL ════ -->
+  <div class="well">
+    <div class="well-ghost"><b>Map viewport</b>Three.js canvas · full bleed<i>chrome never covers this region</i></div>
+    <div class="cine">
+      <div class="t">Singapore Strait</div>
+      <div class="c">14:22:07 UTC · 2 884 CONTACTS</div>
+    </div>
+  </div>
+
+  <!-- ════ REGION: selection (transient) ════ -->
+  <div class="dock">
+    <div class="dock-head">
+      <div class="dock-close" id="deselect" title="Deselect">×</div>
+      <div class="dock-eyebrow">Selected · Vessel</div>
+      <div class="dock-name">Maersk Seletar</div>
+      <div class="dock-sub">477 995 123 · Crude oil tanker</div>
+    </div>
+    <div class="dock-body">
+      <div class="instr">
+        <svg width="66" height="66" viewBox="0 0 66 66" style="flex-shrink:0">
+          <g stroke="#3b434b" stroke-width="1">
+            <line x1="33" y1="4" x2="33" y2="9"/><line x1="33" y1="57" x2="33" y2="62"/>
+            <line x1="4" y1="33" x2="9" y2="33"/><line x1="57" y1="33" x2="62" y2="33"/>
+            <g opacity=".5">
+              <line x1="33" y1="5" x2="33" y2="8" transform="rotate(45 33 33)"/>
+              <line x1="33" y1="5" x2="33" y2="8" transform="rotate(135 33 33)"/>
+              <line x1="33" y1="5" x2="33" y2="8" transform="rotate(225 33 33)"/>
+              <line x1="33" y1="5" x2="33" y2="8" transform="rotate(315 33 33)"/>
+            </g>
+          </g>
+          <circle cx="33" cy="33" r="24" fill="none" stroke="#1c2126" stroke-width="1"/>
+          <path d="M33 2.5 l2.3 4.2 -4.6 0 z" fill="#626c76"/>
+          <g transform="rotate(213 33 33)">
+            <line x1="33" y1="33" x2="33" y2="12" stroke="#f4f7fa" stroke-width="1.5"/>
+            <path d="M33 10 l2.6 4.6 -5.2 0 z" fill="#f4f7fa"/>
+            <line x1="33" y1="33" x2="33" y2="41" stroke="#3b434b" stroke-width="1.2"/>
+          </g>
+          <circle cx="33" cy="33" r="1.9" fill="#0c0f13" stroke="#626c76" stroke-width="1"/>
+        </svg>
+        <div class="gauges">
+          <div><div class="g-lbl"><span>Heading</span></div><div class="g-val">213.4<u>°</u></div></div>
+          <div>
+            <div class="g-lbl"><span>Speed</span><span>0–24 kn</span></div>
+            <div class="g-val">11.4<u>kn</u></div>
+            <svg width="100%" height="8" viewBox="0 0 150 8" preserveAspectRatio="none" style="margin-top:4px;display:block">
+              <line x1="0" y1="6" x2="150" y2="6" stroke="#1c2126" stroke-width="1.5"/>
+              <rect x="0" y="5" width="71" height="2" fill="#00e5a0" opacity=".6"/>
+              <path d="M71 0 l3.2 4.2 -6.4 0 z" fill="#f4f7fa"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+      <div class="sec">Position</div>
+      <div class="row"><span class="k">Lat</span><span class="v hi">01° 15.85′ N</span></div>
+      <div class="row"><span class="k">Lon</span><span class="v hi">103° 49.31′ E</span></div>
+      <div class="row"><span class="k">Flag</span><span class="v">Hong Kong</span></div>
+      <div class="row"><span class="k">Draught</span><span class="v">14.2 m</span></div>
+      <div class="sec">Reporting</div>
+      <svg width="100%" height="34" viewBox="0 0 270 34" preserveAspectRatio="none" style="display:block">
+        <line x1="0" y1="24" x2="270" y2="24" stroke="#1c2126" stroke-width="1"/>
+        <g fill="#00e5a0" opacity=".85">
+          <rect x="2" y="13" width="2" height="11"/><rect x="13" y="11" width="2" height="13"/>
+          <rect x="24" y="14" width="2" height="10"/><rect x="35" y="10" width="2" height="14"/>
+          <rect x="46" y="13" width="2" height="11"/><rect x="57" y="12" width="2" height="12"/>
+          <rect x="68" y="14" width="2" height="10"/><rect x="79" y="11" width="2" height="13"/>
+          <rect x="90" y="13" width="2" height="11"/><rect x="101" y="12" width="2" height="12"/>
+        </g>
+        <rect x="110" y="8" width="82" height="16" fill="rgba(255,45,111,.09)"/>
+        <g stroke="#ff2d6f" stroke-width="1">
+          <line x1="110" y1="8" x2="110" y2="24"/><line x1="192" y1="8" x2="192" y2="24"/><line x1="110" y1="8" x2="192" y2="8"/>
+        </g>
+        <line x1="110" y1="24" x2="192" y2="24" stroke="#ff2d6f" stroke-width="1.4" stroke-dasharray="3 3"/>
+        <g fill="#00e5a0" opacity=".85">
+          <rect x="198" y="12" width="2" height="12"/><rect x="209" y="14" width="2" height="10"/>
+          <rect x="220" y="11" width="2" height="13"/><rect x="231" y="13" width="2" height="11"/>
+          <rect x="242" y="12" width="2" height="12"/><rect x="253" y="14" width="2" height="10"/>
+          <rect x="264" y="11" width="2" height="13"/>
+        </g>
+        <g font-family="ui-monospace, Consolas, monospace" font-size="7" fill="#3b434b">
+          <text x="0" y="33">−12h</text><text x="238" y="33">NOW</text>
+        </g>
+      </svg>
+      <div class="anom">
+        <div class="anom-top"><span class="anom-l">Reporting gap</span><span class="anom-v">4h 12m</span></div>
+        <div class="anom-f">Resumed 84 NM from last fix · 19.1 kn implied</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ REGION: time ════ -->
+  <div class="bot">
+    <div class="transport">
+      <div class="tbtn"><svg width="9" height="9" viewBox="0 0 9 9"><path d="M8 0v9L1 4.5z"/><rect x="0" y="0" width="1.4" height="9"/></svg></div>
+      <div class="tbtn on"><svg width="9" height="9" viewBox="0 0 9 9"><path d="M1 0l8 4.5L1 9z"/></svg></div>
+      <div class="tbtn"><svg width="9" height="9" viewBox="0 0 9 9"><path d="M1 0v9l7-4.5z"/><rect x="7.6" y="0" width="1.4" height="9"/></svg></div>
+    </div>
+    <div class="rate">1×</div>
+    <div class="clock-now">14:22:07<u>UTC</u></div>
+    <div class="track">
+      <svg width="100%" height="34" viewBox="0 0 700 34" preserveAspectRatio="none" style="display:block">
+        <line x1="0" y1="19" x2="700" y2="19" stroke="#1c2126" stroke-width="2"/>
+        <g stroke="#242b32" stroke-width="1">
+          <line x1="0" y1="19" x2="0" y2="26"/><line x1="175" y1="19" x2="175" y2="26"/>
+          <line x1="350" y1="19" x2="350" y2="26"/><line x1="525" y1="19" x2="525" y2="26"/><line x1="700" y1="19" x2="700" y2="26"/>
+        </g>
+        <g stroke="#1c2126" stroke-width="1" opacity=".8">
+          <line x1="58" y1="19" x2="58" y2="23"/><line x1="117" y1="19" x2="117" y2="23"/>
+          <line x1="233" y1="19" x2="233" y2="23"/><line x1="292" y1="19" x2="292" y2="23"/>
+          <line x1="408" y1="19" x2="408" y2="23"/><line x1="467" y1="19" x2="467" y2="23"/>
+          <line x1="583" y1="19" x2="583" y2="23"/><line x1="642" y1="19" x2="642" y2="23"/>
+        </g>
+        <line x1="0" y1="19" x2="512" y2="19" stroke="#39424a" stroke-width="2"/>
+        <rect x="286" y="10" width="42" height="9" fill="rgba(255,45,111,.16)"/>
+        <line x1="286" y1="9" x2="286" y2="19" stroke="#ff2d6f" stroke-width="1.4"/>
+        <line x1="328" y1="9" x2="328" y2="19" stroke="#ff2d6f" stroke-width="1.4"/>
+        <line x1="132" y1="12" x2="132" y2="19" stroke="#ffb020" stroke-width="1.4"/>
+        <line x1="438" y1="12" x2="438" y2="19" stroke="#ffb020" stroke-width="1.4"/>
+        <line x1="512" y1="4" x2="512" y2="27" stroke="#00e5a0" stroke-width="1.5"/>
+        <path d="M512 3 l4 5 -8 0 z" fill="#00e5a0"/>
+        <g font-family="ui-monospace, Consolas, monospace" font-size="7.5" fill="#3b434b">
+          <text x="0" y="33">02:00</text><text x="163" y="33">08:00</text>
+          <text x="338" y="33">14:00</text><text x="513" y="33">20:00</text><text x="672" y="33">02:00</text>
+        </g>
+      </svg>
+    </div>
+  </div>
+
+</div>
+
+<div class="budget" id="budget"></div>
+
+<div class="foot">
+  <p><strong>What changed from v1:</strong></p>
+  <ul>
+    <li><strong>The dock is transient.</strong> It costs ~15% of a 1080p viewport and was previously spent even when nothing was selected. Now it's summoned by selection and dismissed with <code>×</code> or Escape — which is what your objection was actually pointing at.</li>
+    <li><strong>Cinematic mode exists.</strong> You were right that floating/full-bleed serves the map better in some states. That state is <code>directorManager.js</code> driving the camera, and it now gets the whole frame with a single low-contrast corner readout.</li>
+    <li><strong>Rails stay.</strong> 11.0% of viewport at 1920×1080, in fixed regions, never covering a pick target — a much better trade than 15 unpredictable floating panels, and it lets the camera know its own visible rect. Inspect mode costs 25.1%, which is exactly why it's transient.</li>
+    <li><strong>Regions are named by meaning</strong> — <code>global-state</code>, <code>tools</code>, <code>selection</code>, <code>time</code> — not by screen edge. That's what lets the same architecture render as a bezel here and as world-locked slabs in AR. See <code>ui-ar.html</code>.</li>
+  </ul>
+</div>
+
+<script>
+  var body = document.body;
+  function setMode(m) {
+    body.className = body.className.replace(/mode-\w+/, 'mode-' + m);
+    document.querySelectorAll('#modes button').forEach(function (b) { b.classList.toggle('on', b.dataset.mode === m); });
+    updateBudget(m);
+  }
+  document.querySelectorAll('#modes button').forEach(function (b) {
+    b.addEventListener('click', function () { setMode(b.dataset.mode); });
+  });
+  document.querySelectorAll('#pairs button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.querySelectorAll('#pairs button').forEach(function (x) { x.classList.remove('on'); });
+      b.classList.add('on');
+      body.className = body.className.replace(/pair-\d/, 'pair-' + b.dataset.pair);
+    });
+  });
+  document.getElementById('deselect').addEventListener('click', function () { setMode('operate'); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') setMode('operate'); });
+
+  // viewport budget — shows the actual cost of each mode at 1920×1080
+  var BUD = {
+    operate:  { cols: 48 + 0,   rows: 36 + 58 },
+    inspect:  { cols: 48 + 296, rows: 36 + 58 },
+    cinema:   { cols: 0,        rows: 0 }
+  };
+  function updateBudget(m) {
+    var b = BUD[m], W = 1920, H = 1080;
+    var mapArea = (W - b.cols) * (H - b.rows);
+    var pct = (100 - (mapArea / (W * H)) * 100).toFixed(1);
+    document.getElementById('budget').innerHTML =
+      'AT 1920×1080 &nbsp;·&nbsp; MAP VIEWPORT <b>' + (W - b.cols) + ' × ' + (H - b.rows) + '</b>' +
+      ' &nbsp;·&nbsp; CHROME COST <b>' + pct + '%</b>' +
+      ' &nbsp;·&nbsp; OCCLUDED MAP <b>0%</b> (nothing floats)';
+  }
+  updateBudget('operate');
+</script>
+
+</body>
+</html>

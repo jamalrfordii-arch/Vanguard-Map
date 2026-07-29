@@ -20,7 +20,9 @@ const CODE_CACHE = 'vg1-code-v1';
 // activate handler drops v1 on next load, wiping them; .terrain is no longer
 // cached at all (see fetch handler), so it can't recur.
 const TILE_CACHE = 'vg1-tiles-v2';
-const CODE_RE    = /\.(js|mjs|html|json)$/;
+// .bin added 2026-07-25 for data/tile-land-mask.bin — a small same-origin static
+// asset that follows the same network-first-with-offline-fallback rule as code.
+const CODE_RE    = /\.(js|mjs|html|json|bin)$/;
 
 // Hosts whose GET responses are cacheable terrain tiles.
 // Includes the base-map tile hosts (AWS Terrarium DEM + EOX Sentinel-2 cloudless)

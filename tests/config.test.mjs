@@ -87,6 +87,68 @@ test('SPLAT_BRIGHTNESS stays in a sane (0, 2] band', () => {
         `SPLAT_BRIGHTNESS (${cfg.SPLAT_BRIGHTNESS}) out of tuned band`);
 });
 
+// ── Tile-point palette (added 2026-07-25) ────────────────────────────────────
+// These exist because the splat cloud's saturation was fenced (above) and the
+// TILE path — the surface you actually see close up — was not. It sat at 1.40
+// for weeks producing a gold/teal cast, which is the identical mistake, at the
+// identical value, that had already been fixed twice elsewhere (IBTrACS
+// categoryColor 2026-06-20, SPLAT_SATURATION 2026-07-13). A guard on one
+// surface and none on its twin is how that happens. If a third coloured
+// surface is added, fence it here too.
+console.log('tile-point palette');
+test('POINT_SATURATION stays at/below the 1.30 splat calibration', () => {
+    const s = cfg.TILESTREAM.POINT_SATURATION;
+    assert.ok(s > 0 && s <= 1.30,
+        `POINT_SATURATION (${s}) above 1.30 re-introduces the hue-shifting boost: warm ground reads neon gold and blue-filled shadow reads teal. 1.30 is SPLAT_SATURATION, so exceeding it also makes tiles more vivid than the base cloud they cross-fade into.`);
+});
+test('POINT_SATURATION does not exceed SPLAT_SATURATION — the LOD seam must not change vividness', () => {
+    assert.ok(cfg.TILESTREAM.POINT_SATURATION <= cfg.SPLAT_SATURATION,
+        `tiles (${cfg.TILESTREAM.POINT_SATURATION}) more saturated than the base cloud (${cfg.SPLAT_SATURATION}) — the crossfade will visibly shift colour`);
+});
+test('warm-trim and shadow-desat stay in [0,1]', () => {
+    for (const k of ['POINT_WARM_TRIM', 'POINT_SHADOW_DESAT']) {
+        const v = cfg.TILESTREAM[k];
+        assert.ok(typeof v === 'number' && v >= 0 && v <= 1,
+            `${k} (${v}) must be a fraction in [0,1]; >1 would invert chroma`);
+    }
+});
+test('POINT_SHADOW_L knee sits in the shadow range, not over midtones', () => {
+    const L = cfg.TILESTREAM.POINT_SHADOW_L;
+    assert.ok(L > 0 && L <= 0.35,
+        `POINT_SHADOW_L (${L}) above 0.35 would desaturate midtone terrain, not just shadow`);
+});
+test('elevToColor land bands stay LOW-CHROMA — the ramp is not a biome map', async () => {
+    const { elevToColor } = await import('../tilePointsBuilder.js');
+    let worst = 0, at = 0;
+    for (let e = 0; e <= 4000; e += 10) {
+        const c = elevToColor(e);
+        const ch = Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b);
+        if (ch > worst) { worst = ch; at = e; }
+    }
+    assert.ok(worst <= 0.26,
+        `land chroma peaks at ${worst.toFixed(3)} @ ${at}m. Above ~0.26 the ramp is asserting a BIOME from ALTITUDE alone — the old version hit 0.460 at 3000m and painted every montane region desert-ochre. Elevation predicts treeline and snowline, nothing else; biome colour comes from PHOTO_BLEND imagery.`);
+});
+test('elevToColor is continuous across every land band boundary', async () => {
+    const { elevToColor } = await import('../tilePointsBuilder.js');
+    for (let e = 0; e < 6000; e++) {
+        const a = elevToColor(e), b = elevToColor(e + 1);
+        const d = Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
+        assert.ok(d <= 0.02,
+            `discontinuity of ${d.toFixed(3)} between ${e}m and ${e + 1}m — a band boundary that steps draws a visible contour line around terrain at that altitude`);
+    }
+});
+test('elevToColor luminance rises monotonically with land elevation', async () => {
+    const { elevToColor } = await import('../tilePointsBuilder.js');
+    let prev = -1;
+    for (let e = 0; e <= 6000; e += 5) {
+        const c = elevToColor(e);
+        const L = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+        assert.ok(L >= prev - 1e-9,
+            `luminance dips at ${e}m — a ramp that darkens as ground rises fights the shading`);
+        prev = L;
+    }
+});
+
 console.log('GPU ceiling');
 test('CONTINENT_MESH_SEGS does not exceed the low-end-GPU ceiling (1536)', () => {
     assert.ok(cfg.CONTINENT_MESH_SEGS <= 1536,

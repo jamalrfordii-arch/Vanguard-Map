@@ -23,6 +23,7 @@ import * as THREE from 'three';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { Line2 }        from 'three/addons/lines/Line2.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 import { legendManager } from './legendManager.js';
 
@@ -349,17 +350,20 @@ export class IBTrACSManager {
 
         // Resize listener for LineMaterial resolution uniform.
         this._onResize = () => {
-            const dpr = window.devicePixelRatio || 1;
             for (const obj of this.group.children) {
                 if (obj.material && obj.material.resolution) {
                     obj.material.resolution.set(
-                        window.innerWidth  * dpr,
-                        window.innerHeight * dpr,
+                        viewport.bufferWidth(),
+                        viewport.bufferHeight(),
                     );
                 }
             }
         };
-        window.addEventListener('resize', this._onResize);
+        // Subscribe to viewport, not window 'resize'. The resolution uniform is in
+        // DRAWING-BUFFER pixels, which change on window resize, on layout change
+        // (dock/rails), AND on a runtime pixel-ratio nudge from the FPS monitor.
+        // Only viewport sees all three.
+        this._offResize = viewport.onChange(this._onResize);
     }
 
     setVisible(on) {
@@ -953,8 +957,13 @@ export class IBTrACSManager {
             if (!this.group.visible) return;
             const cam = window.camera;
             if (!cam) return;
-            const W = window.innerWidth;
-            const H = window.innerHeight;
+            // Projected points are CANVAS-LOCAL pixels; e.clientX/Y are PAGE
+            // coordinates. Those were the same number while the canvas filled the
+            // window — under the bezel they differ by the rail offsets, so the
+            // rect origin has to be added back before comparing.
+            const _r = viewport.rect();
+            const W = _r.width;
+            const H = _r.height;
             const v = new THREE.Vector3();
             let nearest = null;
             let nearestDist = 28;   // pixels
@@ -966,8 +975,8 @@ export class IBTrACSManager {
                 const sc = lonLatToScene(head.lon, head.lat);
                 v.set(sc.x, TRACK_Y + 0.2, sc.z).project(cam);
                 if (v.z < -1 || v.z > 1) continue;
-                const sx = (v.x + 1) * 0.5 * W;
-                const sy = (1 - v.y) * 0.5 * H;
+                const sx = _r.left + (v.x + 1) * 0.5 * W;
+                const sy = _r.top  + (1 - v.y) * 0.5 * H;
                 const dx = sx - e.clientX;
                 const dy = sy - e.clientY;
                 const d  = Math.sqrt(dx * dx + dy * dy);
@@ -1020,8 +1029,11 @@ export class IBTrACSManager {
                 ? `<div style="color:#666;margin-top:5px;font-size:9px;letter-spacing:0.15em;">SYNTHETIC PLACEHOLDER &mdash; LIVE FETCH PENDING</div>`
                 : `<div style="color:#5be3a4;margin-top:5px;font-size:9px;letter-spacing:0.15em;">&#10003; NOAA NCEI IBTrACS</div>`);
 
-        el.style.left = Math.min(window.innerWidth - 260, x + 12) + 'px';
-        el.style.top  = Math.min(window.innerHeight - 180, y + 12) + 'px';
+        // Clamp inside the MAP RECT, not the window: a naive width-only clamp
+        // ignores the left rail and lets the popup slide under the selection dock.
+        const _p = viewport.clampToRect(x + 12, y + 12, 260, 180, viewport.rect());
+        el.style.left = _p.x + 'px';
+        el.style.top  = _p.y + 'px';
         el.style.display = 'block';
     }
 

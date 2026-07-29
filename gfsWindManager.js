@@ -25,10 +25,12 @@
 //   completes, at which point the field swaps over without interruption.
 
 import * as THREE from 'three';
+import { resampleWindGrid } from './windGrid.js';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
 import { LineGeometry }         from 'three/addons/lines/LineGeometry.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { Line2 }                from 'three/addons/lines/Line2.js';
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 import { legendManager } from './legendManager.js';   // unified collapsible MAP KEYS panel
@@ -46,7 +48,18 @@ const CYCLONE_MAX_N  = 8;     // top N by intensity
 // 5° grid. Reveals real local wind features (sea breezes, mountain channeling,
 // the actual jet-stream meander) that 5° averaging smoothed away. Cold start
 // is ~45–60s on first load, then localStorage-cached for 6 h.
-const GRID_RES_DEG   = 1;
+const GRID_RES_DEG   = 1;          // RENDER grid — unchanged, this is what draws
+// ── FETCH grid (2026-07-25) ─────────────────────────────────────────────────
+// Deliberately coarser than the render grid. See the QUOTA note on _fetch(): at
+// 1° this asked Open-Meteo for 65,160 points = 651 requests PER PAGE LOAD against
+// a ~10,000/day free tier, so ~15 loads burned the whole quota and live data then
+// never arrived at all. 5° is 2,664 points = 27 requests, and the field is
+// interpolated up to the render grid (windGrid.js). 10m wind is smooth at synoptic
+// scale and the layer draws streamlines, so there is almost nothing to lose —
+// whereas having NO live data, which is what we had, loses everything.
+const FETCH_RES_DEG  = 5;
+const FETCH_W        = Math.round(360 / FETCH_RES_DEG);
+const FETCH_H        = Math.round(180 / FETCH_RES_DEG) + 1;
 const GRID_W         = Math.round(360 / GRID_RES_DEG);
 const GRID_H         = Math.round(180 / GRID_RES_DEG) + 1;
 const BATCH_SIZE     = 100;
@@ -157,20 +170,38 @@ function speedColor(spd, out) {
 // dynamic range: equatorial trade winds, mid-latitude westerly jet streams,
 // polar easterlies, an ITCZ calm belt, and a handful of wandering cyclones.
 // Speeds span 0 to ~35 m/s, so every colour band in the legend lights up.
-function synthesizeDemoField(u, v, tSeconds = 0) {
-    // Update drifting storm positions
-    for (const s of DEMO_STORMS) {
-        s.lon += 0.25;
-        if (s.lon > 180) s.lon -= 360;
+// rowFrom/rowTo (2026-07-24): synthesise only a horizontal BAND of the grid, so
+// the cost can be spread across several ticks instead of landing as one spike.
+// Full-grid is 65,160 cells × ~20 transcendental ops = 21ms measured, every
+// 500ms — 4.2% of wall clock, and a spike big enough to push the adaptive
+// quality controller past its slow gate and cost the renderer its supersampling.
+// Defaults cover the whole grid, so existing callers are unchanged.
+//
+// Storm positions advance only on the FIRST band of a sweep: every band in one
+// sweep must see the same storm positions, or the field would shear between
+// latitude bands computed at different moments.
+// gridW/resDeg parameterized 2026-07-25 so the same synthetic field can fill gaps
+// on the COARSE fetch grid as well as the render grid. Defaults preserve every
+// existing call site exactly. Note rowTo defaults to GRID_H, so a coarse caller
+// MUST pass its own row count — the previous signature silently used render-grid
+// dimensions, which would have written a 360-wide row into a 72-wide array.
+function synthesizeDemoField(u, v, tSeconds = 0, rowFrom = 0, rowTo = GRID_H,
+                             gridW = GRID_W, resDeg = GRID_RES_DEG) {
+    if (rowFrom === 0) {
+        // Update drifting storm positions
+        for (const s of DEMO_STORMS) {
+            s.lon += 0.25;
+            if (s.lon > 180) s.lon -= 360;
+        }
     }
 
-    for (let row = 0; row < GRID_H; row++) {
-        const lat  = -90 + row * GRID_RES_DEG;
+    for (let row = rowFrom; row < rowTo; row++) {
+        const lat  = -90 + row * resDeg;
         const latR = lat * Math.PI / 180;
-        for (let col = 0; col < GRID_W; col++) {
-            const lon  = -180 + col * GRID_RES_DEG;
+        for (let col = 0; col < gridW; col++) {
+            const lon  = -180 + col * resDeg;
             const lonR = lon * Math.PI / 180;
-            const i    = row * GRID_W + col;
+            const i    = row * gridW + col;
 
             // ── Three-cell zonal circulation ────────────────────────────────
             // Hadley (0-30°): easterly trades
@@ -248,16 +279,49 @@ export class GFSWindManager {
         // ── Try localStorage cache first — instant warm-start, no API hit ────
         this._loadCache();
 
-        // Refresh the synthetic field every 500ms so storms drift visibly
-        // (only matters until live data arrives). Rebuild the synoptic
-        // overlay every 6 s so jets/cyclones/ITCZ track the drifting field.
+        // Refresh the synthetic field so storms drift visibly (only matters until
+        // live data arrives). Rebuild the synoptic overlay every ~6 s so
+        // jets/cyclones/ITCZ track the drifting field.
+        //
+        // ── 2026-07-24: two guards, both measured ────────────────────────────
+        // This was a plain full-grid synthesise every 500ms: 21ms average, 67ms
+        // worst, 3344ms of a 30s sample — 11% of wall clock, the single most
+        // expensive timer in the app. Two things were wrong with that:
+        //
+        //  1. It ran even when the wind layer was HIDDEN. The whole point is to
+        //     animate a visible field; with the layer off it was pure waste.
+        //  2. It ran as ONE spike. The adaptive quality controller judges frame
+        //     time, so a 21-67ms spike four times a second is what pushed the EMA
+        //     past its 22ms slow gate and made the renderer surrender
+        //     supersampling. Spreading the same work into DEMO_BANDS slices costs
+        //     the same total but removes the spike, which is the part that hurts.
+        //
+        // Note this is FALLBACK work: it only runs because live GFS never arrives.
+        // See the quota problem documented on _fetch() — fixing that removes this
+        // entirely rather than making it cheaper.
+        const DEMO_BANDS = 4;
         this._demoTicks = 0;
+        this._demoBand  = 0;
         this._demoRefresh = setInterval(() => {
             if (this._haveLiveData) { clearInterval(this._demoRefresh); return; }
-            synthesizeDemoField(this._u, this._v);
-            this._demoTicks++;
-            if (this._demoTicks % 12 === 0 && this._patternGroup) this._buildPatterns();
-        }, 500);
+            // Nothing is looking at it — don't synthesise an invisible field.
+            // Optional chaining: the interval outlives construction order, and an
+            // absent group means the layer never finished setting up.
+            if (!this.group?.visible) return;
+
+            const rows    = Math.ceil(GRID_H / DEMO_BANDS);
+            const rowFrom = this._demoBand * rows;
+            const rowTo   = Math.min(GRID_H, rowFrom + rows);
+            synthesizeDemoField(this._u, this._v, 0, rowFrom, rowTo);
+
+            this._demoBand = (this._demoBand + 1) % DEMO_BANDS;
+            if (this._demoBand === 0) {
+                // One full sweep completed — keep the synoptic rebuild on its
+                // original ~6s cadence rather than firing DEMO_BANDS× as often.
+                this._demoTicks++;
+                if (this._demoTicks % 12 === 0 && this._patternGroup) this._buildPatterns();
+            }
+        }, 500 / DEMO_BANDS);
 
         const N  = PARTICLE_COUNT;
         const TD = TRAIL_DOTS;
@@ -291,8 +355,8 @@ export class GFSWindManager {
             depthTest:    false,
             blending:     THREE.NormalBlending,
             resolution:   new THREE.Vector2(
-                window.innerWidth  * (window.devicePixelRatio || 1),
-                window.innerHeight * (window.devicePixelRatio || 1),
+                viewport.width()  * (window.devicePixelRatio || 1),
+                viewport.height() * (window.devicePixelRatio || 1),
             ),
         });
 
@@ -313,10 +377,13 @@ export class GFSWindManager {
 
         // Keep LineMaterial's resolution in sync with the canvas.
         this._onResize = () => {
-            const dpr = window.devicePixelRatio || 1;
-            mat.resolution.set(window.innerWidth * dpr, window.innerHeight * dpr);
+            mat.resolution.set(viewport.bufferWidth(), viewport.bufferHeight());
         };
-        window.addEventListener('resize', this._onResize);
+        // Subscribe to viewport, not window 'resize'. The resolution uniform is in
+        // DRAWING-BUFFER pixels, which change on window resize, on layout change
+        // (dock/rails), AND on a runtime pixel-ratio nudge from the FPS monitor.
+        // Only viewport sees all three.
+        this._offResize = viewport.onChange(this._onResize);
 
         for (let i = 0; i < N; i++) this._spawn(i, true);
         this._tick();
@@ -591,17 +658,40 @@ export class GFSWindManager {
         }
     }
 
+    // ── QUOTA PROBLEM — the reason the synthetic fallback never goes away ────
+    // (2026-07-24) This asks Open-Meteo for a 1° global grid: GRID_W×GRID_H =
+    // 360×181 = 65,160 points, batched 100 at a time = **651 HTTP requests per
+    // fetch**, and _fetch() runs once on every page load. Open-Meteo's free tier
+    // allows ~10,000 requests/day, so roughly 15 page loads exhausts the entire
+    // daily quota — after which every batch 429s, `_haveLiveData` stays false
+    // forever, and the expensive synthetic fallback above runs for the whole
+    // session. Confirmed live 2026-07-24 with a direct probe:
+    //     {"reason":"Daily API request limit exceeded. Please try again tomorrow."}
+    //
+    // So this is not a flaky-network problem, it is a design mismatch: a
+    // point-query weather API is being used to pull a raster field. Real fixes,
+    // roughly in order of effort:
+    //   • Drop the grid resolution for the fetch (5° = 2,664 points = 27 batches,
+    //     ~24× fewer requests) and interpolate up — the field is smooth and the
+    //     particle layer cannot show 1° detail anyway.
+    //   • Or switch to a gridded source (NOMADS GRIB subset, Open-Meteo's
+    //     gridded endpoints) and stop issuing per-point queries entirely.
+    //   • Cache aggressively across loads — the field is valid for hours;
+    //     _loadCache() already exists, so the miss path is what needs bounding.
+    // Until then the synthetic fallback is the steady state, not the exception,
+    // which is why it was worth making it cheap.
     async _fetch() {
         if (this._fetchInFlight) return;
         this._fetchInFlight = true;
         const startMs = performance.now();
 
+        // Request the COARSE grid; the render grid is filled by interpolation below.
         const lats = [];
         const lons = [];
-        for (let row = 0; row < GRID_H; row++) {
-            const lat = -90 + row * GRID_RES_DEG;
-            for (let col = 0; col < GRID_W; col++) {
-                const lon = -180 + col * GRID_RES_DEG;
+        for (let row = 0; row < FETCH_H; row++) {
+            const lat = -90 + row * FETCH_RES_DEG;
+            for (let col = 0; col < FETCH_W; col++) {
+                const lon = -180 + col * FETCH_RES_DEG;
                 lats.push(lat);
                 lons.push(lon);
             }
@@ -666,26 +756,33 @@ export class GFSWindManager {
             return;
         }
 
-        // Fill missing cells from the synthetic field
-        const synU = new Float32Array(total);
-        const synV = new Float32Array(total);
-        synthesizeDemoField(synU, synV);
+        // Gap-fill on the COARSE grid, before interpolating. Doing it after would
+        // smear a synthetic cell across all 25 fine cells around it; doing it here
+        // means the interpolation blends real neighbours into the patch.
+        const synCoarseU = new Float32Array(total);
+        const synCoarseV = new Float32Array(total);
+        synthesizeDemoField(synCoarseU, synCoarseV, 0, 0, FETCH_H, FETCH_W, FETCH_RES_DEG);
         for (let i = 0; i < total; i++) {
-            if (u[i] === 0 && v[i] === 0) { u[i] = synU[i]; v[i] = synV[i]; }
+            if (u[i] === 0 && v[i] === 0) { u[i] = synCoarseU[i]; v[i] = synCoarseV[i]; }
         }
 
-        this._u = u;
-        this._v = v;
+        // Coarse → render grid. Vector components, never speed+bearing — see
+        // windGrid.js for why averaging bearings is wrong at the 0/360 seam.
+        const fine = resampleWindGrid(u, v, FETCH_W, FETCH_H, FETCH_RES_DEG,
+                                      GRID_W, GRID_H, GRID_RES_DEG);
+
+        this._u = fine.u;
+        this._v = fine.v;
         this._haveLiveData  = true;
         this._lastFetchMs   = Date.now();
         this._fetchInFlight = false;
 
-        this._saveCache(u, v);
+        this._saveCache(this._u, this._v);
 
         // Rebuild the synoptic layer from real data now that we have it.
         this._buildPatterns();
 
-        console.info(`[GFS] \u2713 Live wind field active \u2014 ${ok}/${total} cells in ${elapsed}s, grid ${GRID_W}x${GRID_H} @ ${GRID_RES_DEG}\u00b0.`);
+        console.info(`[GFS] \u2713 Live wind field active \u2014 ${ok}/${total} fetched cells @ ${FETCH_RES_DEG}\u00b0 in ${elapsed}s (${tasks.length} requests), interpolated to ${GRID_W}x${GRID_H} @ ${GRID_RES_DEG}\u00b0.`);
         window.dispatchEvent(new CustomEvent('vg1:windDataReady', {
             detail: { gridded: true, w: GRID_W, h: GRID_H, resDeg: GRID_RES_DEG, ts: this._lastFetchMs }
         }));
@@ -763,7 +860,6 @@ export class GFSWindManager {
             const geo = new LineGeometry();
             geo.setPositions(positions);
             geo.setColors(colors);
-            const dpr = window.devicePixelRatio || 1;
             const mat = new LineMaterial({
                 linewidth:    5,
                 vertexColors: true,
@@ -772,7 +868,7 @@ export class GFSWindManager {
                 depthWrite:   false,
                 depthTest:    false,
                 blending:     THREE.AdditiveBlending,
-                resolution:   new THREE.Vector2(window.innerWidth * dpr, window.innerHeight * dpr),
+                resolution:   new THREE.Vector2(viewport.bufferWidth(), viewport.bufferHeight()),
             });
             const line = new Line2(geo, mat);
             line.frustumCulled = false;
@@ -918,13 +1014,12 @@ export class GFSWindManager {
         }
         const geo = new LineGeometry();
         geo.setPositions(positions);
-        const dpr = window.devicePixelRatio || 1;
         const mat = new LineMaterial({
             color: 0x66ccff, linewidth: 2,
             transparent: true, opacity: 0.55,
             depthWrite: false, depthTest: false,
             dashed: true, dashSize: 1.4, gapSize: 1.4,
-            resolution: new THREE.Vector2(window.innerWidth * dpr, window.innerHeight * dpr),
+            resolution: new THREE.Vector2(viewport.bufferWidth(), viewport.bufferHeight()),
         });
         const line = new Line2(geo, mat);
         line.computeLineDistances();
@@ -1166,7 +1261,6 @@ export class GFSWindManager {
         this._streamSegPhase   = new Float32Array(segPhase);
         if (this._streamT0 === undefined) this._streamT0 = performance.now();
 
-        const dpr = window.devicePixelRatio || 1;
         const mat = new LineMaterial({
             linewidth:    1.6,
             vertexColors: true,
@@ -1175,7 +1269,7 @@ export class GFSWindManager {
             depthWrite:   false,
             depthTest:    false,
             blending:     THREE.NormalBlending,
-            resolution:   new THREE.Vector2(window.innerWidth * dpr, window.innerHeight * dpr),
+            resolution:   new THREE.Vector2(viewport.bufferWidth(), viewport.bufferHeight()),
         });
 
         this._streamMesh = new LineSegments2(geo, mat);

@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VANGUARD1 — UI Direction Study</title>
+<!--
+  UI DIRECTION STUDY — 2026-07-26
+  Static mockup. No dependencies, no JS, not wired to anything.
+  Purpose: choose a design direction BEFORE touching index.html.
+
+  Governing rule for all three directions:
+      THE MAP IS THE CONTENT. THE CHROME IS THE FRAME.
+      Chrome trends monochrome. Colour is reserved for meaning.
+      The only saturated element in each panel below is the ONE thing
+      that is actually wrong (the AIS gap). That is the whole test.
+
+  Content is real: pulled from index.html's #ui-layer status readout,
+  #layers-panel, and #vessel-detail.
+-->
+<style>
+  /* ═══════════════════════════════════════════════════════════════
+     PAGE SHELL — neutral, deliberately styleless. Not a proposal.
+     ═══════════════════════════════════════════════════════════════ */
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #07090c;
+    font-family: ui-sans-serif, -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    color: #7d8996;
+    padding: 28px 24px 64px;
+  }
+
+  .page-head { max-width: 1400px; margin: 0 auto 26px; }
+  .page-head h1 {
+    font-size: 15px; font-weight: 650; color: #dbe3ea;
+    margin: 0 0 8px; letter-spacing: 0.02em;
+  }
+  .page-head p { font-size: 13px; line-height: 1.6; margin: 0 0 6px; max-width: 76ch; }
+  .page-head .rule {
+    display: inline-block; margin-top: 10px; padding: 6px 12px;
+    border-left: 2px solid #4a5560; background: #0c1015;
+    font-size: 12px; color: #9aa7b4;
+  }
+
+  /* Map-ish backdrop so chrome can be judged against something,
+     not against flat black. Faint graticule + a land-ish wash. */
+  .stage {
+    max-width: 1400px; margin: 0 auto;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+    background:
+      linear-gradient(rgba(120,150,170,0.045) 1px, transparent 1px) 0 0 / 100% 58px,
+      linear-gradient(90deg, rgba(120,150,170,0.045) 1px, transparent 1px) 0 0 / 58px 100%,
+      radial-gradient(120% 90% at 22% 18%, #16202a 0%, #0b1117 42%, #05080b 100%);
+    border: 1px solid #161d25;
+    padding: 22px;
+  }
+  @media (max-width: 1100px) { .stage { grid-template-columns: 1fr; } }
+
+  .col-head { margin-bottom: 14px; }
+  .col-name {
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: #cfd8e0; font-weight: 700; margin-bottom: 5px;
+  }
+  .col-thesis { font-size: 11.5px; line-height: 1.5; color: #6b7783; }
+  .col-tokens {
+    margin-top: 9px; display: flex; gap: 4px; align-items: center;
+  }
+  .swatch { width: 15px; height: 15px; border: 1px solid rgba(255,255,255,0.14); }
+
+  .panel-stack { display: flex; flex-direction: column; gap: 14px; }
+
+  /* ═══════════════════════════════════════════════════════════════
+     SHARED SKELETON
+     Identical DOM in all three columns. Only tokens differ.
+     ═══════════════════════════════════════════════════════════════ */
+  .p { }
+  .p-head { display: flex; align-items: baseline; justify-content: space-between; }
+  .p-title { }
+  .p-sub { }
+  .sec-label { }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .row .k { flex-shrink: 0; }
+  .row .v { text-align: right; min-width: 0; }
+  .lyr { display: flex; justify-content: space-between; align-items: center; cursor: default; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .flag { }
+
+  /* ───────────────────────────────────────────────────────────────
+     DIRECTION 1 — CHART
+     Admiralty / NOAA chart heritage. Warm bone chrome on deep navy.
+     Magenta = cautionary, straight from chart convention.
+     Hairlines, no blur, no glow, no radius.
+     ─────────────────────────────────────────────────────────────── */
+  .chart {
+    --bg:        #0a1220;
+    --bg-2:      #0d1725;
+    --line:      #24354a;
+    --line-soft: #172436;
+    --txt-hi:    #e8e2d4;   /* bone — chart paper */
+    --txt-mid:   #9aa4b0;
+    --txt-lo:    #5e6b7a;
+    --accent:    #c8b78a;   /* brass */
+    --alert:     #ff4d9a;   /* chart magenta: cautionary area */
+    --ok:        #6fbf9a;
+  }
+  .chart .p {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    padding: 11px 12px 12px;
+  }
+  .chart .p + .p { }
+  .chart .p-head {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 7px; margin-bottom: 9px;
+  }
+  .chart .p-title {
+    font-size: 11px; font-weight: 600; color: var(--txt-hi);
+    letter-spacing: 0.10em; text-transform: uppercase;
+  }
+  .chart .p-sub {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 9.5px; color: var(--txt-lo); letter-spacing: 0.04em;
+  }
+  .chart .sec-label {
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--txt-lo); margin: 12px 0 6px;
+    padding-bottom: 3px; border-bottom: 1px solid var(--line-soft);
+  }
+  .chart .sec-label:first-child { margin-top: 0; }
+  .chart .row {
+    font-size: 11.5px; padding: 3px 0;
+  }
+  .chart .row .k { color: var(--txt-lo); font-size: 10.5px; }
+  .chart .row .v {
+    color: var(--txt-mid);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-variant-numeric: tabular-nums; font-size: 11px;
+  }
+  .chart .row .v.strong { color: var(--txt-hi); }
+  .chart .lyr { font-size: 11.5px; padding: 4px 0; color: var(--txt-mid); }
+  .chart .lyr.off { color: var(--txt-lo); }
+  .chart .dot { background: var(--accent); border-radius: 0; width: 6px; height: 6px; }
+  .chart .lyr.off .dot { background: transparent; box-shadow: inset 0 0 0 1px var(--txt-lo); }
+  .chart .flag {
+    margin-top: 10px; padding: 7px 9px;
+    background: rgba(255,77,154,0.09);
+    border: 1px solid rgba(255,77,154,0.42);
+    color: var(--alert); font-size: 11px;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  }
+  .chart .flag .lbl { font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase; font-size: 9.5px; }
+  .chart .flag .val { font-family: ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  /* ───────────────────────────────────────────────────────────────
+     DIRECTION 2 — INSTRUMENT
+     Ops console / terminal. Neutral graphite, hard edges, zero blur,
+     zero radius, maximum density. Amber = attention. Built to be
+     stared at for ten hours.
+     ─────────────────────────────────────────────────────────────── */
+  .instrument {
+    --bg:        #101215;
+    --bg-2:      #16191d;
+    --line:      #262b31;
+    --txt-hi:    #f0f2f4;
+    --txt-mid:   #a4acb4;
+    --txt-lo:    #626a73;
+    --accent:    #d8dde2;
+    --alert:     #ffa62b;   /* amber */
+    --ok:        #7ec699;
+  }
+  .instrument .p {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    padding: 0;
+    font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+  }
+  .instrument .p-head {
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--line);
+    padding: 6px 9px;
+  }
+  .instrument .p-title {
+    font-size: 10px; font-weight: 700; color: var(--txt-hi);
+    letter-spacing: 0.10em; text-transform: uppercase;
+  }
+  .instrument .p-sub { font-size: 9px; color: var(--txt-lo); }
+  .instrument .sec-label {
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--txt-lo); background: rgba(255,255,255,0.022);
+    padding: 3px 9px; border-bottom: 1px solid var(--line);
+    border-top: 1px solid var(--line);
+  }
+  .instrument .p-head + .sec-label { border-top: none; }
+  .instrument .row {
+    font-size: 11px; padding: 2px 9px;
+    font-variant-numeric: tabular-nums;
+  }
+  .instrument .row:nth-child(even) { background: rgba(255,255,255,0.016); }
+  .instrument .row .k { color: var(--txt-lo); }
+  .instrument .row .v { color: var(--txt-mid); }
+  .instrument .row .v.strong { color: var(--txt-hi); }
+  .instrument .lyr { font-size: 11px; padding: 3px 9px; color: var(--txt-mid); }
+  .instrument .lyr:nth-child(even) { background: rgba(255,255,255,0.016); }
+  .instrument .lyr.off { color: var(--txt-lo); }
+  .instrument .dot { width: 6px; height: 6px; border-radius: 0; background: var(--accent); }
+  .instrument .lyr.off .dot { background: transparent; box-shadow: inset 0 0 0 1px var(--txt-lo); }
+  .instrument .flag {
+    margin: 0; padding: 6px 9px;
+    border-top: 1px solid var(--line);
+    background: rgba(255,166,43,0.10);
+    color: var(--alert); font-size: 10.5px;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  }
+  .instrument .flag .lbl { font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; font-size: 9.5px; }
+  .instrument .flag .val { font-variant-numeric: tabular-nums; }
+  .instrument .pad { padding-bottom: 4px; }
+
+  /* ───────────────────────────────────────────────────────────────
+     DIRECTION 3 — RECESSIVE
+     Modern geospatial. Near-black glass, very low-contrast chrome,
+     one accent, generous hierarchy. The map wins every contrast
+     fight on the screen; the UI never competes.
+     ─────────────────────────────────────────────────────────────── */
+  .recessive {
+    --bg:        rgba(9, 12, 16, 0.80);
+    --line:      rgba(255,255,255,0.075);
+    --txt-hi:    #eef1f4;
+    --txt-mid:   #98a2ac;
+    --txt-lo:    #5a636d;
+    --accent:    #e6eaee;
+    --alert:     #ff6b5e;
+    --ok:        #6fd39a;
+  }
+  .recessive .p {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 13px 14px 14px;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 8px 26px rgba(0,0,0,0.5);
+  }
+  .recessive .p-head { margin-bottom: 12px; }
+  .recessive .p-title {
+    font-size: 12.5px; font-weight: 620; color: var(--txt-hi); letter-spacing: 0.005em;
+  }
+  .recessive .p-sub { font-size: 10.5px; color: var(--txt-lo); }
+  .recessive .sec-label {
+    font-size: 9.5px; letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--txt-lo); margin: 15px 0 7px; font-weight: 600;
+  }
+  .recessive .sec-label:first-child { margin-top: 0; }
+  .recessive .row { font-size: 12px; padding: 4px 0; }
+  .recessive .row .k { color: var(--txt-lo); font-size: 11.5px; }
+  .recessive .row .v {
+    color: var(--txt-mid);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-variant-numeric: tabular-nums; font-size: 11.5px;
+  }
+  .recessive .row .v.strong { color: var(--txt-hi); }
+  .recessive .lyr { font-size: 12px; padding: 5px 0; color: var(--txt-mid); }
+  .recessive .lyr.off { color: var(--txt-lo); }
+  .recessive .dot { background: var(--accent); }
+  .recessive .lyr.off .dot { background: transparent; box-shadow: inset 0 0 0 1px var(--txt-lo); }
+  .recessive .flag {
+    margin-top: 12px; padding: 9px 11px; border-radius: 4px;
+    background: rgba(255,107,94,0.10);
+    border: 1px solid rgba(255,107,94,0.30);
+    color: var(--alert); font-size: 12px;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  }
+  .recessive .flag .lbl { font-weight: 640; letter-spacing: 0.07em; text-transform: uppercase; font-size: 10px; }
+  .recessive .flag .val { font-family: ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  .foot {
+    max-width: 1400px; margin: 26px auto 0;
+    font-size: 12px; line-height: 1.65; color: #6b7783;
+  }
+  .foot strong { color: #b9c3cd; font-weight: 620; }
+  .foot ul { padding-left: 18px; margin: 8px 0 0; }
+  .foot li { margin-bottom: 5px; }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>VANGUARD1 — UI direction study</h1>
+  <p>Same three panels, same real content, three design directions. Static mockup — nothing is wired up. Pick one (or parts of several) before any change lands in <code>index.html</code>.</p>
+  <div class="rule">Governing rule: <strong style="color:#dbe3ea">the map is the content, the chrome is the frame.</strong> Chrome trends monochrome; colour is reserved for meaning. In every panel below, the only saturated element is the one thing that's actually wrong.</div>
+</div>
+
+<div class="stage">
+
+  <!-- ══════════════ COLUMN 1 — CHART ══════════════ -->
+  <div>
+    <div class="col-head">
+      <div class="col-name">1 · Chart</div>
+      <div class="col-thesis">Admiralty / NOAA chart heritage. Bone-white chrome on deep navy, brass accents, magenta for cautionary areas — an actual maritime convention, not a movie one. Hairline rules, no blur, no glow.</div>
+      <div class="col-tokens">
+        <span class="swatch" style="background:#0a1220"></span>
+        <span class="swatch" style="background:#24354a"></span>
+        <span class="swatch" style="background:#5e6b7a"></span>
+        <span class="swatch" style="background:#e8e2d4"></span>
+        <span class="swatch" style="background:#c8b78a"></span>
+        <span class="swatch" style="background:#ff4d9a"></span>
+      </div>
+    </div>
+
+    <div class="panel-stack chart">
+      <div class="p">
+        <div class="p-head"><span class="p-title">Operational Theatre</span><span class="p-sub">ACTIVE</span></div>
+        <div class="sec-label">System Status</div>
+        <div class="row"><span class="k">On-screen assets</span><span class="v strong">3,412</span></div>
+        <div class="row"><span class="k">AIS feed</span><span class="v">LIVE</span></div>
+        <div class="row"><span class="k">Live vessels</span><span class="v strong">2,884</span></div>
+        <div class="row"><span class="k">Air feed</span><span class="v">LIVE</span></div>
+        <div class="row"><span class="k">Live flights</span><span class="v strong">528</span></div>
+        <div class="row"><span class="k">Dark vessels</span><span class="v strong">7</span></div>
+        <div class="sec-label">Render</div>
+        <div class="row"><span class="k">GPU backend</span><span class="v">WebGL2</span></div>
+        <div class="row"><span class="k">FPS</span><span class="v">58</span></div>
+        <div class="row"><span class="k">Frame</span><span class="v">17.2 ms</span></div>
+      </div>
+
+      <div class="p">
+        <div class="p-head"><span class="p-title">Map Layers</span><span class="p-sub">4 / 5</span></div>
+        <div class="sec-label">Maritime</div>
+        <div class="lyr">AIS Vessels <span class="dot"></span></div>
+        <div class="lyr">Vessel Trails <span class="dot"></span></div>
+        <div class="lyr">Chokepoint Labels <span class="dot"></span></div>
+        <div class="lyr">Port Markers <span class="dot"></span></div>
+        <div class="lyr off">Sea State (Waves) <span class="dot"></span></div>
+      </div>
+
+      <div class="p">
+        <div class="p-head"><span class="p-title">MAERSK SELETAR</span><span class="p-sub">TANKER</span></div>
+        <div class="row"><span class="k">MMSI</span><span class="v strong">477995123</span></div>
+        <div class="row"><span class="k">Speed</span><span class="v">11.4 kn</span></div>
+        <div class="row"><span class="k">Heading</span><span class="v">213°</span></div>
+        <div class="row"><span class="k">Lat</span><span class="v">1.2641 N</span></div>
+        <div class="row"><span class="k">Lon</span><span class="v">103.8219 E</span></div>
+        <div class="row"><span class="k">Region</span><span class="v">Singapore Strait</span></div>
+        <div class="row"><span class="k">Flag</span><span class="v">Hong Kong</span></div>
+        <div class="flag"><span class="lbl">AIS Gap</span><span class="val">4h 12m</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ COLUMN 2 — INSTRUMENT ══════════════ -->
+  <div>
+    <div class="col-head">
+      <div class="col-name">2 · Instrument</div>
+      <div class="col-thesis">Ops console / terminal software. Neutral graphite, hard 1px edges, zero blur, zero radius, banded rows, maximum density. Amber means attention and nothing else. Built to be stared at for ten hours.</div>
+      <div class="col-tokens">
+        <span class="swatch" style="background:#101215"></span>
+        <span class="swatch" style="background:#262b31"></span>
+        <span class="swatch" style="background:#626a73"></span>
+        <span class="swatch" style="background:#f0f2f4"></span>
+        <span class="swatch" style="background:#ffa62b"></span>
+      </div>
+    </div>
+
+    <div class="panel-stack instrument">
+      <div class="p">
+        <div class="p-head"><span class="p-title">Operational Theatre</span><span class="p-sub">ACTIVE</span></div>
+        <div class="sec-label">System Status</div>
+        <div class="row"><span class="k">ON-SCREEN ASSETS</span><span class="v strong">3,412</span></div>
+        <div class="row"><span class="k">AIS FEED</span><span class="v">LIVE</span></div>
+        <div class="row"><span class="k">LIVE VESSELS</span><span class="v strong">2,884</span></div>
+        <div class="row"><span class="k">AIR FEED</span><span class="v">LIVE</span></div>
+        <div class="row"><span class="k">LIVE FLIGHTS</span><span class="v strong">528</span></div>
+        <div class="row"><span class="k">DARK VESSELS</span><span class="v strong">7</span></div>
+        <div class="sec-label">Render</div>
+        <div class="row"><span class="k">GPU BACKEND</span><span class="v">WebGL2</span></div>
+        <div class="row"><span class="k">FPS</span><span class="v">58</span></div>
+        <div class="row pad"><span class="k">FRAME</span><span class="v">17.2 ms</span></div>
+      </div>
+
+      <div class="p">
+        <div class="p-head"><span class="p-title">Map Layers</span><span class="p-sub">4 / 5</span></div>
+        <div class="sec-label">Maritime</div>
+        <div class="lyr">AIS Vessels <span class="dot"></span></div>
+        <div class="lyr">Vessel Trails <span class="dot"></span></div>
+        <div class="lyr">Chokepoint Labels <span class="dot"></span></div>
+        <div class="lyr">Port Markers <span class="dot"></span></div>
+        <div class="lyr off">Sea State (Waves) <span class="dot"></span></div>
+        <div style="height:4px"></div>
+      </div>
+
+      <div class="p">
+        <div class="p-head"><span class="p-title">MAERSK SELETAR</span><span class="p-sub">TANKER</span></div>
+        <div class="row"><span class="k">MMSI</span><span class="v strong">477995123</span></div>
+        <div class="row"><span class="k">SPEED</span><span class="v">11.4 kn</span></div>
+        <div class="row"><span class="k">HEADING</span><span class="v">213°</span></div>
+        <div class="row"><span class="k">LAT</span><span class="v">1.2641 N</span></div>
+        <div class="row"><span class="k">LON</span><span class="v">103.8219 E</span></div>
+        <div class="row"><span class="k">REGION</span><span class="v">Singapore Strait</span></div>
+        <div class="row"><span class="k">FLAG</span><span class="v">Hong Kong</span></div>
+        <div class="flag"><span class="lbl">AIS Gap</span><span class="val">4h 12m</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════ COLUMN 3 — RECESSIVE ══════════════ -->
+  <div>
+    <div class="col-head">
+      <div class="col-name">3 · Recessive</div>
+      <div class="col-thesis">Modern geospatial. Near-black glass, very low-contrast chrome, one accent, generous spacing and real typographic hierarchy. The UI never wins a contrast fight against the map.</div>
+      <div class="col-tokens">
+        <span class="swatch" style="background:#090c10"></span>
+        <span class="swatch" style="background:#20262c"></span>
+        <span class="swatch" style="background:#5a636d"></span>
+        <span class="swatch" style="background:#eef1f4"></span>
+        <span class="swatch" style="background:#ff6b5e"></span>
+      </div>
+    </div>
+
+    <div class="panel-stack recessive">
+      <div class="p">
+        <div class="p-head"><span class="p-title">Operational Theatre</span><span class="p-sub">Active</span></div>
+        <div class="sec-label">System Status</div>
+        <div class="row"><span class="k">On-screen assets</span><span class="v strong">3,412</span></div>
+        <div class="row"><span class="k">AIS feed</span><span class="v">Live</span></div>
+        <div class="row"><span class="k">Live vessels</span><span class="v strong">2,884</span></div>
+        <div class="row"><span class="k">Air feed</span><span class="v">Live</span></div>
+        <div class="row"><span class="k">Live flights</span><span class="v strong">528</span></div>
+        <div class="row"><span class="k">Dark vessels</span><span class="v strong">7</span></div>
+        <div class="sec-label">Render</div>
+        <div class="row"><span class="k">GPU backend</span><span class="v">WebGL2</span></div>
+        <div class="row"><span class="k">FPS</span><span class="v">58</span></div>
+        <div class="row"><span class="k">Frame</span><span class="v">17.2 ms</span></div>
+      </div>
+
+      <div class="p">
+        <div class="p-head"><span class="p-title">Map Layers</span><span class="p-sub">4 / 5</span></div>
+        <div class="sec-label">Maritime</div>
+        <div class="lyr">AIS Vessels <span class="dot"></span></div>
+        <div class="lyr">Vessel Trails <span class="dot"></span></div>
+        <div class="lyr">Chokepoint Labels <span class="dot"></span></div>
+        <div class="lyr">Port Markers <span class="dot"></span></div>
+        <div class="lyr off">Sea State (Waves) <span class="dot"></span></div>
+      </div>
+
+      <div class="p">
+        <div class="p-head"><span class="p-title">Maersk Seletar</span><span class="p-sub">Tanker</span></div>
+        <div class="row"><span class="k">MMSI</span><span class="v strong">477995123</span></div>
+        <div class="row"><span class="k">Speed</span><span class="v">11.4 kn</span></div>
+        <div class="row"><span class="k">Heading</span><span class="v">213°</span></div>
+        <div class="row"><span class="k">Lat</span><span class="v">1.2641 N</span></div>
+        <div class="row"><span class="k">Lon</span><span class="v">103.8219 E</span></div>
+        <div class="row"><span class="k">Region</span><span class="v">Singapore Strait</span></div>
+        <div class="row"><span class="k">Flag</span><span class="v">Hong Kong</span></div>
+        <div class="flag"><span class="lbl">AIS gap</span><span class="val">4h 12m</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="foot">
+  <p><strong>What to look for when you compare:</strong></p>
+  <ul>
+    <li><strong>Find the problem.</strong> In each column, how fast does your eye land on the AIS gap? That's the entire argument for taking colour away from chrome. In the current UI that row would be cyan like everything else.</li>
+    <li><strong>Squint.</strong> At a squint the panels should read as grey blocks with one coloured mark. If a border or a header glows through the squint, it's overweighted.</li>
+    <li><strong>Density.</strong> Column 2 fits noticeably more per pixel. That matters when you have 15 panels on screen; it costs you the ability to breathe.</li>
+    <li><strong>Distinctiveness.</strong> Column 1 is the one nobody else has — dark-mode chart conventions are genuinely rare. Column 3 is the safest and also the most familiar, which cuts both ways given the original complaint.</li>
+  </ul>
+  <p style="margin-top:12px">Mixing is legitimate: e.g. Chart's palette with Instrument's density, or Recessive's hierarchy with Chart's magenta. Fonts here are system stacks (Segoe UI / Cascadia Mono on Windows) so the mockup has zero dependencies — a real pick would ship a webfont.</p>
+</div>
+
+</body>
+</html>

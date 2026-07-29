@@ -19,6 +19,7 @@ import * as THREE from 'three';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 import { waveField } from './waveFieldManager.js';
 import { waterUniforms } from './waterManager.js';   // paint sea-state INTO the ocean surface
@@ -400,8 +401,8 @@ export class WaveFieldLayer {
             }
         }
 
-        const resW = (typeof window !== 'undefined') ? window.innerWidth : 1920;
-        const resH = (typeof window !== 'undefined') ? window.innerHeight : 1080;
+        const resW = (typeof window !== 'undefined') ? viewport.bufferWidth()  : 1920;
+        const resH = (typeof window !== 'undefined') ? viewport.bufferHeight() : 1080;
         // Outline EVERY band boundary in BLACK, weighted by severity:
         //   sub-3 m (0.5–2.5 m): thin black — visible (not a faint hairline), reveals calm cascades
         //   rough … very-high (3–5.5 m): bold black — defined storm zones
@@ -565,7 +566,13 @@ export class WaveFieldLayer {
         return p;
     }
 
-    onResize(w, h) { for (const m of this._contMats) m.resolution.set(w, h); }
+    // LineMaterial.resolution is in DRAWING-BUFFER pixels, not CSS pixels. Callers
+    // were passing CSS dims, which left these contour materials at half resolution
+    // on any tier where renderer pixelRatio > 1 (ULTRA runs at 2.0). Ignore the
+    // args and read the authoritative buffer size so no caller can get it wrong.
+    onResize() {
+        for (const m of this._contMats) m.resolution.set(viewport.bufferWidth(), viewport.bufferHeight());
+    }
 
     // Called from main.js AFTER composer.render(): paints the contour overlay on top of the
     // post-processed image so the thin black isobands stay crisp (no fog/blur greying).

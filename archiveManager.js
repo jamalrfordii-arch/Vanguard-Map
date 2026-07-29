@@ -80,40 +80,40 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
     root.id = 'archive-panel';
     root.style.cssText = `
         position:fixed; left:12px; top:46%; z-index:60;
-        font-family:'Courier New',Courier,monospace; font-size:10px;
-        color:#8aabc4; user-select:none; width:218px;
+        font-family:var(--lg-mono); font-size:10px;
+        color:var(--lg-body); user-select:none; width:218px;
     `;
     root.innerHTML = `
         <div id="arc-header" style="
-            border:1px solid rgba(64,196,255,0.45); border-left:3px solid #40c4ff;
-            background:rgba(1,10,20,0.88); padding:7px 10px; cursor:pointer;
-            letter-spacing:2px; color:#40c4ff; display:flex; justify-content:space-between;
+            border:1px solid rgba(var(--lg-accent-rgb),0.45); border-left:3px solid var(--cyan);
+            background:rgba(var(--lg-panel-rgb),0.88); padding:7px 10px; cursor:pointer;
+            letter-spacing:2px; color:var(--cyan); display:flex; justify-content:space-between;
         ">
             <span>◉ ARCHIVE</span><span id="arc-caret">▸</span>
         </div>
         <div id="arc-body" style="
-            display:none; border:1px solid rgba(64,196,255,0.25); border-top:none;
-            background:rgba(1,10,20,0.92); padding:10px;
+            display:none; border:1px solid rgba(var(--lg-accent-rgb),0.25); border-top:none;
+            background:rgba(var(--lg-panel-rgb),0.92); padding:10px;
         ">
             <div style="display:flex; gap:6px; margin-bottom:8px;">
-                <button id="arc-rec"  style="${btnCss('#ff1744')}">● REC</button>
-                <button id="arc-save" style="${btnCss('#40c4ff')}" disabled>SAVE</button>
-                <button id="arc-live" style="${btnCss('#8aabc4')}">LIVE</button>
+                <button id="arc-rec"  style="${btnCss('var(--red)')}">● REC</button>
+                <button id="arc-save" style="${btnCss('var(--cyan)')}" disabled>SAVE</button>
+                <button id="arc-live" style="${btnCss('var(--lg-body)')}">LIVE</button>
             </div>
             <div id="arc-pov-row" style="display:none; margin-bottom:8px;">
                 <button id="arc-pov" style="${btnCss('#ffb547')}; width:100%;">▣ POV LOCKED — CLICK TO FREE CAMERA</button>
             </div>
-            <div style="border-top:1px solid rgba(64,196,255,0.15); margin-bottom:8px; padding-top:8px;">
-                <div style="color:#40c4ff; letter-spacing:2px; margin-bottom:6px;">◎ ZONE RECORD</div>
+            <div style="border-top:1px solid rgba(var(--lg-accent-rgb),0.15); margin-bottom:8px; padding-top:8px;">
+                <div style="color:var(--cyan); letter-spacing:2px; margin-bottom:6px;">◎ ZONE RECORD</div>
                 <div style="display:flex; gap:6px; margin-bottom:6px; align-items:center;">
-                    <button id="arc-zone-set" style="${btnCss('#40c4ff')}">SET ZONE</button>
+                    <button id="arc-zone-set" style="${btnCss('var(--cyan)')}">SET ZONE</button>
                     <input id="arc-zone-radius" type="number" value="${ZONE_REC.DEFAULT_RADIUS_NM}" min="5" max="600"
                         style="width:44px; background:transparent; border:1px solid #2e4a5e; color:#cfe3f1;
                                font-family:inherit; font-size:9px; padding:4px 3px;">
-                    <span style="color:#4a6b84;">NM</span>
+                    <span style="color:var(--lg-label);">NM</span>
                 </div>
-                <div id="arc-zone-coords" style="color:#4a6b84; letter-spacing:1px; margin-bottom:6px;">NO ZONE SET</div>
-                <div style="color:#4a6b84; margin-bottom:6px;">
+                <div id="arc-zone-coords" style="color:var(--lg-label); letter-spacing:1px; margin-bottom:6px;">NO ZONE SET</div>
+                <div style="color:var(--lg-label); margin-bottom:6px;">
                     <div style="display:flex; gap:5px; align-items:center; margin-bottom:4px;">
                         <span style="width:32px;">START</span>
                         <input id="arc-zone-start" type="datetime-local" style="${dtCss()}">
@@ -124,12 +124,12 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
                     </div>
                 </div>
                 <div style="display:flex; gap:6px; margin-bottom:6px;">
-                    <button id="arc-zone-arm"  style="${btnCss('#ff1744')}" disabled>◎ ARM</button>
-                    <button id="arc-zone-save" style="${btnCss('#40c4ff')}" disabled>SAVE ZONE</button>
+                    <button id="arc-zone-arm"  style="${btnCss('var(--red)')}" disabled>◎ ARM</button>
+                    <button id="arc-zone-save" style="${btnCss('var(--cyan)')}" disabled>SAVE ZONE</button>
                 </div>
-                <div id="arc-zone-status" style="min-height:13px; color:#4a6b84; letter-spacing:1px;">IDLE</div>
+                <div id="arc-zone-status" style="min-height:13px; color:var(--lg-label); letter-spacing:1px;">IDLE</div>
             </div>
-            <div id="arc-status" style="min-height:13px; color:#4a6b84; letter-spacing:1px; margin-bottom:8px;">READY</div>
+            <div id="arc-status" style="min-height:13px; color:var(--lg-label); letter-spacing:1px; margin-bottom:8px;">READY</div>
             <div id="arc-list" style="max-height:180px; overflow-y:auto;"></div>
         </div>
     `;
@@ -141,7 +141,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
                 letter-spacing:1px; cursor:pointer;`;
     }
     function dtCss() {
-        return `flex:1; background:rgba(1,10,20,0.9); border:1px solid #2e4a5e;
+        return `flex:1; background:rgba(var(--lg-panel-rgb),0.9); border:1px solid #2e4a5e;
                 color:#cfe3f1; font-family:inherit; font-size:9px; padding:3px;
                 color-scheme:dark;`;
     }
@@ -159,7 +159,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
         if (!open) refreshList();
     });
 
-    function setStatus(text, color = '#4a6b84') {
+    function setStatus(text, color = 'var(--lg-label)') {
         status.textContent = text;
         status.style.color = color;
     }
@@ -185,7 +185,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
             });
         }, 250);
         recTimer = setInterval(() =>
-            setStatus(`RECORDING — ${recorder.count()} MSGS`, '#ff1744'), 1000);
+            setStatus(`RECORDING — ${recorder.count()} MSGS`, 'var(--red)'), 1000);
     });
 
     saveBtn.addEventListener('click', async () => {
@@ -208,7 +208,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
         });
         recorder.clear(); camTrack = [];
         saveBtn.disabled = true;
-        setStatus(`SAVED — ${n} MSGS`, '#40c4ff');
+        setStatus(`SAVED — ${n} MSGS`, 'var(--cyan)');
         refreshList();
     });
 
@@ -222,7 +222,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
     let zoneMeshes = null;   // { disk, ring }
     let zCountTimer = null;
 
-    function setZStatus(text, color = '#4a6b84') {
+    function setZStatus(text, color = 'var(--lg-label)') {
         zStatus.textContent = text;
         zStatus.style.color = color;
     }
@@ -277,7 +277,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
     }
 
     zSetBtn.addEventListener('click', () => {
-        if (!requestMapPick) { setZStatus('MAP PICK UNAVAILABLE', '#ff1744'); return; }
+        if (!requestMapPick) { setZStatus('MAP PICK UNAVAILABLE', 'var(--red)'); return; }
         zSetBtn.textContent = 'CLICK MAP...';
         requestMapPick(({ point, lon, lat }) => {
             zonePick = { point, lon, lat };
@@ -306,7 +306,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
                 startMs, endMs,
             });
         } catch (e) {
-            setZStatus(e.message.replace('[ZoneRecorder] arm: ', '').toUpperCase(), '#ff1744');
+            setZStatus(e.message.replace('[ZoneRecorder] arm: ', '').toUpperCase(), 'var(--red)');
         }
     });
 
@@ -321,13 +321,13 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
             zArmBtn.textContent = '■ STOP';
             zCountTimer = setInterval(() => {
                 const c = zoneRecorder.counts();
-                setZStatus(`● REC — ${c.ais} SHIP / ${c.flt} AIR MSGS`, '#ff1744');
+                setZStatus(`● REC — ${c.ais} SHIP / ${c.flt} AIR MSGS`, 'var(--red)');
             }, 1000);
-            setZStatus('● REC — 0 SHIP / 0 AIR MSGS', '#ff1744');
+            setZStatus('● REC — 0 SHIP / 0 AIR MSGS', 'var(--red)');
         } else if (state === ZR_STATE.DONE) {
             zArmBtn.textContent = '◎ ARM';
             const c = zoneRecorder.counts();
-            setZStatus(`DONE — ${c.ais} SHIP / ${c.flt} AIR MSGS`, '#40c4ff');
+            setZStatus(`DONE — ${c.ais} SHIP / ${c.flt} AIR MSGS`, 'var(--cyan)');
             zSaveBtn.disabled = zoneRecorder.count() === 0;
         } else { // IDLE (disarmed)
             zArmBtn.textContent = '◎ ARM';
@@ -351,9 +351,9 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
         zoneRecorder.clear();
         clearZoneMeshes();
         zonePick = null;
-        zCoords.textContent = 'NO ZONE SET'; zCoords.style.color = '#4a6b84';
+        zCoords.textContent = 'NO ZONE SET'; zCoords.style.color = 'var(--lg-label)';
         zArmBtn.disabled = true; zSaveBtn.disabled = true;
-        setZStatus('SAVED', '#40c4ff');
+        setZStatus('SAVED', 'var(--cyan)');
         refreshList();
     });
 
@@ -424,7 +424,7 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
                 else { startPOV(capture.camTrack); }
             };
         }
-        setStatus(`REPLAYING "${capture.name.toUpperCase()}"`, '#40c4ff');
+        setStatus(`REPLAYING "${capture.name.toUpperCase()}"`, 'var(--cyan)');
     }
 
     liveBtn.addEventListener('click', () => {
@@ -451,15 +451,15 @@ export function initArchivePanel({ aisManager, flightManager, recorder, zoneReco
             const row = document.createElement('div');
             const mins = ((c.t1 - c.t0) / 60000).toFixed(1);
             const cam  = c.camTrack?.length > 1 ? ' · POV' : '';
-            const zone = c.kind === 'zone' ? ' · <span style="color:#40c4ff;">◎ ZONE</span>' : '';
-            row.style.cssText = 'border-top:1px solid rgba(64,196,255,0.12); padding:6px 0;';
+            const zone = c.kind === 'zone' ? ' · <span style="color:var(--cyan);">◎ ZONE</span>' : '';
+            row.style.cssText = 'border-top:1px solid rgba(var(--lg-accent-rgb),0.12); padding:6px 0;';
             row.innerHTML = `
                 <div style="color:#cfe3f1; letter-spacing:1px;">${c.name.toUpperCase()}</div>
-                <div style="color:#4a6b84;">${new Date(c.savedAt).toLocaleString()} · ${c.count} msgs · ${mins} min${cam}${zone}</div>
+                <div style="color:var(--lg-label);">${new Date(c.savedAt).toLocaleString()} · ${c.count} msgs · ${mins} min${cam}${zone}</div>
                 <div style="display:flex; gap:5px; margin-top:4px;">
-                    <button data-act="replay" style="${btnCss('#40c4ff')}">REPLAY</button>
-                    <button data-act="export" style="${btnCss('#8aabc4')}">EXPORT</button>
-                    <button data-act="del"    style="${btnCss('#ff1744')}">✕</button>
+                    <button data-act="replay" style="${btnCss('var(--cyan)')}">REPLAY</button>
+                    <button data-act="export" style="${btnCss('var(--lg-body)')}">EXPORT</button>
+                    <button data-act="del"    style="${btnCss('var(--red)')}">✕</button>
                 </div>
             `;
             row.querySelector('[data-act="replay"]').addEventListener('click', () => replay(c));

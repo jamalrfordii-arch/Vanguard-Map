@@ -81,3 +81,107 @@ export function evaluatePair(a, b, cfg = CONFLICT) {
 
     return { horizontalNm, verticalFt, etaSec, severity };
 }
+
+// ── Separation for an ARBITRARY pair (2026-07-24) ────────────────────────────
+// Unlike evaluatePair (which returns null unless a threshold is breached), this
+// always returns the CURRENT separation plus closing state and time-to-CPA for
+// any two aircraft — used by the aircraft card's "nearest traffic" readout, which
+// replaced the on-map conflict lines. Pure/testable, same flat projection.
+//   returns { horizontalNm, verticalFt, closing, rangeRateKts, cpaSec, cpaNm }
+export function pairSeparation(a, b) {
+    const lat0 = (a.latDeg + b.latDeg) / 2;
+    const lon0 = (a.lonDeg + b.lonDeg) / 2;
+    const pa = toLocalNm(a.latDeg, a.lonDeg, lat0, lon0);
+    const pb = toLocalNm(b.latDeg, b.lonDeg, lat0, lon0);
+
+    const hr = h => (h ?? 0) * Math.PI / 180;
+    const sa = a.speedKts ?? 0, sb = b.speedKts ?? 0;
+    const va = { x: sa * Math.sin(hr(a.headingDeg)), y: sa * Math.cos(hr(a.headingDeg)) };
+    const vb = { x: sb * Math.sin(hr(b.headingDeg)), y: sb * Math.cos(hr(b.headingDeg)) };
+
+    const rx = pb.x - pa.x, ry = pb.y - pa.y;
+    const vx = vb.x - va.x, vy = vb.y - va.y;
+    const vv = vx * vx + vy * vy;
+
+    const horizontalNm = Math.hypot(rx, ry);
+    const verticalFt   = Math.abs(((a.altMeters ?? 0) - (b.altMeters ?? 0))) * M_TO_FT;
+
+    // Range rate at t=0: d/dt|r| = (r·v)/|r|. Negative ⇒ closing.
+    const rangeRateKts = horizontalNm > 1e-6 ? (rx * vx + ry * vy) / horizontalNm : 0;
+    const closing = rangeRateKts < 0;
+
+    // Time to horizontal closest approach (only meaningful when closing).
+    const tHr = vv > 1e-6 ? -(rx * vx + ry * vy) / vv : 0;
+    const cpaSec = tHr > 0 ? tHr * 3600 : null;
+    const cpaNm  = tHr > 0 ? Math.hypot(rx + vx * tHr, ry + vy * tHr) : horizontalNm;
+
+    return { horizontalNm, verticalFt, closing, rangeRateKts, cpaSec, cpaNm };
+}
+
+// ── Broad phase (2026-07-24) ─────────────────────────────────────────────────
+// evaluate() was all-pairs: 300 aircraft = 44,850 evaluatePair() calls every
+// CONFLICT.TICK_MS, measured at 85ms average and 197ms worst on the main thread.
+// That was the single largest source of frame stutter in the app, and because
+// the adaptive quality controller reads frame time, it was also quietly forcing
+// the renderer to give up supersampling — a perf bug wearing a clarity bug's
+// clothes.
+//
+// The bound: two aircraft can only reach CPA inside the lookahead window if they
+// are close enough NOW that maximum mutual closure could cover the gap. Minimum
+// possible separation at any t is
+//     sep(t) >= sep(0) - (speedA + speedB) * t
+// so a conflict (sep < HORIZONTAL_NM) requires
+//     sep(0) < HORIZONTAL_NM + (speedA + speedB) * LOOKAHEAD_HR
+// This is a strict lower bound on separation, so the test is CONSERVATIVE: it
+// can admit pairs that turn out fine, it can never reject a real conflict.
+// Vertical separation is not considered — a pair that cannot close horizontally
+// is not a conflict regardless of altitude, so the horizontal bound alone is safe.
+export function maxCandidateSeparationNm(a, b, cfg = CONFLICT) {
+    return cfg.HORIZONTAL_NM + (a.speedKts + b.speedKts) * (cfg.LOOKAHEAD_SEC / 3600);
+}
+
+// Visits every pair worth running evaluatePair() on. Sorts by latitude once,
+// then sweeps: because the list is sorted, once a partner is further north than
+// the widest possible candidate gap, so is every partner after it — hence the
+// `break` rather than `continue`, which is what turns this from O(n²) into
+// roughly O(n log n) for realistically-spread traffic.
+//
+// NOTE ON THE ANTIMERIDIAN: the longitude delta here is deliberately NOT wrapped,
+// matching toLocalNm()'s flat projection, which also does not wrap. A pair
+// straddling 180° reads as ~360° apart to both, so both reject it. That is a
+// pre-existing limitation of the CPA projection, not something introduced here —
+// this function must mirror it exactly or it would change behaviour. Fixing it
+// means fixing toLocalNm, and this bound will then follow automatically.
+export function forEachCandidatePair(live, cfg = CONFLICT, visit) {
+    const n = live.length;
+    if (n < 2) return 0;
+
+    const sorted = live.slice().sort((p, q) => p.latDeg - q.latDeg);
+
+    // Sweep width uses the FASTEST aircraft present, so the latitude window is
+    // valid for every pair in the list, not just the average one.
+    let maxSpeed = 0;
+    for (let i = 0; i < n; i++) if (sorted[i].speedKts > maxSpeed) maxSpeed = sorted[i].speedKts;
+    const windowDegLat = (cfg.HORIZONTAL_NM + 2 * maxSpeed * (cfg.LOOKAHEAD_SEC / 3600)) / 60;
+
+    let considered = 0;
+    for (let i = 0; i < n; i++) {
+        const a = sorted[i];
+        for (let j = i + 1; j < n; j++) {
+            const b = sorted[j];
+            const dLatDeg = b.latDeg - a.latDeg;
+            if (dLatDeg > windowDegLat) break;      // sorted → nothing further can qualify
+
+            // Per-pair (tighter than the global sweep window) circular reject.
+            const sepNm   = maxCandidateSeparationNm(a, b, cfg);
+            const dLatNm  = dLatDeg * 60;
+            const cosLat  = Math.cos(((a.latDeg + b.latDeg) / 2) * Math.PI / 180);
+            const dLonNm  = (b.lonDeg - a.lonDeg) * 60 * cosLat;
+            if (dLatNm * dLatNm + dLonNm * dLonNm > sepNm * sepNm) continue;
+
+            considered++;
+            visit(a, b);
+        }
+    }
+    return considered;
+}

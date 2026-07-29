@@ -53,37 +53,29 @@ import * as THREE from 'three';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { altitudeMetersToY, altitudeBandIndex } from './flightManager.js';
+import { FLIGHT } from './config.js';
 
 const FT_TO_M = 0.3048;
 
-// ── Deck registry — real flight levels only ─────────────────────────────────
-const DECKS = [
-    {
-        id:    'fl180',
-        altFt: 18000,
-        label: '0–18,000 FT', // range below this deck, not the FL code — easier to read at a glance than "FL180"
-        y:     altitudeMetersToY(18000 * FT_TO_M),
-        color: 0x40c4ff,
-        labelColor: '#9cd9ff',
-    },
-    {
-        id:    'fl290',
-        altFt: 29000,
-        label: '18,000–29,000 FT',
-        y:     altitudeMetersToY(29000 * FT_TO_M),
-        color: 0xffab40,
-        labelColor: '#ffd9a0',
-    },
-    {
-        id:    'fl410',
-        altFt: 41000,
-        label: '29,000–41,000 FT',
-        y:     altitudeMetersToY(41000 * FT_TO_M),
-        color: 0xd9b3ff,
-        labelColor: '#e6d4ff',
-    },
-];
+// ── Deck registry ────────────────────────────────────────────────────────────
+// Derived from the canonical FLIGHT.ALT_BANDS taxonomy so the decks, the aircraft
+// altitude glow, and the Altitude Watch panel can never disagree on which colour
+// means which altitude. Only the finite-ceiling bands become decks — the "41,000+"
+// band has no ceiling to draw a grid at. Y comes from altitudeMetersToY() (the
+// exact function that places every aircraft), so a deck always lines up with where
+// traffic actually flies. Each deck's label is the altitude range below its line.
+const DECKS = FLIGHT.ALT_BANDS
+    .filter(b => Number.isFinite(b.ceilFt))
+    .map(b => ({
+        id:         `fl${Math.round(b.ceilFt / 100)}`,
+        altFt:      b.ceilFt,
+        label:      b.label,
+        y:          altitudeMetersToY(b.ceilFt * FT_TO_M),
+        color:      b.color,
+        labelColor: b.labelColor,
+    }));
 
 const PATCH_SIZE      = 48;   // scene units — local grid patch width/depth
 const PATCH_DIVISIONS = 8;
@@ -121,9 +113,8 @@ function makeDeckLabelTexture(text, color) {
     return tex;
 }
 
-function _dpr() { return window.devicePixelRatio || 1; }
 function _resolutionVec() {
-    return new THREE.Vector2(window.innerWidth * _dpr(), window.innerHeight * _dpr());
+    return new THREE.Vector2(viewport.bufferWidth(), viewport.bufferHeight());
 }
 
 // ── Grid patch ───────────────────────────────────────────────────────────────
@@ -198,7 +189,11 @@ export class AltitudeDeckManager {
                 d.rimMaterial.resolution?.copy(res);
             }
         };
-        window.addEventListener('resize', this._onResize);
+        // Subscribe to viewport, not window 'resize'. The resolution uniform is in
+        // DRAWING-BUFFER pixels, which change on window resize, on layout change
+        // (dock/rails), AND on a runtime pixel-ratio nudge from the FPS monitor.
+        // Only viewport sees all three.
+        this._offResize = viewport.onChange(this._onResize);
 
         console.info(`[Decks] Initialised ${DECKS.length} flight-level decks.`);
     }
@@ -268,6 +263,6 @@ export class AltitudeDeckManager {
     }
 
     disconnect() {
-        window.removeEventListener('resize', this._onResize);
+        this._offResize?.();
     }
 }

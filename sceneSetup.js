@@ -1,6 +1,11 @@
 // sceneSetup.js — Renderer, camera, OrbitControls, lights, post-processing
 import * as THREE from 'three';
 import { quality } from './qualityManager.js';
+// viewport owns the MAP RECT. Before the bezel the canvas was the window, so
+// window.innerWidth/Height happened to be right; with docked rails and a
+// transient selection dock it is a sub-rect and every size below must come
+// from here instead. See viewport.js header for the full rationale.
+import viewport from './viewport.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -25,7 +30,13 @@ export function initScene() {
     // depth assuming this near plane — lowering it to 0.05 fogged the whole
     // world to black (2026-07-12). City-scale zoom needs a coordinated
     // near-plane + post-chain depth pass; see DEMO-PUNCHLIST.
-    const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 3000);
+    // Bind viewport to the container the renderer draws into BEFORE reading any
+    // size from it. attach() measures immediately, so aspect below is correct on
+    // the first frame rather than one resize behind.
+    const canvasHost = document.getElementById('canvas-container');
+    viewport.attach(canvasHost, { pixelCap: quality.pixelCap() });
+
+    const camera = new THREE.PerspectiveCamera(35, viewport.aspect(), 1, 3000);
     camera.position.set(0, 250, 400);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -35,14 +46,14 @@ export function initScene() {
     // Pixel ratio is capped per quality tier (1.0 on low-end / mobile up to 2.0
     // on Ultra). The runtime monitor in main.js nudges it live from real FPS.
     renderer.setPixelRatio(quality.pixelCap());
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setSize(viewport.width(), viewport.height());
     renderer.toneMapping         = THREE.ACESFilmicToneMapping;
     // ACES Filmic preserves colour saturation under bright light and gives the
     // cinematic contrast that Reinhard washes out.  ACES has a built-in S-curve
     // so exposure sits lower than Reinhard's 1.6 — 0.85 prevents snow-cap and
     // mountain highlights from clipping to white under the directional light.
     renderer.toneMappingExposure = TONE_MAPPING_EXPOSURE;
-    document.getElementById('canvas-container').appendChild(renderer.domElement);
+    canvasHost.appendChild(renderer.domElement);
 
     return { scene, clock, camera, renderer, isWebGPU: false };
 }
@@ -55,7 +66,13 @@ export function initControls(camera, renderer, stateRef) {
     // tracks input closely while keeping a touch of smoothing. User-tunable via the
     // Camera Feel control in Settings (persisted).
     controls.dampingFactor = (() => { try { return parseFloat(localStorage.getItem('vg1_cam_damping')) || 0.12; } catch (_) { return 0.12; } })();
-    controls.maxDistance = 550;
+    // ZOOM-OUT CAP (2026-07-29): locked to the initial load height so the camera
+    // can never pull further out than the view the map loads at. The load view is
+    // camera.position (0,250,400) → radius = hypot(250,400) = 471.699, which frames
+    // the full 300-unit map (visible vertical extent 2*d*tan(17.5deg) = 297.5 ≈ 300).
+    // 472 sits a hair above the load radius so the first frame doesn't clamp-snap.
+    // Raise this back toward 550 to allow zooming further out again.
+    controls.maxDistance = 472;
     // minDistance 2 → 0.08 (2026-07-13 near-plane surgery): the near plane is
     // now altitude-dynamic in main.js (near=1 up high — tuned look unchanged;
     // near→0.02 down low), so the camera may descend to a ~15 km-wide view.
@@ -67,7 +84,20 @@ export function initControls(camera, renderer, stateRef) {
     // (z10-z12 disabled in tileStreamManager). Raising minDistance from 0.08 to 2.3
     // stops the camera descending past the height where z9 imagery fills the view.
     // To re-enable deep dives later: restore this to ~0.08 and re-enable z10-z12.
-    controls.minDistance = 2.3;
+    // 2.3 → 1.15 (2026-07-24): z10 is enabled again, and its showAlt is 2.3 — the
+    // camera has to be able to descend BELOW that or the level can never activate.
+    // 1.15 gives a real dive into z10 without pushing so close that z10 itself
+    // starts being magnified. Lower further only alongside z11.
+    // 1.15 → 0.60 → 0.35 (2026-07-25, z11 then z12). A level only becomes the
+    // DOMINANT surface once effective altitude drops below showAlt - fadeBand:
+    //     z11  1.30 - 0.35 = 0.95
+    //     z12  0.70 - 0.22 = 0.48
+    // This constant has silently capped every deep rung added so far — z10's showAlt
+    // and the old minDistance were both 2.3, so z10 could never light at all. Check
+    // it whenever a level is added: at 0.60, z12 would have reached only 45% opacity.
+    // 0.35 clears z12 with headroom. There is no z13 to prepare for — the Ion origin
+    // 404s at that level everywhere probed.
+    controls.minDistance = 0.35;
     // Polar angle limits — prevent the two failure modes:
     //   minPolarAngle > 0  → can't go fully top-down (3D depth cues would vanish)
     //   maxPolarAngle < π/2 → can't dip to horizon (terrain occludes vessels at close zoom)
@@ -113,7 +143,7 @@ export function initPostProcessing(renderer, scene, camera) {
     composer.addPass(new RenderPass(scene, camera));
 
     const bloomPass = new UnrealBloomPass(
-        new THREE.Vector2(window.innerWidth, window.innerHeight),
+        new THREE.Vector2(viewport.width(), viewport.height()),
         BLOOM_STRENGTH_BASE, BLOOM_RADIUS, BLOOM_THRESHOLD
     );
     composer.addPass(bloomPass);
@@ -128,8 +158,8 @@ export function initPostProcessing(renderer, scene, camera) {
     // entire map plane reads sharp; cinematic softening is reserved for
     // the outer edges where deep space / background sit.
     const bluriness = 1.2;
-    vTiltShiftPass.uniforms.v.value = bluriness / window.innerHeight;
-    hTiltShiftPass.uniforms.h.value = bluriness / window.innerWidth;
+    vTiltShiftPass.uniforms.v.value = bluriness / viewport.height();
+    hTiltShiftPass.uniforms.h.value = bluriness / viewport.width();
     vTiltShiftPass.uniforms.r.value = 0.78;
     hTiltShiftPass.uniforms.r.value = 0.78;
 
@@ -198,15 +228,30 @@ export function createBoardPlaneAndReticle(scene) {
     return { boardPlane, hoverReticle };
 }
 
+/**
+ * Resize the render chain to the CURRENT MAP RECT.
+ *
+ * Named onWindowResize for history, but the window is no longer the trigger:
+ * viewport.onChange() fires this for BOTH a real window resize AND a layout
+ * change (selection dock opening / closing, cinematic mode), neither of which
+ * the other emits. See main.js for the wiring.
+ *
+ * Cost note: composer.setSize() reallocates render targets for the whole chain
+ * (Render → Bloom → Fog → Clouds → TiltShift×2 → Bokeh). viewport debounces so
+ * this runs ONCE at the end of a layout transition rather than ~17× across it.
+ */
 export function onWindowResize(camera, renderer, composer, vTiltShiftPass, hTiltShiftPass) {
-    camera.aspect = window.innerWidth / window.innerHeight;
+    const w = viewport.width();
+    const h = viewport.height();
+
+    camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    composer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setSize(w, h);
+    composer.setSize(w, h);
 
     if (vTiltShiftPass && hTiltShiftPass) {
         const bluriness = 1.2;
-        vTiltShiftPass.uniforms.v.value = bluriness / window.innerHeight;
-        hTiltShiftPass.uniforms.h.value = bluriness / window.innerWidth;
+        vTiltShiftPass.uniforms.v.value = bluriness / h;
+        hTiltShiftPass.uniforms.h.value = bluriness / w;
     }
 }

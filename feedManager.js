@@ -209,6 +209,23 @@ async function _refreshAll() {
     const t = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
     _setStatus(`UPDATED ${t}`);
     _render();
+
+    // Broadcast health for the compact status bar (2026-07-22 — collection-lead
+    // walkthrough finding: no feed besides AIS/AIR had any visible staleness
+    // signal). Individual source failures are swallowed silently above (a
+    // dead RSS source shouldn't nuke the whole panel), so "stale" here means
+    // "no successful merge in over 2 poll cycles", not "every source is down".
+    window.dispatchEvent(new CustomEvent('vg1:feedHealth', {
+        detail: { lastFetch: _lastFetch, articleCount: _articles.length },
+    }));
+}
+
+/** Feed freshness for the compact status bar — see mirrorStatus() in index.html. */
+export function getFeedHealth() {
+    return {
+        lastFetch: _lastFetch,
+        stale: _lastFetch === 0 || (Date.now() - _lastFetch) > POLL_MS * 2,
+    };
 }
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
@@ -400,10 +417,16 @@ export function initFeedManager() {
         _refreshAll();
     }
 
-    // Background polling — only fetches when tab is visible and data is stale
+    // Background polling — fetches when data is stale, regardless of whether the
+    // FEED tab is open. Previously gated on the pane being visible, which meant NEWS
+    // only ever refreshed while you were looking at it: the status-bar LIVE flag
+    // (driven by _lastFetch via vg1:feedHealth) could sit "fresh" against weeks-old
+    // cached articles simply because the tab was never opened. Now the aggregate
+    // health flag reflects real background freshness like every other feed. The
+    // fetch itself is cheap (a handful of RSS pulls every POLL_MS); _render() still
+    // only runs when the pane is visible, so there's no wasted DOM work when hidden.
     setInterval(() => {
-        const pane = document.getElementById('vp-feed');
-        if (pane?.classList.contains('vp-active') && Date.now() - _lastFetch > POLL_MS) {
+        if (Date.now() - _lastFetch > POLL_MS) {
             _refreshAll();
         }
     }, 60_000);

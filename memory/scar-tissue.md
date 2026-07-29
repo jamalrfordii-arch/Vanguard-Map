@@ -1,5 +1,300 @@
 # Scar Tissue — gotchas that cost real time. Read before debugging.
 
+- **2026-07-25 — a flat saturation multiplier amplifies the ILLUMINANT, not the surface; and a
+  guard on one coloured surface but not its twin is how the same bug ships three times.** Two
+  lessons from the tile-point gold/teal cast (full account in decisions.md).
+  **(a) The diagnostic tell.** If boosting saturation makes warm areas go *more* orange AND dark
+  areas go *more* teal at the same time, the multiplier is not making the image more colourful —
+  it is exaggerating the difference between direct sun (warm) and skylight-filled shadow (blue).
+  Both artefacts are one cause with opposite signs, so they look like two unrelated bugs and get
+  chased separately. The fix is hue- and luminance-aware shaping, not a smaller multiplier alone.
+  Corollary: **the eye reads an over-saturated neutral as the wrong hue, not as "too colourful"** —
+  which is why this was reported as "colors look off" rather than "too saturated."
+  **(b) The propagation failure.** The 1.4× hue-shifting boost was found and removed from IBTrACS
+  `categoryColor()` (2026-06-20), then found again as `SPLAT_SATURATION 2.10 → 1.30` (2026-07-13),
+  and was *still sitting at 1.40 in the tile path* — the surface you actually see close up — for
+  weeks after both. `config.test.mjs` had a regression fence on `SPLAT_SATURATION` and none on
+  `TILESTREAM.POINT_SATURATION`. **When you fix a colour-pipeline value, grep for every other
+  surface that has the same knob and fence them together in the same commit.** A test on one of
+  two twins is worse than no test, because it creates the impression the class of bug is covered.
+  (The two also disagreed *across the LOD crossfade* — tiles at 1.40 blending into a cloud at 1.30
+  means the surface changes vividness as you descend. Now asserted: tiles ≤ splat.)
+  **(c) Don't trust a "do not touch, hand-tuned" comment over arithmetic.** The 1.15 output clamp
+  carried a comment explaining it sat above the 0.95 bloom threshold and was being left alone
+  deliberately. That reasoning was sound *while the cast existed* and became wrong once it didn't.
+  Re-derive the tradeoff a protective comment describes; conditions it assumed may have changed.
+  Same shape as the `waterManager` shader that "had been visually tuned" but had never compiled.
+
+- **2026-07-25 — a depth threshold is not a land test, and the failure is silent in both
+  directions.** Three places in the tile pipeline used "shallower than −20/−60 m" to mean
+  "land." On continental shelves (Sunda, North Sea, Yellow Sea, the Gulf — most of the sea
+  anyone flies over) that is true across open water, so tiles were fetched and painted with
+  land-coloured points over the ocean. On small islands the SAME threshold failed the other
+  way: one baked-DEM pixel is ~19 km, so Malta, Bermuda, Guam, Nassau, Key West, Malé,
+  Nauru, Diego Garcia, St Helena, Funafuti, Kiritimati and Palau all averaged into the deep
+  water around them and their tiles were SKIPPED — 12 of 17 islands sampled, getting no
+  streamed terrain, and nothing reported it. **Only the over-fetch was ever noticed, because
+  extra tiles are visible and missing ones just look like ocean.** When a heuristic is
+  reported wrong in one direction, test the other direction before tuning the constant; and
+  when the underlying raster is coarser than the thing being classified, no constant is the
+  answer. Fix: `tools/build_tile_land_mask.py` → `data/tile-land-mask.bin`, read by
+  `tileLandMask.js`.
+
+- **2026-07-25 — `global_land_mask.globe._mask` is the OCEAN mask, not the land mask**
+  (`is_land()` returns `logical_not` of it). Reducing it directly bakes the exact inverse
+  of what you want, and the giveaway is subtle: the first bake reported "68.1% land tiles"
+  — very close to the real 71% OCEAN fraction — and a mask that kept 99.9% of the globe.
+  Sanity-check any global land statistic against ~29-35%, and against a few named
+  coordinates, before trusting a bake.
+
+- **2026-07-24 — `EffectComposer` caches `renderer.getPixelRatio()` in its CONSTRUCTOR, so
+  `renderer.setPixelRatio()` alone silently does nothing to the post chain.** `setSize()`
+  multiplies by that stored `_pixelRatio`; only `composer.setPixelRatio()` or `reset()` updates
+  it, and Vanguard1 called neither. So every runtime pixel-ratio change resized the CANVAS while
+  the whole chain (RenderPass → Bloom → Fog → Clouds → TiltShift×2) kept shading at the
+  construction-time resolution — the final pass then blitted a full-resolution composite into a
+  differently-sized canvas. All of the resample blur, none of the cost change. The adaptive
+  quality controller had therefore never saved a single millisecond of GPU work in its life; it
+  only ever added a resample. Fixed by routing all pixel-ratio writes through
+  `qualityManager._applyPixelRatio()`, which emits `vg1:pixelRatioChanged`; main.js listens and
+  calls `composer.setPixelRatio()`.
+  **The expensive part of this lesson:** a pixel-ratio sweep run BEFORE the fix (0.6/1.0/1.5/2.0
+  → 13.5/13.0/14.1/15.1 ms) was used to conclude "this scene is not fill-rate bound" and "2×
+  supersampling costs 2ms". Both conclusions were void — the sweep never varied the resolution
+  anything was rendered at, only the size of the final blit. **When a knob measures as nearly
+  free, suspect the knob isn't connected before concluding the system is insensitive to it.**
+  Confirm the thing you think you're varying actually changed (here: read back the composer's
+  render-target dimensions, not just `renderer.getPixelRatio()`).
+
+- **2026-07-24 — the same "reports intent, not state" bug twice in one file.**
+  `QualityManager.info()` returned `this._pr` (seeded in the constructor to the tier cap, an
+  optimistic value the renderer may never adopt) instead of `renderer.getPixelRatio()`. It read
+  `livePixelRatio: 2` on a dpr=1 display where the cap could only ever be 1.0, which cleared the
+  real culprit from suspicion for an hour. Fixed once — then the fix's own fallback branch
+  reintroduced it for the pre-attach case, reporting the seed again before a renderer existed.
+  Now returns `null` / "no renderer attached yet", and `info()` additionally surfaces
+  `autoCap`, `pixelCap`, `renderScale` and `devicePixelRatio` so the dpr clamp is visible. **A diagnostic that reports intent instead of
+  state is worse than no diagnostic. When there is no measurement, say so; don't substitute a
+  plan for a reading.**
+
+- **2026-07-24 — One `delta` value cannot serve both dead-reckoning and performance
+  measurement.** `main.js` clamps `delta = Math.min(clock.getDelta(), 0.1)` to stop position
+  extrapolation overshooting after a stall — correct for that purpose. The same value is then
+  handed to `quality.tick()`, where the clamp turns every multi-second boot frame into a
+  plausible-looking 100ms/10fps sample and drives the controller to its floor permanently.
+  Both uses are individually reasonable; sharing the value is the bug. **When a clamped or
+  smoothed value crosses into a second consumer, check whether the clamp still means the same
+  thing there** — full diagnosis and measurements in decisions.md.
+
+- **2026-07-24 — Look tuning done while the quality controller was pinned to 0.6 was tuned
+  against upscaling artifacts, not against the thing it claimed to fix.** `SPLAT_FX.SCALE` was
+  raised 1.15→1.40 on 2026-07-18 to kill "grainy speckle" at world zoom; that A/B was run at
+  36% of native resolution. Re-A/B'd at pixel ratio 1.0 and reverted to 1.15. Any other visual
+  constant tuned by eye between roughly 2026-07-18 and 2026-07-24 deserves the same re-check.
+  **Before trusting a by-eye visual comparison, verify the renderer is actually at the pixel
+  ratio you think it is** (`renderer.getPixelRatio()`, not `info()`).
+
+- **2026-07-21 — The Claude-in-Chrome MCP tab can be `document.hidden = true` (backgrounded)
+  for the whole session, which fully stops `requestAnimationFrame` — no tile loading, no
+  animation, nothing that depends on the main loop, even though `Page.captureScreenshot`-style
+  tools still return fresh-looking images.** Discovered while trying to live-measure tile-stream
+  load speed: `camera`/`controls` teleports worked (screenshots showed the new position), but
+  `window.tileStream`'s caches stayed at `targetOpac: 0, tiles: 0` indefinitely — no fetches ever
+  fired — even minutes after setting the camera well within a tile LOD's `showAlt` band. A raw
+  `requestAnimationFrame` counter confirmed **zero frames fired in 20 real seconds**, and
+  `document.hidden`/`document.visibilityState` read `true`/`"hidden"`. Screenshots still look
+  live because the capture path forces its own paint independent of the page's own rAF loop —
+  this is what makes the tab LOOK responsive while its actual JS game loop is fully stalled.
+  Net effect: **anything gated behind the main `animate()`/`requestAnimationFrame` loop (tile
+  fetch triggering, fade timers, per-frame manager `.update()` calls) cannot be reliably
+  live-tested through this harness** — only static, one-shot, or worker-driven behavior (splat
+  cloud generation, geometry edits, shader edits verified via direct buffer/state inspection)
+  can be trusted from automated screenshots alone. If a fix specifically targets frame-loop-gated
+  behavior (like tile load speed), say so plainly instead of reporting a measurement that was
+  never actually real — ask the user to verify on their end with a real, focused tab.
+  **Resolved same day**: once the user made the tab actually visible/focused (`document.hidden`
+  → `false`, confirmed via a raw rAF counter actually incrementing), `tileStream` immediately
+  started loading normally and real timing measurements became possible — see the tile-load-speed
+  fix in decisions.md. The lesson stands for future sessions: check `document.hidden` /
+  a live rAF counter FIRST before trusting any timing or frame-loop-dependent live test.
+
+- **2026-07-20 — A service worker (`vg1-code-v1` cache, `vg1-tiles-v2`) can silently serve stale
+  JS across reloads — `mcp__claude-in-chrome__navigate` alone is not a reliable "get fresh code"
+  guarantee for this app.** Found while debugging why a `waterManager.js` edit produced zero
+  visible or logged effect after several full page reloads. `caches.keys()` from the console
+  revealed the SW-managed cache; unregistering it (`navigator.serviceWorker.getRegistrations()`
+  → `.unregister()`) and clearing all caches (`caches.keys()` → `caches.delete()`) is the first
+  thing to try when an edit "isn't taking effect" and the served raw file (verified via
+  `fetch(url, {cache:'reload'})`) already contains the change.
+  **Still unresolved after clearing the SW**: a `waterManager.js` material's `onBeforeCompile`
+  edit continued to produce no visible effect and no console output, across multiple full
+  reloads — even though (a) the raw served file contained the edit, (b) the live material's
+  `onBeforeCompile.toString()` contained the edit, and (c) manually invoking
+  `mat.onBeforeCompile(fakeShaderObj)` from the console correctly produced the new shader text.
+  Also tried `material.needsUpdate = true` to force WebGLRenderer to recompile — no change. This
+  smells like a Three.js WebGL program-cache issue (a stale linked GPU program being reused
+  despite the JS-level function being current) or something specific to the automated
+  browser/GPU-process environment, not a bug in the edited code itself — the manual-invocation
+  test is strong evidence the CODE is correct. If this recurs: try fully disposing and recreating
+  the mesh/material/geometry (not just `needsUpdate`), or verify in a real (non-automated) browser
+  window with a genuine hard refresh (Ctrl+Shift+R) before concluding a fix doesn't work.
+  **Practical lesson: when a change to Claude in Chrome via any MCP tool "does nothing" visually
+  AND produces no console output at all (not even deliberately-added debug logs), suspect the
+  render/compile pipeline isn't picking up the change before suspecting the change's logic —
+  verify with a manual function-invocation test before spending more time doubting the code.**
+  **RESOLVED on a later re-attempt**: clearing the SW caches + unregistering, THEN doing a second
+  full reload (not just one reload right after clearing) worked — the water land-mask fix showed
+  up correctly and was confirmed live. Unclear whether the extra reload was the actual fix or
+  just additional settling time; if this recurs, try clear-cache-then-reload-twice before
+  escalating further.
+
+- **2026-07-20 — `console.warn`/`console.log` calls INSIDE a Web Worker (e.g. `terrainWorker.js`)
+  don't reliably show up in `read_console_messages`.** Added a coastal-fill pass to the worker's
+  point budget and expected its existing `MAX_ALLOC` overflow `console.warn` to fire if the
+  budget was blown — it never appeared, even with console tracking freshly armed before a reload.
+  But the budget WAS blown: sampling the actual output buffer (`geometry.attributes.aHeight`,
+  checking what fraction reads negative/ocean) showed real truncation, ocean fraction dropped from
+  a healthy ~0.297 to 0.248/0.236 depending on the exact overfill. **Don't trust console silence
+  to mean "no problem" for anything that runs in a worker — verify via the actual data (sample
+  the output buffer/geometry directly) instead of the log.**
+
+- **2026-07-20 — `simClock.setTime()` alone doesn't stick — pair it with `.pause()` or it snaps
+  back to live wall-clock within moments.** Tried to pin a guaranteed-daytime UTC hour to test
+  lighting; without `.pause()`, even after 60 `requestAnimationFrame` ticks the clock had reverted
+  to live real time, which happened to be legitimate night-time (04:43 UTC) for the region under
+  test — briefly looked like a catastrophic "entire continents render black" regression. Isolated
+  by reverting the unrelated code change under test and reproducing the same blackout on a clean
+  reload — proved it wasn't the code, then found the real explanation (live clock + real
+  nighttime) via `new Date().toISOString()` vs `simClock.date().toISOString()`. **When testing
+  lighting/time-of-day, always call both `setTime()` AND `pause()`, and verify with
+  `simClock.isPaused()` before trusting the render.**
+
+- **2026-07-20 — "Blue bleeding through the point cloud" was the water plane rendering IN FRONT
+  of land, not sparse point-cloud coverage — verify occlusion vs. density by toggling the
+  suspected occluder's `.visible`, don't assume from the visual alone.** The bug looked exactly
+  like a coverage/gap problem (solid blue in the same region where a bright, complete point cloud
+  had rendered minutes earlier), which led first to a plausible-but-wrong point-size fix. The
+  actual test that settled it: `window.scene.traverse()` to find the water object by name
+  (`dynamicSeaLevel`), set `.visible = false`, screenshot — land appeared completely intact
+  underneath. That one toggle was more conclusive than any amount of reasoning about point density,
+  distance, or shader math. **When something "should be there but isn't showing," check whether
+  something else is drawn in front of it before assuming it isn't being drawn at all.**
+
+- **2026-07-20 — Setting `camera.position`/`controls.target` once from the console doesn't hold
+  — something re-perturbs it over the next several seconds, even with zero simulated input.**
+  Observed testing the tile-coverage fix: set camera to a fixed spot, waited passively, and camY
+  drifted from 6 to 2.34 (near the minDistance floor) over 12s of pure `sleep()` with no clicks,
+  drags, or scrolls in between. `directorManager.js`'s `CinematicDirector` ("cinematic auto-camera
+  when idle") looked like the obvious suspect but is DEAD CODE — exported, never imported or
+  instantiated anywhere (grepped the whole repo, zero hits outside its own file) — so it wasn't
+  that. Root cause not conclusively identified (candidate: OrbitControls damping/momentum
+  interacting with a stale internal spherical state after a direct `.position.set()`, though that
+  doesn't fully square with standard OrbitControls behavior either). **Practical fix that worked:**
+  re-assert `camera.position.set(...)` + `controls.target.set(...)` + `controls.update()` every
+  ~500ms in a loop for several seconds until `camera.position.y` reads stable across consecutive
+  checks, THEN measure/screenshot — don't trust a single set-and-wait. If this needs a real fix
+  later (not just a testing workaround), start by checking OrbitControls' internal damping state
+  right after an external position set, not the director (confirmed a dead end).
+  **RESOLVED (same day, later session):** it was exactly the suspected candidate —
+  `controls.enableDamping`. With damping on, OrbitControls smooths toward its own internal
+  spherical target each frame; a direct `.position.set()` doesn't update that internal state, so
+  damping visibly "drags" the camera back toward wherever the internal state still thinks it
+  should be, for as long as damping keeps applying (which reads as multi-second "drift" from a
+  one-time set). Setting `controls.enableDamping = false` before a direct position override makes
+  a single `.set()` + `.update()` hold exactly, no re-assertion loop needed. Only a testing-console
+  fix — do not disable damping in the shipped app, it's part of the normal-use feel.
+
+- **2026-07-20 — Teleporting the camera via a direct JS `.position.set()` to an arbitrary lon/lat
+  can produce ZERO tile network requests, even after 8+ seconds settled.** Tried to reproduce the
+  exact reported oblique tile-coverage scenario by computing scene X/Z from lon/lat with a
+  hand-rolled Mercator formula and jumping the camera straight there. Result: `_lruOrder` on the
+  deeper LOD caches slowly grew (30-181 entries) but `_tiles` and `_loading` stayed at 0
+  indefinitely, and `read_network_requests` showed no Cesium requests fired at all — confirmed via
+  the network tool, not inferred. Real navigation (scroll to zoom, drag to pan) at other points in
+  the same session reliably triggered visible tile fetches and imagery rendering, so the dispatch
+  path itself works. Root cause not identified (candidates: the hand-rolled lon/lat→scene formula
+  doesn't match the app's real `lonLatToScene()` convention closely enough and lands somewhere
+  degenerate; or an instantaneous large-distance jump trips some equality/epsilon check that skips
+  a fetch dispatch that incremental movement wouldn't). **Practical implication: don't trust a
+  synthetic JS camera teleport to validate tile-loading behavior — use real scroll/drag navigation
+  (or drive it through the app's own search/lock-target UI) when the thing under test is whether
+  tiles actually fetch, not just camera math or FPS.**
+
+- **2026-07-20 — This app's OrbitControls has non-default mouse button mapping: LEFT drag = PAN,
+  RIGHT drag = ROTATE (tilt), MIDDLE = DOLLY (zoom).** (`controls.mouseButtons = {LEFT: 2, MIDDLE:
+  1, RIGHT: 0}`, i.e. THREE.MOUSE.PAN/DOLLY/ROTATE respectively — inverted from the THREE.js
+  default of LEFT=ROTATE.) A left-drag in a test script will pan the view, not tilt it, and won't
+  change `tiltActual` at all. Automated testing tools that only expose left-button drag can
+  temporarily swap `controls.mouseButtons.LEFT = 0` to rotate instead — remember to restore it to
+  `2` afterward so real mouse input isn't left broken for the user.
+
+- **2026-07-20 — A source comment can drift from the code sitting right next to it, not just
+  from a different file.** Diagnosed a tile-stream color seam by reading `config.js`'s TILESTREAM
+  comment block ("z≥8 vivid vs z<8 muted") and built a theory on it — wrong. The consuming code
+  in `tileStreamManager.js` had been changed to `zoom >= 6` on 2026-07-18, WITH an inline comment
+  noting the change, but the block comment in `config.js` describing the same system was never
+  touched. Caught only because the fix was verified against live vertex-color data before
+  shipping (averages were statistically identical between the two levels, contradicting the
+  theory) rather than shipped on the strength of the comment. **When a comment describes system
+  behavior, trust the line of code actually executing over the prose next to the constant it
+  reads — and check whether OTHER files reference the same constant with a comment that could
+  have drifted independently.**
+
+- **2026-07-20 — A config density knob can be a complete no-op and you'd never know: check the
+  REAL uploaded GPU buffer size, not the grid constant.** `terrainWorker.js` pre-allocates fixed
+  Float32Arrays (`MAX_ALLOC`) before generating points; if `LAND_GRID`/`OCEAN_GRID` produce more
+  candidates than that allocation, writes past the array bounds are SILENT no-ops (no error, no
+  warning) — and since the land pass runs first, it can eat the entire buffer before the ocean
+  pass writes a single point. This was live for an unknown number of sessions: `SPLAT_OCEAN_GRID`
+  had been deliberately tuned (1195→3000) and documented as a win ("ocean now reads as
+  point-cloud"), but the ocean splat pass rendered ZERO points the whole time — whatever looked
+  like ocean point-cloud was the separate `createSolidOceanFloor` mesh. Also caught: a documented
+  "sampled to budget" comment (`MAX_SPLAT_BUDGET`) describing behavior that was never actually
+  wired into the code — the comment was aspirational, not real. **Lesson: when a hand-tuned
+  density/budget constant's effect is in question, don't trust the source comment or the config
+  value — query the live buffer directly** (`window.splatCloud.geometry.attributes.position.count`,
+  and sample an attribute for a signature only one code path writes, e.g. negative elevation =
+  ocean-only) to see what actually reached the GPU. Added `console.warn` overflow guards in both
+  worker passes so a future config change can't silently repeat this.
+  **Also useful for future point-cloud FPS tuning: `geometry.setDrawRange(0, N)` lets you A/B test
+  FPS-vs-point-count on the ALREADY-LOADED cloud with no reload** — much faster than editing
+  config + reloading for every candidate value, since regenerating the cloud requires a full page
+  reload (grid resolution is baked at worker-build time, not live-tunable like the shader
+  uniforms). Reset with `setDrawRange(0, Infinity)`.
+
+- **2026-07-13 — Mercator-normalized latAbs is NOT a latitude fraction.** terrainWorker's
+  `latNorm = -z/(MAP_HEIGHT/2)` is mercY/π: 0.42→60°, 0.64→74.7°, 0.74→78.5°. Every latitude
+  gate written as if 0.64≈"57°" was actually operating deep inside the polar circle — which is
+  how the desert belt painted the Antarctic coast tan. CONVERT before reasoning:
+  lat = 2·atan(e^(latAbs·π)) − 90°. Also from the same hunt: the Antarctica "grey shape" was
+  THREE stacked causes (ice-shelf holes showing the sea plane, warm-term bleed, late polarIce
+  ramp) — when a fix for a visual bug "doesn't work," suspect multiple causes with one symptom.
+
+- **2026-07-12 — Cesium World Terrain is EPSG:4326/TMS, NOT Web-Mercator.** tileStreamManager
+  indexed tiles on a mercator 2^z×2^z grid since it was written; CWT's layer.json declares
+  `projection: EPSG:4326, scheme: tms` — 2^(z+1) columns × 2^z rows, ty=0 at the SOUTH pole.
+  Consequence: nearly every deep-zoom request 404'd, and the few tiles that "loaded" were index
+  collisions serving terrain from the WRONG latitude, silently drawn in the right place. Proof
+  method (keep this): fetch `layer.json` from the Ion tile base and test your computed index
+  against its `available` ranges — mercator canyon index (772/1607) absent + 404; geographic
+  (1545/2868) present + HTTP 200. Fixed by regridding update/coverage/mesh-bounds/fetch URL and
+  switching imagery to ArcGIS `export?bbox=…&bboxSR=4326`. LESSON: when a tile server 404s
+  tiles that "must exist," check the layer manifest's projection/scheme before debugging math.
+  ALSO from the same hunt: anchor tile loading on controls.target, not camera.position — the
+  oblique camera sits ~4° of latitude behind the look-at (≈40 tiles at z12), and altitude-based
+  fade-outs must gate on ACTUAL loaded coverage or fast zooms outrun the network → black ground.
+
+- **2026-07-12 — Ghost terrain at Null Island (0°,0°) = a mesh whose position was never set.**
+  The long-standing "wrong terrain at far zoom" report (CLAUDE.md known issue #1, blamed on
+  continentMesh) was actually cityManager: patches baked world-sampled colors/UVs into LOCAL
+  geometry and relied on `mesh.position` to translate them — but position was never set, so all
+  ~36 city patches rendered stacked at scene origin (Gulf of Guinea, south of Lagos). Two lessons:
+  (1) anything unexplained appearing near scene (0,0,0) → suspect an unpositioned object first;
+  (2) binary-test by `scene.remove(group)`, NOT `mesh.visible=false` — per-frame manager
+  `update()` loops overwrite `visible` and make the test lie (this cost two false negatives
+  before the group removal isolated it). Also: continentMesh is data-only (never renders) —
+  don't re-suspect it.
+
 - **`altitudeDeckManager.js` existed half-built and silently dead before 2026-06-27, with no
   record anywhere.** It was imported, instantiated, and exposed on `window` in `main.js`, but its
   `setVisible()` was never called and its `update()` was never wired into the animation loop — so the
@@ -275,3 +570,108 @@
   (gitignored) — never sent to the browser, never committed.
 
 _Last updated: 2026-06-17._
+
+---
+
+## Screen-space imagery rationing starved its own fallback (2026-07-25)
+
+**Tried:** only fetch a tile's own satellite imagery within N rings of the camera
+tile; everything beyond borrows from an already-downloaded coarser ancestor.
+Sharp at the centre of view, softening outward, far fewer HTTP requests.
+
+**Measured result: it made things WORSE.** Mean "palette" tiles (no satellite
+imagery, showing the flat elevation ramp) across five sparse sites went
+**59% → 75%**. Siberia z11 went 23% → 78%; Simpson Desert 35% → 73%.
+
+**Why — and this is the transferable part.** The gate was applied to EVERY LOD
+level. But borrowing only works if a coarser ancestor already holds real imagery,
+and the coarse levels were rationed by the same rule. The pyramid was starved at
+its base: there was nothing left to borrow FROM. The ancestor cache finished the
+run at a **0.9% hit rate** (171 hits, 18,879 misses) — the mechanism was running
+constantly and finding nothing.
+
+**The general shape of the mistake:** a fallback that depends on a resource must
+not be rationed by the same rule that produces that resource. Gate the many
+(z11 ~181 tiles/view), never the few (z9 ~30, z10 ~93) — the few are the source.
+
+**If retried:** apply the ring gate ONLY to the finest currently-lit level and let
+coarser levels always fetch in full. Left in place as `IMAGERY_OWN_RINGS = Infinity`
+(disabled) with the reasoning at the constant.
+
+**Also note this was the THIRD wrong swing at the same subsystem in one session.**
+The first blamed `IMG_MAX_CONCURRENT` — measured false, the limit hit its floor of
+4 with the blank rate unchanged at 28→29%. The second (ancestor cache with one
+shared 32-entry LRU) silently never hit, because the finest level evicted the
+parents it needed. Only the third had the courtesy to fail loudly. The subsystem
+punishes plausible reasoning; measure a baseline BEFORE changing anything here.
+
+---
+
+## The measurement was the bug: colour variance ≠ missing imagery (2026-07-25)
+
+A five-site sweep reported 35–93% of tiles "missing imagery" (Kansas 93%). Three
+fixes were designed against that number. Then the app's own records were checked:
+`_imgFailures` was EMPTY at every level — imagery was landing on ~100% of tiles.
+
+The metric classified a tile as "no imagery" if its point-colour standard
+deviation was < 0.012. But flat terrain produces flat colour WITH imagery — and
+all five chosen sites (Simpson Desert, Sahara, Kansas plains, Amazon canopy,
+Siberian plain) are visually uniform terrain. The metric measured terrain
+flatness and was read as pipeline failure. Tokyo "scored well" only because
+cities are visually busy.
+
+Fixes: tiles now carry a ground-truth `entry.imagery = 'own'|'borrowed'` flag set
+at apply time — record the fact, never infer it from pixels. General rule: when a
+metric says the system is badly broken but nothing LOOKS broken, audit the metric
+against the system's own bookkeeping before designing any fix.
+
+## Fixed world-space constants: one bug, four disguises (2026-07-25)
+
+Same defect found four times in one day, each looking unrelated:
+  • vessel hulls rendered 38 km long (192x; the hull template is 3.4 units, so
+    reading BASELINE_SCALE as if the model were 1 unit understates 3.4x)
+  • vessel shadow sprites fixed at 5 units = 668 km ("green lights" filling z12)
+  • vessel dot lifted +0.02 units = 2.7 KM above the hull ("to avoid z-fighting
+    with the water plane" — which had been disabled that morning)
+  • OSM buildings at LOCAL_SCALE 0.002 = ~267x ("remove the blue cities", 07-15)
+
+The class: a world-space size chosen while looking at ONE zoom level, used at
+all of them. It only surfaces when the camera's range extends (minDistance drops)
+— the constant didn't change, the context did. When extending camera range, grep
+for `scale.set(` and fixed world-unit sizes and re-derive each against
+`vesselScale.js` (pixel floors + hull-proportional + one-way caps). Related trap
+fixed the same day: markers must size from the EFFECTIVE rendered scale, not
+`userData.renderScale` (the base value) — sizing from base made the fix a
+measured no-op (k=1.0000) that LOOKED like it worked because the pixel floor
+moved numbers anyway.
+
+## Verification hygiene, paid for in full (2026-07-25)
+
+• Hidden-tab runs distort timing measurements (rAF paused, dives stretched): an
+  interim "84% transit cut" was really 40% on a clean visible run. Never quote
+  numbers from a run that went hidden.
+• Tests must not clear the user's live caches for baselines — vg1GeoCache.clear()
+  wiped a day of accumulated warmth and read as "you broke the map". Use
+  throwaway regions instead.
+• Namespace debug globals: ad-hoc instrumentation on `window.__T` clobbered the
+  (since-deleted) frame profiler that had exactly the data being sought.
+• A probe of a tokenized endpoint without the app's Authorization header returns
+  401s that masquerade as coverage gaps; service-worker cache hits masquerade as
+  origin 200s. Probe with the app's own auth + cache:'reload'.
+• `ship.visible` is a layer/cluster flag, NOT a frustum test — at close zoom all
+  500 vessels are "visible". A visibility gate built on it saves nothing; real
+  per-entity culling needs an actual frustum check (does not exist yet).
+
+## Still open (verified facts, no fix yet) — 2026-07-25
+
+• ~25–40ms/frame is unexplained: hiding the ENTIRE base cloud changed nothing;
+  hiding all 13M tile points changed nothing. CPU-side, outside both. The
+  per-section profiler (window.__T) was deleted from main.js; re-add it before
+  any further perf work.
+• Cesium World Terrain has NO z9+ data above 60°N (SRTM limit — measured, exact,
+  not symmetric; south is fine to 60°S). Gated in terrainCoverage.js. The data
+  does not exist; only the wasted fetches were fixable.
+• GFS fix (651→27 requests) is verified by request count only — quota was
+  exhausted; live wind data unconfirmed until quota reset.
+• Tile seams: median 4.7m (sub-texel, invisible) but p95 ~52m — a real tail,
+  likely _flatQM fallback tiles meeting real QM neighbours.

@@ -286,6 +286,12 @@ export class ChokepointManager {
         this._landmarks = [];
         this._hitMeshes = [];
 
+        // Cargo intelligence, Phase 4 — chokepoint laden-flow aggregation
+        // (research/vanguard1-cargo-intel-spec-2026-07-23.md). window.vg1Chokepoints
+        // is a debug mirror only (CLAUDE.md Tier 3) — real access is the .laden()/
+        // .all() methods below, called directly by whatever imports this manager.
+        if (typeof window !== 'undefined') window.vg1Chokepoints = this;
+
         chokepoints.forEach(cp => {
             const code      = CP_CODES[cp.name] ?? cp.name.slice(0, 3).toUpperCase();
             const centerLat = (cp.latMin + cp.latMax) / 2;
@@ -348,6 +354,7 @@ export class ChokepointManager {
             hitMesh.userData.chokepointState = 'dormant';
             hitMesh.userData.chokepointCount = 0;
             hitMesh.userData.chokepointDark  = 0;
+            hitMesh.userData.chokepointLaden = 0;   // Phase 4 — see tick() below
             scene.add(hitMesh);
             this._hitMeshes.push(hitMesh);
 
@@ -381,7 +388,7 @@ export class ChokepointManager {
         if (this._hidden) return;
         this._landmarks.forEach(lm => {
             // ── Classify vessels in this chokepoint ──────────────────────────────
-            let count = 0, darkCount = 0, stoppedCount = 0;
+            let count = 0, darkCount = 0, stoppedCount = 0, ladenCount = 0;
             const vessels = []; // per-vessel detail for discoveryManager's snapshot —
                                  // aggregate counts alone give Claude nothing to correlate
                                  // against developingStories/RF/integrity by MMSI.
@@ -397,9 +404,16 @@ export class ChokepointManager {
                 count++;
                 const isDark   = !!ship.userData.isDark;
                 const isStopped = (ship.userData.speedKts ?? 99) <= STOPPED_KTS && !isDark;
+                // Cargo intelligence, Phase 4 — laden flag from the Phase 1 draft
+                // estimate (aisManager.js computeCargoEstimate()). This is an
+                // INSTANTANEOUS snapshot of vessels currently tracked in the box,
+                // not a cumulative transit/flow-rate count — see .laden()/.all()
+                // below for the honest framing of what this number actually means.
+                const isLaden  = ship.userData.ladenState === 'LADEN';
                 if (isDark)    darkCount++;
                 if (isStopped) stoppedCount++;
-                vessels.push({ mmsi: ship.userData.id, dark: isDark, stopped: isStopped });
+                if (isLaden)   ladenCount++;
+                vessels.push({ mmsi: ship.userData.id, dark: isDark, stopped: isStopped, laden: isLaden });
             }
 
             const state    = _classifyState(count, darkCount, stoppedCount);
@@ -439,6 +453,7 @@ export class ChokepointManager {
             lm.hitMesh.userData.chokepointState  = state;
             lm.hitMesh.userData.chokepointCount  = count;
             lm.hitMesh.userData.chokepointDark   = darkCount;
+            lm.hitMesh.userData.chokepointLaden  = ladenCount;
             lm.hitMesh.userData.chokepointVessels = vessels;
 
             // ── Drive opacity ─────────────────────────────────────────────────────
@@ -462,6 +477,25 @@ export class ChokepointManager {
     }
 
     getHitMeshes() { return this._hitMeshes; }
+
+    // ── Cargo intelligence, Phase 4 — read API ───────────────────────────────
+    // HONEST FRAMING: these are INSTANTANEOUS snapshots (how many currently-
+    // tracked vessels are laden right now), not a cumulative transit count or a
+    // flow rate over time — turning this into a real "barrels/day" style metric
+    // would need the same kind of time-windowed tracking portCallManager.js does
+    // for port calls, which this does not attempt. Treat ladenFraction as "of the
+    // vessels here right now, what fraction are laden," nothing more.
+    laden(code) {
+        const lm = this._landmarks.find(l => l.code === code);
+        if (!lm) return null;
+        const count      = lm.hitMesh.userData.chokepointCount ?? 0;
+        const ladenCount = lm.hitMesh.userData.chokepointLaden ?? 0;
+        return {
+            code, name: lm.cp.name, count, ladenCount,
+            ladenFraction: count > 0 ? ladenCount / count : null,
+        };
+    }
+    all() { return this._landmarks.map(lm => this.laden(lm.code)); }
 
     dispose() {
         this._landmarks.forEach(lm => {

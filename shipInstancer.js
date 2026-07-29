@@ -26,21 +26,61 @@
 //      per class (same static geometry every time), so it's baked in ONCE
 //      here at harvest time instead of once per vessel — identical result,
 //      far fewer Box3 computations.
-//   2. Fixed orientation — main.js always sets `obj.rotation.y = Math.PI/2`
-//      ("all vessel figures face east so hull length is always visible"),
-//      never anything heading-derived. So unlike aircraft this instancer
-//      uses one constant orientation quaternion, no per-instance heading.
+//   2. Heading orientation — the hull now rotates to match each vessel's
+//      real COG/heading (task: "hull orientation should track true
+//      heading", 2026-07-22). Every class's builder places its bow at local
+//      +Z (see entityBuilder.js hullWithBow), so the world-space rotation
+//      that points the bow toward true heading is rotation.y = PI - hdgRad
+//      — the same convention wakeManager.js has documented in its header
+//      since before this instancer existed (wakeManager reads
+//      entity.rotation.y directly, so this fix also restores wake-heading
+//      accuracy as a side effect). Previously this was a single shared
+//      constant quaternion (fixed broadside-east); now it's recomputed per
+//      vessel per frame — cheap (one Euler+Quaternion per live vessel,
+//      capped at AIS.MAX_VESSELS) next to the matrix math already done here.
+//      Vessels without a known heading yet (fresh spawn, no report received)
+//      fall back to the old fixed broadside orientation rather than facing
+//      an arbitrary default.
 import * as THREE from 'three';
-import { AIS } from './config.js';
+import { AIS, SHIP_RENDER } from './config.js';
+import { vesselRenderScale, pixelsPerSceneUnit } from './vesselScale.js';
 import { SHIP_CLASSES } from './entityBuilder.js';
 
 const CAPACITY  = AIS.MAX_VESSELS; // per class, per part
-const SHIP_SCALE = 0.08;            // matches the old shipGroup.scale.set(0.08,...)
+// Fallback only — matches config.js SHIP_RENDER.BASELINE_SCALE. Real per-vessel
+// scale (2026-07-23, true-scale rendering) is computed in aisManager.js's
+// computeRenderScale() and passed into update() below; this constant only fires
+// if a caller somehow doesn't pass one, so ships never silently render at 0 scale.
+const SHIP_SCALE = 0.08;
+const FALLBACK_ROTATION_Y = Math.PI / 2; // broadside-east, used only when heading is unknown
 
 // Scratch objects reused every call — never allocate inside update().
 const _shipPos     = new THREE.Vector3();
-const _shipQuat    = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI / 2, 0));
-const _shipScaleVec = new THREE.Vector3(SHIP_SCALE, SHIP_SCALE, SHIP_SCALE);
+const _shipEuler   = new THREE.Euler();
+const _shipQuat    = new THREE.Quaternion();
+const _shipScaleVec = new THREE.Vector3(SHIP_SCALE, SHIP_SCALE, SHIP_SCALE); // mutated per-call via .setScalar() in update() — true-scale rendering, 2026-07-23
+
+// ── Altitude-aware vessel sizing (2026-07-25) ────────────────────────────────
+// Longest axis of the hull template at scale 1. MEASURED off the live instanced
+// geometry (3.4), not assumed — an earlier estimate that took it for 1.0 put the
+// exaggeration at 36x when it is actually 192x, which is the difference between
+// "a bit large" and "38 kilometres long". If the hull model is ever re-authored,
+// re-measure: window.scene.traverse(o => o.isInstancedMesh && ...boundingBox).
+const HULL_UNITS = 3.4;
+// Vessels never render shorter than this on screen. The single tunable — see
+// vesselScale.js for why it is expressed in pixels rather than as a multiplier.
+const DEFAULT_MIN_PX = 12;
+let _view = null;   // { cameraPos, viewportH, fovDeg, minPx } — null until setView
+
+/**
+ * Per-frame camera context for altitude-aware sizing. Call once per frame before
+ * the update() sweep; omit entirely and sizing reverts to the pre-2026-07-25
+ * fixed-exaggeration behaviour.
+ */
+export function setShipViewContext(cameraPos, viewportH, fovDeg, minPx = DEFAULT_MIN_PX) {
+    if (!cameraPos || !(viewportH > 0)) { _view = null; return; }
+    _view = { cameraPos, viewportH, fovDeg, minPx };
+}
 const _partQuat     = new THREE.Quaternion();
 const _shipMatrix  = new THREE.Matrix4();
 const _partMatrix   = new THREE.Matrix4();
@@ -138,7 +178,13 @@ class ShipInstancer {
     // used when clusterManager hides individual vessels at far/mid zoom, or
     // when the class filter / dark-vessel logic hides one — matching the old
     // `ship.visible = false` behavior visually with zero per-consumer branching.
-    update(handle, position, visible) {
+    // `headingDeg` (0-360, compass convention) orients the hull to match true
+    // heading; null/undefined falls back to the fixed broadside orientation.
+    // `scale` (2026-07-23, true-scale rendering) sets this vessel's real-
+    // proportional size — see aisManager.js's computeRenderScale() for how it's
+    // derived. Falls back to the old fixed SHIP_SCALE if omitted/invalid, so a
+    // missed call site degrades to the pre-true-scale look instead of vanishing.
+    update(handle, position, visible, headingDeg, scale) {
         if (!handle) return;
         const cls = this.classes[handle.classType];
         if (!cls) return;
@@ -150,6 +196,41 @@ class ShipInstancer {
             });
             return;
         }
+
+        const rotY = (headingDeg != null)
+            ? Math.PI - (headingDeg * Math.PI / 180)
+            : FALLBACK_ROTATION_Y;
+        _shipEuler.set(0, rotY, 0);
+        _shipQuat.setFromEuler(_shipEuler);
+
+        let resolvedScale = (scale != null && scale > 0) ? scale : SHIP_SCALE;
+        // ── Altitude-aware sizing (2026-07-25) ───────────────────────────────
+        // `scale` above is the real-proportional size from aisManager, which is
+        // exaggerated ~192x so the fleet is legible at world zoom (necessary: a
+        // real ship is 0.0015 scene units). That exaggeration is fine at altitude
+        // and absurd at z10, where a median vessel renders 38 KM long — across a
+        // whole island. setView() supplies the camera context that lets this shrink
+        // toward true scale as you descend, bottoming out at a pixel floor.
+        //
+        // Applied HERE rather than at the three update() call sites so there is one
+        // implementation and no chance of a caller being missed. When setView has
+        // not been called (headless, pre-first-frame) _view stays null and this is
+        // a no-op — the pre-2026-07-25 look, not a vanished fleet.
+        if (_view) {
+            // Recover hull length from the scale we were handed rather than
+            // widening update()'s signature across three call sites: aisManager
+            // built it as BASELINE_SCALE * (lengthM / REFERENCE_LENGTH_M), so this
+            // inverts exactly. Lossy only for craft small enough to have hit
+            // MIN_RENDER_SCALE — and for those the pixel floor binds anyway, so the
+            // recovered length never reaches the result.
+            const lengthM = SHIP_RENDER.REFERENCE_LENGTH_M
+                          * (resolvedScale / SHIP_RENDER.BASELINE_SCALE);
+            resolvedScale = vesselRenderScale(
+                resolvedScale, lengthM,
+                pixelsPerSceneUnit(_view.viewportH, _view.fovDeg, position.distanceTo(_view.cameraPos)),
+                _view.minPx, HULL_UNITS);
+        }
+        _shipScaleVec.setScalar(resolvedScale);
 
         _shipPos.copy(position);
         _shipMatrix.compose(_shipPos, _shipQuat, _shipScaleVec);

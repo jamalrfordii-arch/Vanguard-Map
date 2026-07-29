@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VANGUARD1 — Splat Viewer — airmuseum2.spz</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e14; }
+  #app { position: fixed; inset: 0; }
+  .hud {
+    position: fixed; font-family: 'Consolas', 'SF Mono', monospace; font-size: 12px;
+    color: #9fd6ff; background: rgba(10,14,20,0.75); border: 1px solid rgba(90,160,220,0.35);
+    border-radius: 6px; padding: 8px 12px; backdrop-filter: blur(4px); z-index: 10;
+    user-select: none;
+  }
+  #info { top: 12px; left: 12px; }
+  #info b { color: #e8f4ff; }
+  #controls { bottom: 12px; left: 12px; display: flex; gap: 8px; align-items: center; }
+  #controls button {
+    font: inherit; color: #9fd6ff; background: rgba(30,50,75,0.6);
+    border: 1px solid rgba(90,160,220,0.45); border-radius: 4px;
+    padding: 4px 10px; cursor: pointer;
+  }
+  #controls button:hover { background: rgba(50,85,125,0.8); color: #fff; }
+  #loading {
+    top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 14px; padding: 14px 22px; text-align: center;
+  }
+  #err { color: #ff8080; display: none; margin-top: 6px; max-width: 420px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
+    "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app"></div>
+<div class="hud" id="info">
+  <b>airmuseum2.spz</b> — 1,058,134 splats · SH3<br>
+  drag: orbit · right-drag: pan · wheel: zoom<br>
+  <span id="fps">— fps</span>
+</div>
+<div class="hud" id="controls">
+  <button id="flip" title="Flip 180° around X (fixes upside-down captures)">Flip ⟲</button>
+  <button id="rotY" title="Rotate 90° around Y">Rotate 90°</button>
+  <button id="reset">Reset view</button>
+  <button id="bg">Background</button>
+</div>
+<div class="hud" id="loading">Loading airmuseum2.spz (18 MB)…<div id="err"></div></div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { SplatMesh } from "@sparkjsdev/spark";
+
+const app = document.getElementById("app");
+const loadingEl = document.getElementById("loading");
+const errEl = document.getElementById("err");
+const fpsEl = document.getElementById("fps");
+
+const BGS = [0x0a0e14, 0x000000, 0x202830, 0xd8dde4];
+let bgIdx = 0;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(BGS[bgIdx]);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 2000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+app.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+const HOME = { pos: new THREE.Vector3(8, 4, 12), target: new THREE.Vector3(0, 1, 0) };
+function resetView() {
+  camera.position.copy(HOME.pos);
+  controls.target.copy(HOME.target);
+  controls.update();
+}
+resetView();
+
+// --- Splat ---
+const splat = new SplatMesh({ url: "splats/airmuseum2.spz" });
+// Most phone-scanned captures (Scaniverse/Niantic SPZ) come in upside down for three.js:
+splat.rotation.x = Math.PI;
+scene.add(splat);
+
+splat.initialized
+  .then(() => {
+    loadingEl.style.display = "none";
+    // Frame the content: use the splat's bounding sphere if available
+    try {
+      const box = new THREE.Box3().setFromObject(splat);
+      if (!box.isEmpty()) {
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3()).length();
+        HOME.target.copy(center);
+        HOME.pos.copy(center).add(new THREE.Vector3(size * 0.18, size * 0.10, size * 0.18));
+        resetView();
+      }
+    } catch (e) { /* keep default framing */ }
+  })
+  .catch((e) => {
+    errEl.style.display = "block";
+    errEl.textContent = "Failed to load splat:\n" + (e?.message || e) +
+      "\n\nThis page must be served over HTTP (not opened as a file). " +
+      "From the Vanguard1 folder run e.g.\n  python -m http.server 8000\nthen open http://localhost:8000/splat_viewer.html";
+  });
+
+// --- UI ---
+document.getElementById("flip").onclick = () => { splat.rotation.x += Math.PI; };
+document.getElementById("rotY").onclick = () => { splat.rotation.y += Math.PI / 2; };
+document.getElementById("reset").onclick = resetView;
+document.getElementById("bg").onclick = () => {
+  bgIdx = (bgIdx + 1) % BGS.length;
+  scene.background.setHex(BGS[bgIdx]);
+};
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// --- Loop ---
+let frames = 0, tPrev = performance.now();
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+  frames++;
+  const t = performance.now();
+  if (t - tPrev > 1000) {
+    fpsEl.textContent = Math.round((frames * 1000) / (t - tPrev)) + " fps";
+    frames = 0; tPrev = t;
+  }
+});
+</script>
+</body>
+</html>

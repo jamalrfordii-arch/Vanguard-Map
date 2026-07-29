@@ -38,6 +38,11 @@ mobile sim), hard-reload, read the dump. Best run on the actual device someone r
 
 _Diagnosed 2026-06-14; instrumentation added._
 
+_2026-07-25 note: this file is about BOOT load and remains open (~4 min boot,
+none of the fix surface above implemented). Do not confuse it with the IN-SESSION
+tile-loading overhaul of 2026-07-25 (see decisions.md), which is done and
+verified — that work made flying around fast; boot is still slow._
+
 ## SHIPPED (2026-06-14)
 - **Pre-load PERFORMANCE screen** (`choosePerformanceTier` in main.js) — every load, picks quality TIER
   + FPS CAP, gates `loadAllData`.

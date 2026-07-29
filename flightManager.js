@@ -131,13 +131,20 @@ function operatorFromCallsign(callsign) {
 // reference grids at the exact same heights aircraft actually render at,
 // instead of duplicating this formula and risking drift between the two.
 export function altitudeMetersToY(altMeters) {
-    // At/below the tracking floor (MIN_ALT_M, the same threshold that governs
-    // appear/disappear) an aircraft sits on the ground plane. Above it, altitude
-    // maps linearly to scene Y, CLAMPED at ALT_CEIL_M so a bad-data altitude
-    // (ADS-B sentinel / geometric-alt spike) can't launch a plane off-scale.
+    // Non-linear (power-curve) altitude → scene Y. The vertical dimension is tiny
+    // (the whole 0–FL410 band is ~24 scene units on a 300-wide map), so a LINEAR
+    // scale crushes the busy low/terminal altitudes where approach & departure
+    // geometry lives. ALT_Y_GAMMA (<1) expands the low band and compresses the
+    // thin upper air. Both endpoints are PINNED: at/below the tracking floor
+    // (MIN_ALT_M) an aircraft sits at ALT_Y_BASE, and the top of the scale
+    // (ALT_CEIL_M) keeps the height it had under the old linear map, so scene
+    // framing/camera are unchanged. gamma = 1 reproduces the linear scale exactly.
+    // Bad-data altitudes clamp at ALT_CEIL_M. Decks read from this fn → auto-respace.
     if (!(altMeters > FLIGHT.MIN_ALT_M)) return FLIGHT.ALT_Y_BASE;
-    const clamped = Math.min(altMeters, FLIGHT.ALT_CEIL_M);
-    return FLIGHT.ALT_Y_BASE + clamped * (FLIGHT.ALT_Y_SPAN_UNITS / FLIGHT.ALT_Y_SPAN_M);
+    const clamped    = Math.min(altMeters, FLIGHT.ALT_CEIL_M);
+    const totalUnits = FLIGHT.ALT_CEIL_M * (FLIGHT.ALT_Y_SPAN_UNITS / FLIGHT.ALT_Y_SPAN_M);
+    const t          = (clamped - FLIGHT.MIN_ALT_M) / (FLIGHT.ALT_CEIL_M - FLIGHT.MIN_ALT_M);
+    return FLIGHT.ALT_Y_BASE + totalUnits * Math.pow(t, FLIGHT.ALT_Y_GAMMA);
 }
 
 // Which flight-level band an altitude falls in, given ascending band CEILINGS
@@ -149,6 +156,30 @@ export function altitudeMetersToY(altMeters) {
 export function altitudeBandIndex(altFt, ceilingsFt) {
     for (let i = 0; i < ceilingsFt.length; i++) if (altFt <= ceilingsFt[i]) return i;
     return ceilingsFt.length - 1;
+}
+
+// Exponential moving average for the per-poll vertical rate. ADS-B altitude is
+// quantized (25/100 ft) and sampled once per ~30 s poll, so a single altitude
+// delta is a noisy estimate of climb/descent. Blending it with the running value
+// damps spikes without lagging a sustained climb. A null/undefined prev (the
+// first real sample) passes through unsmoothed. alpha ∈ [0,1]; higher = less
+// smoothing. Pure + exported so it's unit-testable.
+export function smoothVerticalRate(prev, raw, alpha) {
+    if (prev == null || !Number.isFinite(prev)) return raw;
+    return prev + alpha * (raw - prev);
+}
+
+// Scene-Y length of a climb/descent "ribbon": how far (in scene units, signed)
+// the aircraft would move vertically over `seconds` at its current vertical rate,
+// mapped THROUGH the same non-linear altitude curve the aircraft is drawn with.
+// Positive = climbing (ribbon points up), negative = descending. Because it goes
+// through altitudeMetersToY, an identical climb rate yields a LONGER ribbon down
+// low (expanded band) than up high (compressed) — the ribbon reads proportional
+// to on-screen movement, not raw feet. Returns 0 for a null/level rate.
+export function altitudeRibbonDeltaY(altMeters, verticalRateMs, seconds) {
+    if (verticalRateMs == null || !Number.isFinite(verticalRateMs) || verticalRateMs === 0) return 0;
+    const projected = Math.max(0, altMeters + verticalRateMs * seconds);
+    return altitudeMetersToY(projected) - altitudeMetersToY(altMeters);
 }
 
 export function lonLatAltToScene(lon, lat, altMeters) {
@@ -222,16 +253,45 @@ export class FlightManager {
 
     async _poll() {
         if (this._livePaused) return; // replay in progress — live feed muted
+
+        // ── Network fetch. Two distinct failure modes, reported distinctly so the
+        // trust indicator means something:
+        //   · TimeoutError  → the proxy accepted the connection but didn't answer in
+        //     time. The feed is probably ALIVE but slow (a big upstream transfer, a
+        //     stalled mirror) — NOT the same as a dead proxy. Reported 'FEED SLOW'.
+        //   · anything else (connection refused, HTTP !ok, bad payload) → a genuine
+        //     proxy/connectivity failure. Reported 'PROXY OFFLINE'.
+        // The server-side aircraft cap (flight-proxy.js, FLIGHTS_MAX_AIRCRAFT) keeps a
+        // real response small, so a timeout now genuinely indicates trouble rather
+        // than just a fat global payload — but SLOW ≠ OFFLINE either way. Timeout is
+        // 20s (was 15s) to give the bounded payload comfortable headroom.
+        let data;
         try {
             this._setStatus('POLLING...');
-            const res = await fetch(FLIGHT.API_URL, { signal: AbortSignal.timeout(15000) });
+            const res = await fetch(FLIGHT.API_URL, { signal: AbortSignal.timeout(20000) });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
+            data = await res.json();
             if (!data || !Array.isArray(data.ac)) throw new Error('Bad payload');
+        } catch (err) {
+            if (err && err.name === 'TimeoutError') {
+                console.warn('[FLIGHT] Poll timed out (feed may be alive but slow — not treated as OFFLINE)');
+                this._setStatus('FEED SLOW');
+            } else {
+                console.warn('[FLIGHT] Poll error (proxy/network):', err.message);
+                this._setStatus('PROXY OFFLINE');
+            }
+            return;
+        }
+
+        // ── Processing — a bug HERE is not a proxy problem. Previously it was
+        // caught by the same try and mislabeled "PROXY OFFLINE", hiding the real
+        // error and making a live feed look dead. Now it's reported distinctly,
+        // the real stack is logged, and polling continues.
+        try {
             this._handleData(data);
         } catch (err) {
-            console.warn('[FLIGHT] Poll error:', err.message);
-            this._setStatus('PROXY OFFLINE');
+            console.error('[FLIGHT] Processing error (feed is LIVE — this is a code bug, not the proxy):', err);
+            this._setStatus('FEED ERROR — see console');
         }
     }
 
@@ -310,6 +370,11 @@ export class FlightManager {
                 this.onPositionEvaluated({
                     icao24, callsign, lat, lon, altMeters, speedKts,
                     headingDeg: heading, squawk, emergency, now,
+                    // Last-known smoothed vertical rate (null on first sight) so
+                    // integrity can tell a level cruise from a climb/descent.
+                    // NB: `existing` is declared BELOW — look the record up directly
+                    // here to avoid a temporal-dead-zone reference.
+                    verticalRateMs: this.aircraft.get(icao24)?.verticalRateMs ?? null,
                 });
             }
 
@@ -348,12 +413,15 @@ export class FlightManager {
                 existing.targetHeadingDeg = heading; // what currentHeadingDeg eases toward in tick()
 
                 // Vertical rate from the altitude delta since the last report —
-                // only one sample per poll, so this is necessarily a coarse
-                // average over ~POLL_INTERVAL, not an instantaneous reading.
-                // Guard dt against near-zero (duplicate/rapid reports) to avoid
-                // a divide-by-near-zero spike feeding a momentary huge pitch.
+                // one coarse sample per poll. Guard dt against near-zero
+                // (duplicate/rapid reports) to avoid a divide-by-near-zero spike,
+                // then EMA-smooth so a single quantized altitude jump doesn't
+                // produce a wild rate feeding the conflict check, pitch, and the
+                // Altitude Watch ETA. First sample (null prev) passes through raw.
                 const dtSec = Math.max(1, (now - existing.lastSeen) / 1000);
-                existing.verticalRateMs = (altMeters - existing.altMeters) / dtSec;
+                const rawVR = (altMeters - existing.altMeters) / dtSec;
+                existing.verticalRateMs = smoothVerticalRate(
+                    existing.verticalRateMs, rawVR, FLIGHT_DYNAMICS.VERTICAL_RATE_EMA);
 
                 existing.latDeg     = lat;
                 existing.lonDeg     = lon;
@@ -390,7 +458,7 @@ export class FlightManager {
                     targetHeadingDeg:  heading,
                     bankDeg:           0,
                     pitchDeg:          0,
-                    verticalRateMs:    0,
+                    verticalRateMs:    null,  // null until the first altitude delta (readers use `?? 0`); then EMA-smoothed
                     // Motion-graphics polish (2026-06-27): ramps 0→1 over
                     // FLIGHT_DYNAMICS.SPAWN_EASE_SEC, consumed as an
                     // instance-scale multiplier in aircraftInstancer.js so a
@@ -403,7 +471,18 @@ export class FlightManager {
             }
         }
 
-        this._setStatus('LIVE // ANON');
+        // Source-tier aware status. The proxy tags each payload with `source`:
+        //   'adsb'    → primary ADS-B mirror, full fidelity (r/t/dbFlags present)
+        //   'opensky' → reduced-fidelity fallback: no registration/type/military flag,
+        //               so mil classification degrades to a category-only heuristic
+        //   'unavailable' → all sources down, empty payload
+        // An operator must be able to SEE a fidelity downgrade — a bare "LIVE" on
+        // either tier hides that the primary mirrors have gone dark (which they have,
+        // per memory/decisions.md 2026-06-26). SLOW/OFFLINE are still handled in _poll.
+        const src = data.source || 'adsb';
+        if (src === 'opensky')          this._setStatus('LIVE // OPENSKY (REDUCED)');
+        else if (src === 'unavailable') this._setStatus('PROXY OFFLINE');
+        else                            this._setStatus('LIVE // ADS-B');
         this._updateCount();
     }
 

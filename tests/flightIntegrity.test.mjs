@@ -26,8 +26,10 @@ const report = (icao24, over = {}) => ({
     headingDeg: over.headingDeg ?? 90,
     squawk: over.squawk ?? '2000',
     emergency: over.emergency ?? null,
+    verticalRateMs: over.verticalRateMs ?? null,
     now: over.now ?? T,
 });
+const FT_TO_M = 0.3048;
 
 console.log('Aerial Integrity suite\n');
 
@@ -183,6 +185,42 @@ test('tier thresholds: TRUSTED ≥80, QUESTIONABLE ≥50, else SUSPECT', () => {
     FIM.evaluate(report('3c3c3c', { lat: 0, lon: 50, squawk: '7700', now: T })); // EMERGENCY(50) + IMPOSSIBLE_SPEED(35) = 85 → score 15
     assert.equal(FIM.getRecord('3c3c3c').score, 15);
     assert.equal(FIM.getRecord('3c3c3c').tier, 'SUSPECT');
+});
+
+test('wrong-way flight level — eastbound at an even FL flags WRONG_WAY_LEVEL (advisory)', () => {
+    reset();
+    // FL300 (even) heading 090 (eastbound), level → should be flagged.
+    FIM.evaluate(report('aa1001', { altMeters: 30000 * FT_TO_M, headingDeg: 90, verticalRateMs: 0 }));
+    const r = FIM.getRecord('aa1001');
+    assert.ok(r.flags.has('WRONG_WAY_LEVEL'), 'eastbound FL300 is wrong-way');
+    // Low weight — a lone advisory hit must NOT drop it below TRUSTED.
+    assert.equal(r.score, 100 - FLIGHT_INTEGRITY.WEIGHTS.WRONG_WAY_LEVEL);
+    assert.equal(r.tier, 'TRUSTED');
+});
+
+test('compliant cruise level does not flag', () => {
+    reset();
+    // FL310 (odd) eastbound, level → compliant.
+    FIM.evaluate(report('aa1002', { altMeters: 31000 * FT_TO_M, headingDeg: 90, verticalRateMs: 0 }));
+    assert.ok(!FIM.getRecord('aa1002').flags.has('WRONG_WAY_LEVEL'));
+    assert.equal(FIM.getRecord('aa1002').score, 100);
+});
+
+test('a climbing aircraft is not flagged (legitimately between levels)', () => {
+    reset();
+    // FL300 even eastbound (would be wrong-way IF level) but climbing at ~1500 fpm.
+    FIM.evaluate(report('aa1003', { altMeters: 30000 * FT_TO_M, headingDeg: 90, verticalRateMs: 7.6 }));
+    assert.ok(!FIM.getRecord('aa1003').flags.has('WRONG_WAY_LEVEL'), 'climb gate suppresses the check');
+});
+
+test('wrong-way flag clears once the aircraft is at a correct level', () => {
+    reset();
+    FIM.evaluate(report('aa1004', { altMeters: 30000 * FT_TO_M, headingDeg: 90, verticalRateMs: 0 })); // FL300 E → flag
+    assert.ok(FIM.getRecord('aa1004').flags.has('WRONG_WAY_LEVEL'));
+    T += 60_000; // realistic 1,000 ft level change over a minute (not a 12,000 fpm jump)
+    FIM.evaluate(report('aa1004', { altMeters: 31000 * FT_TO_M, headingDeg: 90, verticalRateMs: 0, now: T })); // FL310 E → ok
+    assert.ok(!FIM.getRecord('aa1004').flags.has('WRONG_WAY_LEVEL'));
+    assert.equal(FIM.getRecord('aa1004').score, 100);
 });
 
 console.log(`\n${passed} passed.`);

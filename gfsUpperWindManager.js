@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 
 // ── Grid / fetch tuning (matches surface manager) ───────────────────────────
@@ -584,7 +585,6 @@ export class GFSUpperWindManager {
         geo.setPositions(new Float32Array(positions));
         geo.setColors(new Float32Array(colors));
 
-        const dpr = window.devicePixelRatio || 1;
         const mat = new LineMaterial({
             linewidth:    alt.cfg.streamWidth,
             vertexColors: true,
@@ -593,7 +593,7 @@ export class GFSUpperWindManager {
             depthWrite:   false,
             depthTest:    false,
             blending:     THREE.NormalBlending,
-            resolution:   new THREE.Vector2(window.innerWidth * dpr, window.innerHeight * dpr),
+            resolution:   new THREE.Vector2(viewport.bufferWidth(), viewport.bufferHeight()),
         });
         const lines = new LineSegments2(geo, mat);
         lines.frustumCulled = false;

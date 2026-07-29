@@ -18,8 +18,11 @@
 // consistent with the rest of this project's "no bundler, minimal deps"
 // philosophy (see CLAUDE.md). Append-only, like memory/decisions.md.
 
-const fs   = require('fs');
-const path = require('path');
+import fs   from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DIR          = path.join(__dirname, 'memory', 'discovery');
 const EVENTS_FILE   = path.join(DIR, 'events.jsonl');
@@ -203,4 +206,4 @@ function summarizeRulePasses(hours = 24) {
     return out;
 }
 
-module.exports = { appendEvent, appendFinding, appendRulePass, readRecent, getEventById, searchHistory, summarizeRulePasses };
+export default { appendEvent, appendFinding, appendRulePass, readRecent, getEventById, searchHistory, summarizeRulePasses };

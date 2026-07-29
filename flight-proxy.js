@@ -9,16 +9,20 @@
 //   starlink  — SpaceX Starlink
 //   gps       — GPS operational constellation
 //   weather   — NOAA weather satellites
-const http  = require('http');
-const https = require('https');
-const url   = require('url');
-const equasis = require('./equasis-lookup.js');   // vessel dossier (Equasis)
-const memoryStore = require('./memoryStore.js');  // persistent ground-truth/findings log (Discovery AI)
+import http from 'http';
+import https from 'https';
+import url from 'url';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import equasis from './equasis-lookup.js';   // vessel dossier (Equasis)
+import memoryStore from './memoryStore.js';  // persistent ground-truth/findings log (Discovery AI)
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Load .env (EQUASIS_USER / EQUASIS_PASS, ANTHROPIC_API_KEY) if present —
 // no dependency; tiny KEY=VALUE parser.
 try {
-    const fs = require('fs'), path = require('path');
     const envPath = path.join(__dirname, '.env');
     if (fs.existsSync(envPath)) {
         for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
@@ -61,11 +65,11 @@ Rules:
 // rule-based detector could see, while refusing to invent significance that
 // isn't in the data — every claim must point at something actually present in
 // the payload (an MMSI, a flag, a timestamp), never a generic guess.
-const DISCOVERY_SYSTEM = `You are VANGUARD's AI Discovery layer — you receive a cross-domain snapshot of live maritime intelligence (developing per-vessel event threads, AIS physics-invariant violations, integrity-flagged vessels, RF intel events, chokepoint vessel activity) and your job is to find the ONE most significant correlation or pattern that a single-domain rule engine would miss, NOT to re-describe individual events.
+const DISCOVERY_SYSTEM = `You are VANGUARD's AI Discovery layer — you receive a cross-domain snapshot of live maritime and aerial intelligence (developing per-vessel event threads, AIS physics-invariant violations, integrity-flagged vessels, integrity-flagged aircraft, RF intel events, chokepoint vessel activity) and your job is to find the ONE most significant correlation or pattern that a single-domain rule engine would miss, NOT to re-describe individual events.
 
 Rules:
-- Only surface a finding if it connects 2+ pieces of evidence already present in the snapshot (e.g. a vessel appearing in BOTH the developing-stories timeline AND the integrity-flagged list; an RF event tied to a vessel that's also AIS-flagged; a cluster of invariant violations sharing a region, chokepoint, or time window). A single isolated event is not a discovery — return an empty assessment ("") if nothing in the snapshot actually correlates.
-- Every sentence must cite a specific MMSI, flag, tier, RF event type, chokepoint name, or timestamp from the snapshot. Never write a claim that can't be traced to a field you were given.
+- Only surface a finding if it connects 2+ pieces of evidence already present in the snapshot (e.g. a vessel appearing in BOTH the developing-stories timeline AND the integrity-flagged list; an RF event tied to a vessel that's also AIS-flagged; a flagged aircraft loitering near the same chokepoint as a flagged vessel; a cluster of invariant violations sharing a region, chokepoint, or time window). A single isolated event is not a discovery — return an empty assessment ("") if nothing in the snapshot actually correlates.
+- Every sentence must cite a specific MMSI, ICAO24/callsign, flag, tier, RF event type, chokepoint name, or timestamp from the snapshot. Never write a claim that can't be traced to a field you were given.
 - Write 2-4 sentences, terse intelligence-community voice, UPPERCASE vessel/place names. State the correlation, then the most likely read on it, with a confidence qualifier.
 - If you believe the operator should look at a specific vessel right now, also return an action. Respond ONLY with raw JSON, no markdown fences, in exactly this shape:
 {"assessment": "<your finding, or empty string if none>", "actions": [{"tool": "selectVessel", "args": {"mmsi": "<mmsi>", "openCard": true}}]}
@@ -86,7 +90,7 @@ const OPTIONS_SYSTEM = `You are VANGUARD's AI Discovery layer, ranking a FIXED s
 
 Rules:
 - Rank EVERY item in the menu — do not omit any, and do not add a hypothesis that isn't in the menu.
-- Each item gets a confidence of exactly "HIGH", "MEDIUM", or "LOW", and one sentence of reasoning grounded in a specific field from the snapshot (MMSI, flag, tier, RF event type, chokepoint name, timestamp). Never write a claim that can't be traced to a field you were given.
+- Each item gets a confidence of exactly "HIGH", "MEDIUM", or "LOW", and one sentence of reasoning grounded in a specific field from the snapshot (MMSI, ICAO24/callsign, flag, tier, RF event type, chokepoint name, timestamp). Never write a claim that can't be traced to a field you were given.
 - Order the array from most to least likely.
 - If nothing in the evidence actually distinguishes between menu items, say so plainly in the reasoning (e.g. "no distinguishing evidence yet") rather than fabricating a detail to justify a ranking.
 - You may also propose the operator's console take action, via "actions". Available tools:
@@ -104,11 +108,11 @@ TOOL — searchHistory(mmsi, days): same as before — if a vessel's PAST patter
 // discipline as DISCOVERY_SYSTEM, but answering a specific question instead
 // of scanning autonomously for a correlation. Added 2026-06-21 — the pass-only
 // loop was one-directional; this gives the operator a way to ask it something.
-const QUERY_SYSTEM = `You are VANGUARD's AI Discovery layer, now answering a direct question from the operator instead of running an autonomous scan. You receive the same cross-domain snapshot (developing event threads, AIS invariant violations, integrity-flagged vessels, RF intel events, chokepoint vessel activity) plus a specific question.
+const QUERY_SYSTEM = `You are VANGUARD's AI Discovery layer, now answering a direct question from the operator instead of running an autonomous scan. You receive the same cross-domain snapshot (developing event threads, AIS invariant violations, integrity-flagged vessels, integrity-flagged aircraft, RF intel events, chokepoint vessel activity) plus a specific question.
 
 Rules:
 - Answer the question directly, 2-4 sentences, terse intelligence-community voice, UPPERCASE vessel/place names.
-- Ground every claim in a specific field from the snapshot (MMSI, flag, tier, RF event type, chokepoint name). If the snapshot has nothing relevant to the question, say so plainly instead of inventing an answer — do not hallucinate vessels, events, or locations not present in the data.
+- Ground every claim in a specific field from the snapshot (MMSI, ICAO24/callsign, flag, tier, RF event type, chokepoint name). If the snapshot has nothing relevant to the question, say so plainly instead of inventing an answer — do not hallucinate vessels, events, or locations not present in the data.
 - You may be given a PRIOR CONVERSATION block above the question — use it to resolve follow-ups ("that vessel", "what about it now") but never treat anything said there as a new fact; re-ground every claim in the current snapshot (or in a searchHistory tool result), not in what was previously said.
 - Never use bullet points, headers, or markdown. Plain prose only.
 - Respond ONLY with raw JSON, no markdown fences, in exactly this shape: {"answer": "<your answer>"}
@@ -188,6 +192,18 @@ function buildDiscoverySummary(snapshot) {
         lines.push(`INTEGRITY-FLAGGED VESSELS (${flagged.length}):`);
         for (const f of flagged.slice(0, 15)) {
             lines.push(`  MMSI ${f.mmsi}: tier ${f.tier}, score ${f.score}, flags [${(f.flags || []).join(', ')}]`);
+        }
+    }
+
+    // Aircraft-flagged (2026-07-22) — flightIntegrityManager.js's trust scoring
+    // already ran, this just surfaces it here so Claude's cross-domain
+    // reasoning can correlate against it, same shape as INTEGRITY-FLAGGED
+    // VESSELS above (icao24/callsign instead of mmsi, otherwise identical).
+    const aircraftFlagged = snapshot.aircraftFlagged || [];
+    if (aircraftFlagged.length) {
+        lines.push(`INTEGRITY-FLAGGED AIRCRAFT (${aircraftFlagged.length}):`);
+        for (const f of aircraftFlagged.slice(0, 15)) {
+            lines.push(`  ICAO24 ${f.icao24}${f.callsign ? ' (' + f.callsign + ')' : ''}: tier ${f.tier}, score ${f.score}, flags [${(f.flags || []).join(', ')}]`);
         }
     }
 
@@ -555,6 +571,23 @@ const CELESTRAK_GROUPS = {
 let _flightCache = null;   // { body: Buffer, contentType: string, ts: number }
 const FLIGHT_CACHE_TTL = 30_000;
 
+// ── Server-side aircraft cap ─────────────────────────────────────────────────
+// The upstream mirrors return a GLOBAL state list (/v2/point/0/0/20000) — up to
+// ~10k+ aircraft, several MB of JSON. The client (flightManager.js) only ever
+// keeps FLIGHT.MAX_AIRCRAFT (300) after its own altitude/position filtering, so
+// transferring the whole planet just to throw ~97% of it away is what makes a
+// legitimate response take 13s+ and trip the client's fetch timeout — which then
+// reads identically to a dead proxy ("AIR OFFLINE"). We bound the payload HERE so
+// a real response is always fast. The cap sits well above the client's 300 so the
+// client still does the final selection with headroom (many upstream states are
+// on-ground / below the tracking floor and get dropped client-side). Override with
+// FLIGHTS_MAX_AIRCRAFT=0 to disable the cap (serve the full list).
+// NOTE: truncation is by upstream array order (not geographic) — same arbitrary
+// selection the client already did at 300, just moved server-side to bound transfer.
+const FLIGHTS_MAX_AIRCRAFT = process.env.FLIGHTS_MAX_AIRCRAFT != null
+    ? parseInt(process.env.FLIGHTS_MAX_AIRCRAFT, 10)
+    : 1200;
+
 // ── Flight route / aircraft photo / registry caches ──────────────────────────
 // Keyed by the lookup key (callsign / registration / icao24 hex), long TTL
 // since routes, photos, and tail-number registry data essentially never
@@ -624,7 +657,7 @@ function proxyFlightsCached(res) {
         } else {
             console.warn('[proxy] all ADS-B sources failed and no cache — sending empty');
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ac: [] }));
+            res.end(JSON.stringify({ ac: [], source: 'unavailable' }));
         }
     }
 
@@ -636,8 +669,31 @@ function proxyFlightsCached(res) {
         let parsed = null;
         try { parsed = JSON.parse(bodyStr); } catch (_) { /* not JSON */ }
         if (!parsed || !Array.isArray(parsed.ac)) return false;
-        console.log(`[proxy] flights served from ${sourceLabel} (${parsed.ac.length} aircraft)`);
-        const body = Buffer.from(bodyStr, 'utf8');
+
+        // Tag the coarse SOURCE TIER so the client can tell operators which feed is
+        // actually serving. The primary ADS-B mirrors (airplanes.live/adsb.lol) carry
+        // registration (`r`), type code (`t`) and `dbFlags` (military registry flag);
+        // the OpenSky fallback carries NONE of those, so aircraft classification —
+        // especially military — silently degrades. Without this tag the HUD reads
+        // "LIVE" identically on either tier and a fidelity downgrade is invisible.
+        //   'adsb'    → full-fidelity primary mirror
+        //   'opensky' → reduced-fidelity fallback (no r/t/dbFlags)
+        const sourceTier = /opensky/i.test(sourceLabel) ? 'opensky' : 'adsb';
+        parsed.source = sourceTier;
+
+        // Bound the payload before caching/serving so a global list can't make a
+        // real response slow enough to trip the client's fetch timeout. We always
+        // re-serialize now (the `source` tag was just added), and truncate here too.
+        const total = parsed.ac.length;
+        if (FLIGHTS_MAX_AIRCRAFT > 0 && total > FLIGHTS_MAX_AIRCRAFT) {
+            parsed.ac = parsed.ac.slice(0, FLIGHTS_MAX_AIRCRAFT);
+            console.log(`[proxy] flights served from ${sourceLabel} [${sourceTier}] (${total} → capped ${FLIGHTS_MAX_AIRCRAFT} aircraft)`);
+        } else {
+            console.log(`[proxy] flights served from ${sourceLabel} [${sourceTier}] (${total} aircraft)`);
+        }
+        const outStr = JSON.stringify(parsed);
+
+        const body = Buffer.from(outStr, 'utf8');
         _flightCache = { body, contentType: 'application/json', ts: now };
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(body);

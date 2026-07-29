@@ -21,6 +21,7 @@
 
 import { FLIGHT_INTEGRITY } from './config.js';
 import { haversineNm, impliedSpeedKts } from './invariants.js';
+import { hemisphericLevelCheck } from './hemisphericRule.js';
 import { simClock } from './simClock.js';
 
 const W = FLIGHT_INTEGRITY.WEIGHTS;
@@ -34,6 +35,7 @@ const HUMAN = {
     IMPOSSIBLE_SPEED: 'Teleport-grade position jump between polls',
     ALTITUDE_JUMP:    'Climb/descent rate implied between polls is impossible',
     IMPOSSIBLE_ALTITUDE: 'Reported altitude above the operational ceiling (bad data)',
+    WRONG_WAY_LEVEL:  'Cruising against the hemispheric rule for its heading (wrong-way flight level)',
     SPEED_MISMATCH:   'Reported ground speed inconsistent with track-implied speed',
     EXCESSIVE_SPEED:  'Implied speed exceeds plausible-aircraft ceiling',
     DARK:             'ADS-B transponder went silent',
@@ -177,6 +179,29 @@ class FlightIntegrityManager {
                     `reports ${altFt.toFixed(0)}ft — above ${FLIGHT_INTEGRITY.IMPOSSIBLE_ALT_FT}ft ceiling`);
             } else {
                 this._clearFlag(r, 'IMPOSSIBLE_ALTITUDE');
+            }
+        }
+
+        // Hemispheric "wrong-way" flight level — ADVISORY. Only meaningful for an
+        // aircraft ESTABLISHED at a cruise level, so gate on a small vertical rate
+        // first (a climb/descent is legitimately between levels). Low-weight: a lone
+        // hit stays TRUSTED — it's an analyst prompt, not a verdict (oceanic tracks,
+        // regional exceptions, offsets, and ATC clearances all break the rule).
+        {
+            const vr    = report.verticalRateMs;
+            const level = vr == null || Math.abs(vr) < FLIGHT_INTEGRITY.LEVEL_RATE_MS;
+            const hemi  = (level && report.altMeters != null && report.headingDeg != null)
+                ? hemisphericLevelCheck(report.altMeters * 3.28084, report.headingDeg, {
+                      bandLoFt:   FLIGHT_INTEGRITY.RVSM_BAND_LO_FT,
+                      bandHiFt:   FLIGHT_INTEGRITY.RVSM_BAND_HI_FT,
+                      levelTolFt: FLIGHT_INTEGRITY.LEVEL_TOL_FT,
+                  })
+                : null;
+            if (hemi && hemi.wrongWay) {
+                this._setFlag(r, 'WRONG_WAY_LEVEL',
+                    `FL${hemi.nearestFt / 100} ${hemi.eastbound ? 'eastbound' : 'westbound'} — expected ${hemi.expectedParity} levels`);
+            } else {
+                this._clearFlag(r, 'WRONG_WAY_LEVEL');
             }
         }
 

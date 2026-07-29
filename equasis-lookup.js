@@ -11,9 +11,12 @@
 // response includes a `diag` block (status codes, sizes) so problems are
 // debuggable without guesswork.
 
-const https = require('https');
-const fs    = require('fs');
-const path  = require('path');
+import https from 'https';
+import fs    from 'fs';
+import path  from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const HOST        = 'www.equasis.org';
 const ORIGIN      = 'https://www.equasis.org';
@@ -347,4 +350,4 @@ async function lookup(opts) {
     }
 }
 
-module.exports = { lookup, parse, pickBest, _internals: { parseManagement, parseInspections, parseHistory, gridField } };
+export default { lookup, parse, pickBest, _internals: { parseManagement, parseInspections, parseHistory, gridField } };

@@ -5,15 +5,17 @@ import {
     BLOOM_STRENGTH_BASE, BLOOM_THREAT_RANGE,
     AMBIENT_INTENSITY_BASE, AMBIENT_INTENSITY_BONUS,
     DIR_LIGHT_INTENSITY_MAX,
-    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY, FLIGHT_INTEGRITY, CONFLICT,
+    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY, FLIGHT_INTEGRITY, CONFLICT, CARGO,
     AIRLINE_COLORS,
     AIRLINE_TAIL_COLORS,
-    TERRAIN_VERTICAL_SCALE,
+    SHIP_RENDER,
 } from './config.js';
 import { loadAllData } from './dataLoader.js';
 import { mark as bootMark, report as bootReport } from './bootProfiler.js';   // measurement-only
 import { GaussianSplatOverlayManager } from './gaussianSplatOverlay.js';   // 3DGS hotspot layer
 import { LayerCoordinator } from './layerCoordinator.js';   // Phase 3 — layer-coordination brain
+import { entityStore } from './entityStore.js';   // owns the live entity collection (was window.aisShips)
+import viewport from './viewport.js';   // owns the map rect (was window.innerWidth/Height)
 import {
     initScene, initControls, addLights, initPostProcessing,
     createBoardPlaneAndReticle, onWindowResize
@@ -23,6 +25,10 @@ import {
     createSolidOceanFloor, createCountryBorders,
     loadNormalMap, updatePointCloud, createOceanBasinLabels, getTrueElevation
 } from './terrainBuilder.js';
+// The tile stream's elevation transform. main.js needs it so the camera's
+// ground floor matches the surface the tiles actually draw at close zoom —
+// see the deep-dive collision clamp in animate().
+import { elevToSceneY, curveOffset } from './tilePointsBuilder.js';
 import { initTerritoryLookup } from './territoryLookup.js';
 import {
     createFlightObject, createAISVesselObject,
@@ -34,9 +40,26 @@ import { integrityManager, setElevationFn as setIntegrityElevation } from './int
 import { flightIntegrityManager } from './flightIntegrityManager.js';
 import { waveField } from './waveFieldManager.js';   // global sea-state data field (Phase A; lazy fetch)
 import { WaveFieldLayer } from './waveFieldLayer.js'; // global sea-state heatmap + contour render layer
-import { FlightManager, lonLatAltToScene, typeCodeToVisualClass } from './flightManager.js';
+import { FlightManager, lonLatAltToScene, typeCodeToVisualClass, altitudeBandIndex } from './flightManager.js';
 import { aircraftInstancer } from './aircraftInstancer.js';
-import { shipInstancer } from './shipInstancer.js';
+import { shipInstancer, setShipViewContext } from './shipInstancer.js';
+import { vesselMarkerScale, pixelsPerSceneUnit, effectiveShipScale } from './vesselScale.js';
+import { countNeighborsWithin } from './spatialGrid.js';
+import { TileWarmer } from './tileWarmer.js';
+// Hull template longest axis at scale 1 — measured off the live instanced geometry.
+// Kept in sync with shipInstancer's HULL_UNITS; both describe the same model.
+const SHIP_HULL_UNITS = 3.4;
+// Vessel dot: how big the halo under a ship may get. RATIO is a multiple of the
+// rendered hull length, MIN_PX keeps it findable at range, MAX_DIA is the legacy
+// CircleGeometry(0.22) diameter and acts as a one-way cap so the far view is
+// unchanged. Additive blending is why oversizing is so punishing here — 500
+// overlapping discs saturate to white long before any single one looks wrong.
+const VESSEL_DOT_HULL_RATIO = 1.6;
+const VESSEL_DOT_MIN_PX     = 14;
+const VESSEL_DOT_MAX_DIA    = 0.44;
+// How far below the hull origin the dot sits, as a fraction of its own diameter.
+// Proportional rather than absolute so it reads the same at every zoom.
+const VESSEL_DOT_SINK       = 0.08;
 import {
     setupUI, setupSettingsPanel, setupSectorSearch,
     onMouseMove, onDoubleClick, onClick, tickRaycasting,
@@ -48,10 +71,10 @@ import {
 import { AISManager, lonLatToScene } from './aisManager.js';
 import { simClock } from './simClock.js';
 import { quality } from './qualityManager.js';
+import { hitchRecorder } from './hitchRecorder.js';
 import { SyntheticAISSource, RecordedAISSource, AISRecorder } from './dataSource.js';
 import { ZoneRecorder } from './zoneRecorder.js';
 import { initArchivePanel } from './archiveManager.js';
-import { rfIntel, initRFIntelPanel } from './rfIntelManager.js';
 import { initVesselTab } from './vesselTab.js';
 import { initWatchlist } from './watchlist.js';
 import { initAlertsManager } from './alertsManager.js';
@@ -66,6 +89,8 @@ import { BeaufortWarningManager } from './beaufortWarningManager.js';
 import { GFSUpperWindManager } from './gfsUpperWindManager.js';
 import { AltitudeDeckManager } from './altitudeDeckManager.js';
 import { ConflictManager } from './conflictManager.js';
+import { surveyManager } from './surveyManager.js';   // surveying toolkit (coord readout / control pts / area / import)
+import { portCallManager } from './portCallManager.js';
 import { SkyManager }    from './skyManager.js';
 import { FogManager }    from './fogManager.js';
 import { TrailManager }  from './trailManager.js';
@@ -77,6 +102,7 @@ import { AICopilot, CHOKEPOINTS } from './aiCopilot.js';
 import { DiscoveryManager } from './discoveryManager.js';
 import { ChokepointManager } from './chokepointManager.js';
 import { NavLightManager } from './navLightManager.js';
+import { ClimbRibbonManager } from './climbRibbonManager.js';
 import { TileStreamManager } from './tileStreamManager.js';
 import { tileLoadTester }   from './tileLoadTester.js';
 import { terrainVisualTester } from './terrainVisualTester.js';
@@ -89,11 +115,17 @@ import { IonosphericLayerManager } from './ionosphericLayerManager.js';
 import { BirkelandManager }       from './birkelandManager.js';
 import { IBTrACSManager }         from './ibtracsManager.js';
 import { GpsJammingManager }      from './gpsJammingManager.js';
+import { initTimelineRail }       from './timelineRail.js';   // bottom bezel rail
+import { initTopRail }            from './topRail.js';        // top bezel rail
+import { initRollingRecorder }    from './rollingRecorder.js'; // always-on positional history
+import { vesselInstruments }      from './vesselInstruments.js'; // right-dock drawn readouts
 
-// ── Global ship registry ──────────────────────────────────────────────────────
-// Kept on window so uiController, clusterManager, etc. can reach it without
-// a circular import.
-window.aisShips = [];
+// ── Live entity registry ──────────────────────────────────────────────────────
+// Owned by entityStore.js. This file reads via entityStore.all()/byId/flights();
+// `window.aisShips` remains only as a DEBUG ALIAS to the store's array (same
+// reference), set as a side-effect of importing entityStore above. All mutation
+// goes through entityStore.add/removeById/removeRef.
+// window.aisShips === entityStore.all()   ← same array, kept in sync automatically.
 
 // ── Mutable app state (single source of truth) ────────────────────────────────
 const state = {
@@ -106,20 +138,23 @@ const state = {
     terrainTargetPos:  new THREE.Vector3(),
 };
 
-// ── Altitude → colour (yellow = low, white = cruise, cyan = high) ─────────────
+// ── Altitude → colour ─────────────────────────────────────────────────────────
+// Colours the aircraft's altitude glow + trail by which flight-level BAND it's in,
+// using the canonical FLIGHT.ALT_BANDS taxonomy — so the glow always matches the
+// highlighted deck (altitudeDeckManager) and the Altitude Watch occupancy row.
+// A subtle within-band brightness ramp (dimmer at the band floor, full at its
+// ceiling) preserves a sense of "how high within the band" and removes the old
+// flat-grey cruise dead-band, without breaking the band's colour identity.
 const _altCol = new THREE.Color();
+const _ALT_CEILINGS_FT = FLIGHT.ALT_BANDS.map(b => b.ceilFt);
 function getAltColor(altM) {
-    if (altM < FLIGHT.ALT_LOW_MAX) {
-        return _altCol.set(0xffcc00);
-    } else if (altM < FLIGHT.ALT_MID_MAX) {
-        const t = (altM - FLIGHT.ALT_LOW_MAX) / (FLIGHT.ALT_MID_MAX - FLIGHT.ALT_LOW_MAX);
-        return _altCol.setRGB(1, 0.8 + 0.19 * t, t * 0.94);
-    } else if (altM < FLIGHT.ALT_CRUISE_MAX) {
-        return _altCol.set(0xdde8f0);
-    } else {
-        const t = Math.min(1, (altM - FLIGHT.ALT_CRUISE_MAX) / 4000);
-        return _altCol.setRGB(0.25 + 0.62 * (1 - t), 0.78 + 0.09 * (1 - t), 1.0);
-    }
+    const altFt = altM / 0.3048;
+    const idx   = altitudeBandIndex(altFt, _ALT_CEILINGS_FT);
+    const band  = FLIGHT.ALT_BANDS[idx];
+    const floorFt = idx === 0 ? 0 : FLIGHT.ALT_BANDS[idx - 1].ceilFt;
+    const span    = Number.isFinite(band.ceilFt) ? band.ceilFt - floorFt : 12000;
+    const t       = Math.max(0, Math.min(1, (altFt - floorFt) / span));
+    return _altCol.set(band.color).multiplyScalar(0.78 + 0.22 * t);
 }
 
 // ── Pre-load performance profile ────────────────────────────────────────────
@@ -206,6 +241,11 @@ async function start() {
         bootMark('init() complete');
         bootReport();   // auto-dump the breakdown once the map is up
     } catch (e) {
+        // Keep the failure inspectable from DevTools. A boot error here is caught,
+        // so it never reaches window.onerror, and console hooks installed by an
+        // automation harness typically arm AFTER a fast failure — both of which
+        // made this error effectively invisible while debugging it (2026-07-24).
+        window.__bootError = { msg: e?.message ?? String(e), stack: (e?.stack ?? '') };
         console.error('[VANGUARD] Boot failed:', e);
         const el = document.getElementById('loading-screen');
         if (el) el.innerHTML =
@@ -219,6 +259,7 @@ async function init(mapData) {
     // ── Scene fundamentals ────────────────────────────────────────────────────
     const { scene, clock, camera, renderer, isWebGPU } = await initScene();
     quality.attachRenderer(renderer);   // adaptive pixel ratio (runtime-tuned)
+    hitchRecorder.attachRenderer(renderer);   // frame-spike attribution — window.vg1Hitch
     console.info('[Quality] tier:', quality.tier, quality.auto ? '(auto)' : '(manual)');
     const controls = initControls(camera, renderer, state);
     window.controls = controls;   // expose for camera panel + any UI that needs orbit control
@@ -291,7 +332,7 @@ async function init(mapData) {
     // Re-syncs every live vessel — used when the watchlist-mode toggle flips,
     // since eligibility just changed for a whole set of vessels at once.
     function _syncAllPredictionVisuals() {
-        window.aisShips.forEach(_syncPredictionVisual);
+        entityStore.all().forEach(_syncPredictionVisual);
     }
     window._syncAllPredictionVisuals = _syncAllPredictionVisuals;
 
@@ -307,6 +348,14 @@ async function init(mapData) {
     // alone isn't fast enough to feel responsive.
     function _selectVesselRing(obj, color) {
         const prevTarget = selectionRing.target;
+        // Auto-pick colour when the caller doesn't specify one (watchlist → green,
+        // else cyan) so any code path can just pass the object (2026-07-24).
+        if (color == null) {
+            const mmsi = String(obj?.userData?.id || '');
+            color = window.watchlist?.isWatched?.(mmsi)
+                ? selectionRing.COLOR_WATCHLIST
+                : selectionRing.COLOR_DEFAULT;
+        }
         selectionRing.select(obj, color);
         if (prevTarget && prevTarget !== obj) _syncPredictionVisual(prevTarget);
         _syncPredictionVisual(obj);
@@ -523,7 +572,14 @@ async function init(mapData) {
     // wiring (evaluate() timer + updateVisuals() per frame + alert hookup) is
     // further down, near the other live-data ticks.
     const conflictManager = new ConflictManager(scene);
+    surveyManager.init(scene);   // surveying toolkit group added to the scene
     window.conflictManager = conflictManager;
+
+    // Cargo intelligence, Phase 2 — port-call detection (research/vanguard1-cargo-
+    // intel-spec-2026-07-23.md §5). Pure state tracker, no visuals, so unlike
+    // conflictManager there's no per-frame half — just the timer tick below.
+    // portCallManager is a true singleton (see its own file) — imported, not
+    // instantiated here, so uiController.js can read it directly too.
     // Keep the legacy global name so any console scripts / settings panel
     // built against `window.weatherManager` continue to work — the new manager
     // exposes the same setVisible / setKey / isConnected / getStormData API.
@@ -627,6 +683,10 @@ async function init(mapData) {
     // ── Nav lights (running lights on vessels) ────────────────────────────────
     const navLightManager = new NavLightManager(scene);
 
+    // ── Climb/descent ribbons (vertical-trend tails on aircraft) ──────────────
+    const climbRibbonManager = new ClimbRibbonManager(scene);
+    window.vg1Ribbon = climbRibbonManager;   // toggle live: window.vg1Ribbon.enabled = false
+
     // ── AI Co-Pilot ───────────────────────────────────────────────────────────
     const aiCopilot = new AICopilot();
     // Expose so the copilot-panel inline script can call requestSitrep()
@@ -673,6 +733,12 @@ async function init(mapData) {
         }
     }, CONFLICT.TICK_MS);
 
+    // Port-call detection — timer-driven (see portCallManager.js header), reads
+    // straight off aisManager's live vessel records rather than importing
+    // aisManager into the new module (same "pass data in" convention conflict-
+    // Manager.evaluate() already uses for flightManager.aircraft above).
+    setInterval(() => portCallManager.tick(aisManager.vessels.values()), CARGO.TICK_MS);
+
     // Ship type arrived via the static message → rebuild the vessel with its real
     // class (correct hull shape + colour) instead of the grey OTHER placeholder.
     // Reuses the tested teardown + create paths; runs at most once per vessel.
@@ -684,7 +750,7 @@ async function init(mapData) {
     aisManager.onVesselNew = (mmsi, vesselData) => {
         const obj = createAISVesselObject(vesselData, scene, laneGroup, predGroup);
         vesselData.threeObject = obj;
-        window.aisShips.push(obj);
+        entityStore.add(obj);
 
         // Snap to current lat/lon. Vessels are ALWAYS at sea level relative
         // to the SPLAT SURFACE — which has Earth-curvature applied (see
@@ -704,7 +770,7 @@ async function init(mapData) {
         // shared InstancedMesh set; this writes the initial transform so
         // there's no one-frame flash at the origin (slots start zero-scaled).
         obj.userData.instanceHandle = shipInstancer.spawn(vesselData.class);
-        shipInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible);
+        shipInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible, vesselData.headingDeg, vesselData.renderScale);
 
         // Shadow sits just above the curved splat so it reads as touching
         // the water rather than the flat water plane below it.
@@ -721,6 +787,18 @@ async function init(mapData) {
         obj.userData.destination = vesselData.destination;
         obj.userData.eta         = vesselData.eta;
         obj.userData.imo         = vesselData.imo;
+        // Cargo intelligence, Phase 1 (research/vanguard1-cargo-intel-spec-2026-07-23.md)
+        // — draft-derived fields from aisManager.js's computeCargoEstimate(). null
+        // until a ShipStaticData message has arrived; the detail card renders "—"
+        // for null rather than guessing (uiController.js showVesselDetail()).
+        obj.userData.draughtM    = vesselData.draughtM;
+        obj.userData.maxDraughtM = vesselData.maxDraughtM;
+        obj.userData.loadFactor  = vesselData.loadFactor;
+        obj.userData.ladenState  = vesselData.ladenState;
+        // True-scale rendering — read by the per-frame sync loop's shipInstancer.
+        // update() call further down, which only has ship.userData to work with.
+        obj.userData.lengthM     = vesselData.lengthM;
+        obj.userData.renderScale = vesselData.renderScale;
 
         // Seed position log with first known position
         if (vesselData.latDeg != null && vesselData.lonDeg != null) {
@@ -756,19 +834,24 @@ async function init(mapData) {
             obj.userData.shadowSprite.position.set(sp.x, curveY + 0.04, sp.z);
         }
 
-        // Fixed sideways profile — all vessel figures face east so the hull
-        // length is always visible to the viewer rather than bow-on or stern-on.
-        // (shipInstancer.js bakes this same fixed orientation into its shared
-        // quaternion — this line is now a harmless no-op on the anchor itself,
-        // kept so obj.rotation still reads correctly if anything inspects it.)
-        obj.rotation.y = Math.PI / 2;
+        // Hull orientation now tracks true heading (2026-07-22) — bow points
+        // toward vesselData.headingDeg instead of a fixed broadside-east
+        // profile. See shipInstancer.js header for the PI - hdgRad
+        // convention (matches wakeManager.js's pre-existing documented
+        // convention, so wake direction is correct again too). Kept on the
+        // anchor object itself so obj.rotation still reads correctly if
+        // anything inspects it — shipInstancer.update() below is what
+        // actually drives the rendered hull.
+        obj.rotation.y = (vesselData.headingDeg != null)
+            ? Math.PI - (vesselData.headingDeg * Math.PI / 180)
+            : Math.PI / 2;
 
         // Writes the fresh position into this vessel's instanced hull slot.
         // The per-frame sync loop below also calls this every frame (to catch
         // clusterManager/filter visibility changes that don't go through
         // onVesselUpdate), so this call just avoids a one-frame lag on
         // position when a fresh AIS report lands.
-        shipInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible);
+        shipInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible, vesselData.headingDeg, vesselData.renderScale);
 
         // Push trail sample
         trailManager.pushPosition(obj, sp.x, sp.y, sp.z);
@@ -782,6 +865,13 @@ async function init(mapData) {
         obj.userData.destination  = vesselData.destination;
         obj.userData.eta          = vesselData.eta;
         obj.userData.imo          = vesselData.imo;
+        // Cargo intelligence, Phase 1 — see matching comment in onVesselNew above.
+        obj.userData.draughtM     = vesselData.draughtM;
+        obj.userData.maxDraughtM  = vesselData.maxDraughtM;
+        obj.userData.loadFactor   = vesselData.loadFactor;
+        obj.userData.ladenState   = vesselData.ladenState;
+        obj.userData.lengthM      = vesselData.lengthM;
+        obj.userData.renderScale  = vesselData.renderScale;
 
         // ── Dead-reckoning line + projected-point marker ─────────────────────
         // Geometry/visibility recomputed from the fresh position + userData
@@ -813,9 +903,8 @@ async function init(mapData) {
 
     aisManager.onVesselRemove = (mmsi) => {
         integrityManager.remove(mmsi);
-        const idx = window.aisShips.findIndex(s => s.userData.id === mmsi);
-        if (idx === -1) return;
-        const obj = window.aisShips[idx];
+        const obj = entityStore.byId(mmsi);
+        if (!obj) return;
         trailManager.unregister(obj);
         // Releases this vessel's instanced-rendering slot — without this an
         // unused slot would sit degenerate-scaled forever (leaked) instead
@@ -851,7 +940,7 @@ async function init(mapData) {
         }
         laneGroup.remove(obj);
         scene.remove(obj);
-        window.aisShips.splice(idx, 1);
+        entityStore.removeRef(obj);
     };
 
     aisManager.onVesselDark = (mmsi, vesselData) => {
@@ -975,7 +1064,7 @@ async function init(mapData) {
     flightManager.onAircraftNew = (icao24, data) => {
         const obj = createFlightObject(data, scene, laneGroup);
         data.threeObject = obj;
-        window.aisShips.push(obj);
+        entityStore.add(obj);
 
         const sp = lonLatAltToScene(data.lonDeg, data.latDeg, data.altMeters);
         obj.position.set(sp.x, sp.y, sp.z);
@@ -1024,12 +1113,11 @@ async function init(mapData) {
             // Releases the old instanced-rendering slot, trail, altitude
             // glow, and emergency ring — see _disposeFlightObject above.
             _disposeFlightObject(obj);
-            const idx = window.aisShips.indexOf(obj);
-            if (idx !== -1) window.aisShips.splice(idx, 1);
+            entityStore.removeRef(obj);
 
             obj = createFlightObject(data, scene, laneGroup);
             data.threeObject = obj;
-            window.aisShips.push(obj);
+            entityStore.add(obj);
             obj.userData.instanceHandle = aircraftInstancer.spawn(data.aircraftClass);
             data.aircraftBodyColor = getAircraftBodyColor(data.callsign, data.aircraftClass);
             data.aircraftTailColor = getAircraftTailColor(data.callsign, data.aircraftClass);
@@ -1095,7 +1183,7 @@ async function init(mapData) {
         // verticalRateMs (climb/descent, m/s) — flightManager.js computes this
         // from the altitude delta since the last poll (see _handleData). Mirrored
         // into userData so other modules (Altitude Watch panel, uiController.js)
-        // can read it off window.aisShips without needing a flightManager
+        // can read it off entityStore.all() without needing a flightManager
         // reference of their own — same pattern as every other aircraft field here.
         obj.userData.verticalRateMs = data.verticalRateMs;
         // Registration/type/operator are effectively static per-aircraft, but
@@ -1134,11 +1222,10 @@ async function init(mapData) {
 
         // Rebuild shape — identical to the reclassification block in onAircraftUpdate
         _disposeFlightObject(obj);
-        const idx2 = window.aisShips.indexOf(obj);
-        if (idx2 !== -1) window.aisShips.splice(idx2, 1);
+        entityStore.removeRef(obj);
         obj = createFlightObject(data, scene, laneGroup);
         data.threeObject = obj;
-        window.aisShips.push(obj);
+        entityStore.add(obj);
         obj.userData.instanceHandle = aircraftInstancer.spawn(data.aircraftClass);
         data.aircraftBodyColor = getAircraftBodyColor(data.callsign, data.aircraftClass);
         data.aircraftTailColor = getAircraftTailColor(data.callsign, data.aircraftClass);
@@ -1159,16 +1246,15 @@ async function init(mapData) {
         // mid-flight" event, not a normal landing.
         flightIntegrityManager.markDark(icao24); // analytical signal, not a verdict
         emergencyAlerted.delete(icao24);
-        const idx = window.aisShips.findIndex(s => s.userData.id === icao24);
-        if (idx === -1) return;
-        const obj = window.aisShips[idx];
+        const obj = entityStore.byId(icao24);
+        if (!obj) return;
         const callsign = obj.userData.displayName || icao24;
         window.alertsManager?.addAlert({
             type: 'AIRCRAFT_LOST_SIGNAL', mmsi: icao24, vesselName: callsign,
             message: `${callsign} signal lost mid-flight (no ground report)`,
         });
         _disposeFlightObject(obj);
-        window.aisShips.splice(idx, 1);
+        entityStore.removeRef(obj);
     };
 
     // Fires when the feed explicitly reports the aircraft on the ground —
@@ -1178,16 +1264,15 @@ async function init(mapData) {
     flightManager.onAircraftLanded = (icao24, data) => {
         flightIntegrityManager.remove(icao24); // landed cleanly — no DARK penalty, just drop the record
         emergencyAlerted.delete(icao24);
-        const idx = window.aisShips.findIndex(s => s.userData.id === icao24);
-        if (idx === -1) return;
-        const obj = window.aisShips[idx];
+        const obj = entityStore.byId(icao24);
+        if (!obj) return;
         const callsign = obj.userData.displayName || icao24;
         window.alertsManager?.addAlert({
             type: 'AIRCRAFT_LANDED', mmsi: icao24, vesselName: callsign,
             message: `${callsign} landed`,
         });
         _disposeFlightObject(obj);
-        window.aisShips.splice(idx, 1);
+        entityStore.removeRef(obj);
     };
 
     // Bind managers to AI copilot (must happen after both are constructed)
@@ -1234,7 +1319,7 @@ async function init(mapData) {
 
         // Always try to find the 3D object — even if vessel dropped off live feed
         // the Three.js mesh may still be in the scene (not yet GC'd)
-        const obj = window.aisShips.find(s => String(s.userData.id) === String(mmsi));
+        const obj = entityStore.all().find(s => String(s.userData.id) === String(mmsi));
         if (obj) {
             const ringColor = window.watchlist?.isWatched(mmsi)
                 ? selectionRing.COLOR_WATCHLIST
@@ -1298,7 +1383,7 @@ async function init(mapData) {
         // Dead-reckoning eligibility for this vessel just changed (added to or
         // removed from the watchlist) — resync its line/marker if it has a
         // live 3D object, regardless of whether it's currently selected.
-        const changedObj = window.aisShips.find(s => String(s.userData.id) === String(e.detail.mmsi));
+        const changedObj = entityStore.all().find(s => String(s.userData.id) === String(e.detail.mmsi));
         if (changedObj) _syncPredictionVisual(changedObj);
     });
 
@@ -1324,17 +1409,14 @@ async function init(mapData) {
     //   simClock.setTime(...) / setRate(...) / pause() / goLive()
     const aisRecorder = new AISRecorder();
 
-    // ── RF Intelligence domain (Phase 1) ──────────────────────────────────────
-    // RF INTEL feed panel. (Distress-beacon visuals + detector removed.)
-    initRFIntelPanel({
-        flyTo: (lat, lon) => {
-            const p = lonLatToScene(lon, lat);
-            controls.target.set(p.x, 0, p.z);
-            camera.position.set(p.x, 38, p.z + 26);
-            controls.update();
-        }
-    });
-    // AIS Integrity triage board — same fly-to pattern as the RF panel.
+    // ── RF Intelligence domain — REMOVED 2026-07-23 ───────────────────────────
+    // The RF intel panel had no live detector wired to it (the only detector,
+    // rfEmergencyBeaconManager, was never imported; gpsJammingManager is a separate
+    // static map layer that doesn't feed it), so it was structurally incapable of
+    // producing anything but "no events". Removed rather than left as dead UI.
+    // discoveryManager's window.rfIntel read is guarded and degrades to [].
+
+    // AIS Integrity triage board — fly-to pattern (formerly shared with the RF panel).
     initIntegrityBoard({
         flyTo: (lat, lon) => {
             const p = lonLatToScene(lon, lat);
@@ -1344,7 +1426,7 @@ async function init(mapData) {
         }
     });
     // Altitude Watch — replaces the removed full-map altitude-deck grid.
-    // Same fly-to pattern as Integrity/RF; reads window.aisShips on its own
+    // Same fly-to pattern as Integrity/RF; reads entityStore.all() on its own
     // 2s interval, no flightManager reference needed.
     initAltitudeWatch({
         flyTo: (lat, lon) => {
@@ -1366,8 +1448,26 @@ async function init(mapData) {
     const _zoneAisTap  = zoneRecorder.aisTap();
     const _zoneFltTap  = zoneRecorder.flightTap();
 
+    // Always-on positional history so scrubbing the timeline rewinds vessels
+    // instead of only re-lighting them. Attached as a THIRD tap on the same
+    // chain — onRawMessage is a single slot, so every consumer has to be
+    // composed here rather than assigning it.
+    const rollingRecorder = initRollingRecorder(aisManager);
+    const _rollTap = rollingRecorder.tap();
+
     const _recTap = aisRecorder.tap();
-    aisManager.onRawMessage = (msg) => { _recTap(msg); _zoneAisTap(msg); };
+    aisManager.onRawMessage = (msg) => { _recTap(msg); _zoneAisTap(msg); _rollTap(msg); };
+
+    // Attach as a SOURCE too, so its _tick drives playback and, via
+    // aisManager.hasTimeBackedSource(), the timeline badge flips LIGHTING ONLY
+    // → REPLAY exactly when the buffer can actually answer for the scrubbed
+    // time — never merely because a recorder exists.
+    aisManager.attachSource(rollingRecorder);
+
+    // The dock's reporting-trace instrument reads its per-vessel history from
+    // the same buffer — the gaps in the sample series ARE the reporting gaps,
+    // so no separate gap tracking exists to drift out of sync with it.
+    vesselInstruments().setHistorySource(rollingRecorder);
     flightManager.onRawAircraft = (state) => { _zoneFltTap(state); };
 
     // DevTools quick reference:
@@ -1427,7 +1527,7 @@ async function init(mapData) {
         ssaoPass, bloomPass, bokehPass,
         camera, controls,
         stateRef:       state,
-        aisShipsRef:    window.aisShips,
+        aisShipsRef:    entityStore.all(),
         scene,
         dayNightManager,
         predGroup,
@@ -1454,7 +1554,7 @@ async function init(mapData) {
     const inputDeps = {
         mouse, raycaster, camera, controls,
         boardPlane, hoverReticle, tooltipEl,
-        aisShips: window.aisShips,
+        aisShips: entityStore.all(),
         stateRef: state,
         // Getter so onClick / onDoubleClick can check interaction state
         hasInteracted: () => _userHasInteracted,
@@ -1470,7 +1570,247 @@ async function init(mapData) {
     window.addEventListener('wheel',       _markInteracted, { once: true });
     window.addEventListener('keydown',     _markInteracted, { once: true });
 
-    window.addEventListener('resize',    () => { onWindowResize(camera, renderer, composer); waveFieldLayer.onResize(window.innerWidth, window.innerHeight); });
+    // Resize is driven by viewport (ResizeObserver on #canvas-container), NOT by
+    // window 'resize'. Opening or closing the selection dock changes the map size
+    // without any window resize event firing at all — a window listener would
+    // leave camera aspect, composer targets and every Line2 resolution uniform
+    // stale until the user happened to drag the browser window.
+    // viewport debounces, so this runs once at the end of a layout transition
+    // rather than ~17× across it (the post chain reallocates 7 passes each time).
+    viewport.onChange((w, h) => {
+        onWindowResize(camera, renderer, composer, vTiltShiftPass, hTiltShiftPass);
+        waveFieldLayer.onResize();   // reads viewport buffer dims itself
+
+        // ── SAFETY NET: every LineMaterial.resolution in the scene ──────────
+        // Line2/LineSegments2 express linewidth in DRAWING-BUFFER pixels, so a
+        // stale `resolution` renders lines at the wrong thickness — silently, no
+        // error. Managers keep their own handlers, but relying on each manager to
+        // remember is how this broke: gfsUpperWindManager had NO resize handling
+        // at all, and beaufort's only ran on rebuild. Both were found by auditing
+        // the live scene, not by reading code.
+        //
+        // A single authoritative sweep makes the invariant global — it catches any
+        // manager that forgets, and any material created before a later resize.
+        // Cost is a scene.traverse on resize only (window resize, chrome-mode
+        // change, runtime pixel-ratio nudge), never per frame.
+        const _bw = viewport.bufferWidth(), _bh = viewport.bufferHeight();
+        const _fix = (m) => { if (m && m.resolution && m.resolution.set) m.resolution.set(_bw, _bh); };
+        scene.traverse(o => {
+            if (!o.material) return;
+            if (Array.isArray(o.material)) o.material.forEach(_fix); else _fix(o.material);
+        });
+    });
+
+    // Chrome mode — 'legacy' (default, pre-bezel look) | 'operate' | 'inspect' | 'cinema'.
+    // Exposed as a debug handle only (Tier 3); the real driver will be selection
+    // state and directorManager once the rails exist.
+    //
+    // The insets SNAP (no CSS transition — see index.html for why), so one frame
+    // is enough for layout to settle. Measuring on the second rAF rather than the
+    // first guarantees we read AFTER style recalc + layout, not during it: a
+    // measure taken mid-recalc caches a stale rect that nothing later corrects,
+    // which is exactly what happened while the transition was in place.
+    // ── Left bezel rail: tools ───────────────────────────────────────────────
+    // 21 toolbar buttons regrouped into 5 rail entries + a theatre menu.
+    //
+    // Buttons are MOVED, never recreated. Event listeners are bound to the
+    // element, so relocating the node carries every existing handler with it and
+    // nothing else in the codebase needs rewiring. Recreating them would have
+    // meant re-finding and re-binding 21 handlers spread across several files.
+    //
+    // Grouped by INTENT rather than feature name — that is what collapses 21
+    // into 5, and it immediately exposed that ⬡ Vanguard Panel and SYS Central
+    // System were two buttons opening the identical panel.
+    {
+        const $ = (id) => document.getElementById(id);
+
+        const GROUPS = {
+            'lrf-layers': [
+                ['layers-toggle',         'Map Layers'],
+                ['vanguard-toggle',       'Layer Controls'],
+                ['weather-toggle',        'GFS Wind Field'],
+                ['altitude-watch-toggle', 'Altitude Watch'],
+                ['legend-toggle',         'Marker Legend'],
+            ],
+            'lrf-find': [
+                ['sector-search-toggle',  'Sector Search   /'],
+                ['asset-search-toggle',   'Asset Search'],
+                ['city-list-toggle',      'Global Cities'],
+            ],
+            'lrf-measure': [
+                ['measure-toggle',        'Distance / Bearing'],
+                ['survey-toggle',         'Survey · control points'],
+            ],
+            'lrf-settings': [
+                ['settings-toggle',       'System Configuration'],
+                ['camera-toggle',         'Camera Controls'],
+                ['btn-fov',               'Camera Projection'],
+            ],
+        };
+        // Destinations, not tools — these go on the THEATRE label instead.
+        const THEATRE = [
+            ['btn-home', 'Global overview'],
+            ['btn-na',   'North America'],
+            ['btn-eu',   'Europe / Atlantic'],
+            ['btn-as',   'Pacific / Asia'],
+            ['btn-me',   'Middle East / Gulf'],
+        ];
+
+        // Deliberately NOT relocated: btn-zoom-in / btn-zoom-out. Zoom is
+        // continuous input and the scroll wheel already does it better; a click
+        // target that fires one discrete step is strictly worse than the gesture
+        // that exists. They stay in the hidden toolbar husk.
+        //
+        // Also dropped: central-system-toggle — an exact duplicate of
+        // vanguard-toggle (both call the same setVisible on #ui-layer). Its
+        // listener uses optional chaining, so leaving it behind is harmless.
+
+        const moveInto = (hostId, entries) => {
+            const host = $(hostId);
+            if (!host) return 0;
+            let n = 0;
+            for (const [btnId, label] of entries) {
+                const btn = $(btnId);
+                if (!btn) continue;
+                // Some of these carried their own text ("✈ ALT. WATCH",
+                // "📏 MEASURE", "⊹ SURVEY") because an icon-only grid had no
+                // room for a caption. The row supplies a proper label now, so
+                // the button is reduced to its leading glyph — otherwise the
+                // old caption overflows its 20px slot and collides with the new
+                // one. Array.from avoids splitting surrogate pairs (📏).
+                const raw = (btn.textContent || '').trim();
+                const chars = Array.from(raw);
+                if (chars.length > 3 && /[^\x00-\x7F]/.test(chars[0])) {
+                    btn.textContent = chars[0];
+                }
+
+                const row = document.createElement('div');
+                row.className = 'lr-row';
+                row.appendChild(btn);                       // MOVE — listeners intact
+                const lb = document.createElement('span');
+                lb.className = 'lr-label';
+                lb.textContent = label;
+                row.appendChild(lb);
+                // Clicking anywhere on the row hits the button: a 218px-wide
+                // target instead of a 20px glyph.
+                row.addEventListener('click', (e) => { if (e.target !== btn) btn.click(); });
+                host.appendChild(row);
+                n++;
+            }
+            return n;
+        };
+
+        let moved = 0;
+        for (const [hostId, entries] of Object.entries(GROUPS)) moved += moveInto(hostId, entries);
+        moved += moveInto('theatre-menu', THEATRE);
+        console.info(`[LeftRail] relocated ${moved} controls into 5 groups + theatre menu`);
+
+        // One flyout open at a time. Click-latched, not hover: several of these
+        // open panels, and panels should not appear because a pointer passed by.
+        const flyouts = [...document.querySelectorAll('.lr-flyout')];
+
+        // Panels the relocated buttons open. Closing these on an outside click
+        // goes through THEIR OWN toggle button rather than setting display:none
+        // directly — each toggle also maintains an .active class on itself, and
+        // hiding the panel behind its back leaves the button lit with nothing
+        // open, which then takes two clicks to reopen.
+        const PANELS = [
+            ['layers-panel',          'layers-toggle'],
+            ['legend-panel',          'legend-toggle'],
+            ['camera-panel',          'camera-toggle'],
+            ['settings-panel',        'settings-toggle'],
+            ['city-list-panel',       'city-list-toggle'],
+            ['altitude-watch-panel',  'altitude-watch-toggle'],
+            ['ui-layer',              'vanguard-toggle'],
+        ];
+        const closePanels = () => {
+            for (const [panelId, btnId] of PANELS) {
+                const p = $(panelId), b = $(btnId);
+                if (!p || !b) continue;
+                if (getComputedStyle(p).display !== 'none') b.click();
+            }
+        };
+
+        const closeAll = (except) => {
+            flyouts.forEach(f => {
+                if (f === except) return;
+                f.classList.remove('open');
+                $(f.dataset.for)?.setAttribute('aria-expanded', 'false');
+            });
+            if (except == null) {
+                document.body.classList.remove('archive-open');
+                $('lr-archive')?.setAttribute('aria-expanded', 'false');
+            }
+        };
+
+        flyouts.forEach(f => {
+            const btn = $(f.dataset.for);
+            if (!btn) return;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();          // don't trip the outside-click handler
+                const willOpen = !f.classList.contains('open');
+                closeAll(null);               // also clears archive
+                f.classList.toggle('open', willOpen);
+                btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+                if (willOpen) f.style.top = `${btn.offsetTop}px`;
+            });
+        });
+
+        // Outside click closes EVERYTHING the rail put on screen: the flyout,
+        // the archive panel, and any panel a flyout row opened. Clicks inside a
+        // flyout or inside an open panel are not "outside".
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('#left-rail')) return;
+            if (e.target.closest('#archive-panel')) return;
+            if (PANELS.some(([pid]) => e.target.closest('#' + pid))) return;
+            closeAll(null);
+            closePanels();
+        });
+
+        // Escape closes the same set — faster than aiming at empty map.
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return;
+            closeAll(null);
+            closePanels();
+        });
+
+        const lrArchive = $('lr-archive');
+        lrArchive?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const willOpen = !document.body.classList.contains('archive-open');
+            closeAll(null);
+            document.body.classList.toggle('archive-open', willOpen);
+            lrArchive.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+        });
+
+        // Keep the icon honest about capture state even while the flyout is
+        // shut — a recording running behind a closed panel is exactly the kind
+        // of thing that should not be invisible.
+        setInterval(() => {
+            if (!lrArchive) return;
+            const st = window.vg1ZoneRec?.status?.();
+            const rec = st?.state === 'RECORDING' || window.vg1Scenario?.recorder?.active;
+            lrArchive.classList.toggle('lr-recording', !!rec);
+        }, 1000);
+    }
+
+    // ── Bottom bezel rail: sim-clock transport + scrub ───────────────────────
+    // Declared BEFORE vg1Chrome so the closure below can never hit a temporal
+    // dead zone. Hidden in 'legacy' (the default), so this is inert until the
+    // bezel is switched on.
+    const timelineRail = initTimelineRail({ aisManager });
+    const topRail      = initTopRail();
+
+    window.vg1Chrome = (mode) => {
+        document.body.dataset.chrome = mode;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            viewport.measure();
+            timelineRail?.update(true);   // rails may have just become visible
+            topRail?.update(true);
+        }));
+        return mode;
+    };
+
     window.addEventListener('mousemove', e => onMouseMove(e, inputDeps), false);
 
     // ── Click / dblclick on the CANVAS only ──────────────────────────────────
@@ -1552,7 +1892,7 @@ async function init(mapData) {
         let _activeFilter = 'ALL';
 
         function _applyVesselFilter(filter) {
-            window.aisShips.forEach(ship => {
+            entityStore.all().forEach(ship => {
                 const ud     = ship.userData;
                 const isDark = ud.isDark === true;
 
@@ -1588,7 +1928,7 @@ async function init(mapData) {
             // Dead-reckoning line/marker: independent of the class filter, EXCEPT
             // a filtered-out vessel shouldn't show its line even if selected —
             // re-sync everyone so _classHidden (just updated above) takes effect.
-            window.aisShips.forEach(ship => {
+            entityStore.all().forEach(ship => {
                 if (ship.userData._classHidden) {
                     if (ship.userData.predictionLine)   ship.userData.predictionLine.visible = false;
                     if (ship.userData.predictionMarker) ship.userData.predictionMarker.visible = false;
@@ -1650,7 +1990,14 @@ async function init(mapData) {
     const layerCoordinator = new LayerCoordinator(tileStreamManager, gsManager);
     window.layerCoordinator = layerCoordinator;
     tileStreamManager.enabled = true;        // multi-level LOD: zoom 6 @ y<200, zoom 8 @ y<120, zoom 10 @ y<50
-    window.tileStream = tileStreamManager;   // console access
+    window.tileStream = tileStreamManager;
+    // ── Background tile warmer (2026-07-25) ──────────────────────────────────
+    // Uses idle time to pre-build tiles around visited places into the geometry
+    // cache, so revisits load instantly (the warm-dive effect, measured 231/231
+    // tiles at first sample). Worst-priority everywhere: live loading always wins.
+    // Console: vg1Warmer.stats, vg1Warmer.warmNow(lon, lat)
+    const tileWarmer = new TileWarmer(tileStreamManager._caches);
+    window.vg1Warmer = tileWarmer;   // console access
     window.vg1TileTest = tileLoadTester;     // console: await vg1TileTest.run() — see tileLoadTester.js
     window.vg1VisualTest = terrainVisualTester;   // console: await vg1VisualTest.run() — see terrainVisualTester.js
 
@@ -1665,9 +2012,45 @@ async function init(mapData) {
     // ── Splat shader uniforms (shorthand) ─────────────────────────────────────
     const splatUniforms = splatCloud.material.uniforms;
 
+    // ── Pixel ratio → composer + splat shader (2026-07-24) ───────────────────
+    // Registered HERE, after splatUniforms exists, not up with the other window
+    // listeners: `const splatUniforms` is in its temporal dead zone until this
+    // line, so a listener declared earlier would throw a ReferenceError if a
+    // pixel-ratio change landed during init.
+    //
+    // Two consumers, both of which silently no-op'd before this existed:
+    //  1. EffectComposer stores renderer.getPixelRatio() ONCE in its constructor
+    //     and multiplies every setSize() by that copy. renderer.setPixelRatio()
+    //     alone resized the canvas while the whole post chain kept shading at the
+    //     original resolution — a resample with none of the cost change.
+    //  2. The splat shader sets gl_PointSize in DEVICE pixels from constants tuned
+    //     at dpr=1, so without the ratio its points shrink on screen as resolution
+    //     rises — the cloud opens gaps and reads darker/sparser instead of sharper.
+    //     (three's own PointsMaterial handles this internally, which is why the
+    //     tile-stream point layers never needed it.)
+    // qualityManager owns pixel ratio and announces changes; it must not know
+    // about either of these, so they follow the event here.
+    window.addEventListener('vg1:pixelRatioChanged', (e) => {
+        const pr = e?.detail?.pixelRatio;
+        if (!(pr > 0)) return;
+        composer.setPixelRatio(pr);          // resizes rt1/rt2 AND every pass
+        // Keep viewport's cached pixel cap in step, so bufferWidth/Height (used
+        // for Line2 resolution uniforms) tracks the runtime FPS monitor's nudges.
+        viewport.setPixelCap(pr);
+        waveFieldLayer.onResize();   // reads viewport buffer dims itself
+        if (splatUniforms.uPixelRatio) splatUniforms.uPixelRatio.value = pr;
+    });
+    // Sync once now: attachRenderer() fired its event long before this listener
+    // (and before the splat cloud existed), so the current ratio is unobserved.
+    {
+        const pr0 = quality.currentPixelRatio();
+        composer.setPixelRatio(pr0);
+        if (splatUniforms.uPixelRatio) splatUniforms.uPixelRatio.value = pr0;
+    }
+
     // ── Dynamic status board ──────────────────────────────────────────────────
     // Updates "ON-SCREEN ASSETS" every 500 ms using a THREE.Frustum cull of
-    // window.aisShips. Adds `.scanning` to .hud-panel while camera is moving.
+    // entityStore.all(). Adds `.scanning` to .hud-panel while camera is moving.
     // NOTE: Threat level logic removed — threat strip was placeholder content
     // with no real data source. Will be replaced by the Alerts system.
     {
@@ -1709,7 +2092,7 @@ async function init(mapData) {
             camera.updateMatrixWorld();
 
             let total = 0;
-            const ships = window.aisShips;
+            const ships = entityStore.all();
             for (let i = 0, n = ships.length; i < n; i++) {
                 if (!ships[i].visible) continue;
                 _ndcScratch.setFromMatrixPosition(ships[i].matrixWorld);
@@ -1821,7 +2204,7 @@ async function init(mapData) {
         }
 
         if (!mmsi) return;
-        const ship = window.aisShips.find(s => String(s.userData.mmsi ?? s.userData.id) === String(mmsi));
+        const ship = entityStore.all().find(s => String(s.userData.mmsi ?? s.userData.id) === String(mmsi));
         if (ship) {
             _edgeTargets.set(String(mmsi), { ship, color, label });
         }
@@ -1829,7 +2212,10 @@ async function init(mapData) {
 
     // NDC project + edge-clamp helper
     const _ndcVec          = new THREE.Vector3();
-    const _lockTargetGround = new THREE.Vector3(); // scratch for locked-ship ground pivot
+    const _lockTargetGround = new THREE.Vector3(); // scratch: locked-ship ground pivot
+    let   _prevLockedShip   = null;                // detects lock changes (drives ring + follow seed)
+    const _followPrevPos    = new THREE.Vector3(); // locked vessel's position last frame (chase-cam)
+    const _followDelta      = new THREE.Vector3(); // per-frame vessel movement, applied to camera + pivot
     function _projectToEdge(worldPos, vpW, vpH) {
         _ndcVec.copy(worldPos).project(camera);
         // On screen when all NDC coords are in [-1, 1] and in front (z <= 1)
@@ -1888,7 +2274,7 @@ async function init(mapData) {
             let totalVisible  = 0;
             let darkCount     = 0;
 
-            const ships = window.aisShips;
+            const ships = entityStore.all();
             for (let i = 0; i < ships.length; i++) {
                 const s = ships[i];
                 if (!_sitFrustum.containsPoint(s.position)) continue;
@@ -1935,6 +2321,12 @@ async function init(mapData) {
     function animate() {
         requestAnimationFrame(animate);
 
+        // FIRST thing in the frame: measure the gap since the previous frame and,
+        // if it was a stall, snapshot which cumulative counters moved across it.
+        // Cheap on normal frames by design (see hitchRecorder.js). Placed above the
+        // FPS-cap early-return on purpose — a skipped frame is still a real gap.
+        hitchRecorder.frame();
+
         // ── FPS cap (runtime frame limiter) ───────────────────────────────────
         // quality.fpsCap() = 0 means uncapped (run at display refresh). Otherwise
         // skip frames to hold the target. Can't exceed the monitor's refresh rate.
@@ -1945,7 +2337,18 @@ async function init(mapData) {
             _lastRenderMs = _nowMs;
         }
 
-        const delta   = clock.getDelta();
+        // Clamp delta so a backgrounded/throttled tab (alt-tab, screen lock, a
+        // long GC pause) can't hand a multi-second delta to the next frame.
+        // Every per-frame dead-reckoning step in this app (flightManager.js's
+        // aircraft position extrapolation, wake/trail updates, etc.) scales
+        // distance by delta, so an unclamped spike overshoots an aircraft way
+        // past its real position — then the next live poll's correction back
+        // to GPS truth visibly snaps it backward. 0.1s (~6 frames at 60fps) is
+        // generous for normal frame-rate variance but short enough that no
+        // single frame can extrapolate more than a fraction of a second of
+        // travel. `elapsed` is left unclamped — it's an absolute clock reading
+        // used for shader/animation phase, not a per-frame integration step.
+        const delta   = Math.min(clock.getDelta(), 0.1);
         const elapsed = clock.getElapsedTime();
 
         // ── FPS + frame-time update (once per second) ─────────────────────────
@@ -1957,27 +2360,97 @@ async function init(mapData) {
             const ms   = (_fpsDt / _fpsFrames).toFixed(1);
             if (_fpsEl) {
                 _fpsEl.textContent = _fpsValue;
-                _fpsEl.style.color = _fpsValue >= 50 ? '#40c4ff'
-                                   : _fpsValue >= 30 ? '#f5a623'
-                                   : '#ff4444';
+                // Bezel token palette, not the legacy cyan/amber/red. Healthy is
+                // NEUTRAL — a good frame rate is not news and should not glow.
+                // Colour appears only as it degrades, and the bad case reuses
+                // the single anomaly hue rather than adding a third near-red
+                // (#ff4444 vs --vg-anomaly #ff2d6f were duplicates of intent).
+                _fpsEl.style.color = _fpsValue >= 50 ? 'var(--vg-text-hi)'
+                                   : _fpsValue >= 30 ? 'var(--vg-degraded)'
+                                   : 'var(--vg-anomaly)';
             }
             if (_msEl) _msEl.textContent = ms + ' ms';
+            topRail?.sample(parseFloat(ms));   // feeds the frame-time sparkline
             _fpsFrames = 0;
             _fpsLast   = _fpsNow;
         }
 
         controls.update();
 
-        // ── Deep-dive terrain collision (2026-07-13 near-plane surgery) ──────
-        // With the camera floor at street scale, the camera can dive INTO
-        // mountains. Clamp above the sampled ground. exag=650 is the worker's
-        // steepest divisor, so this over-estimates peak height slightly —
-        // erring the camera HIGH, never inside rock.
+        // Warmer: throttled internally; only acts when idle. Records a visit
+        // when the camera is low so warming targets real usage. Guarded — during
+        // early boot frames the warmer may not be constructed yet.
+        if (window.vg1Warmer) {
+            window.vg1Warmer.tick(camera);
+            if (camera.position.distanceTo(controls.target) < 3.0) {
+                const _wlon = controls.target.x / (300 / 360);
+                const _wmy  = -controls.target.z / (300 / (2 * Math.PI));
+                const _wlat = (2 * Math.atan(Math.exp(_wmy)) - Math.PI / 2) * 180 / Math.PI;
+                window.vg1Warmer.recordVisit(_wlon, _wlat);
+            }
+        }
+
+        // ── Ground-following orbit pivot + terrain collision ─────────────────
+        // Rewritten 2026-07-25. TWO bugs lived here and together they made
+        // close-zoom 3D unusable ("I can't really interact with the map in 3d"):
+        //
+        //  1. controls.target.y was pinned at 0 — SEA LEVEL — while the land you
+        //     were looking at sat above it. OrbitControls places the camera at
+        //     target + dist·(spherical), so orbiting over a mountain pivoted
+        //     around a point buried INSIDE that mountain, and tilting drove the
+        //     camera down into the ground rather than around the terrain.
+        //
+        //  2. This clamp measured the ground with `/650`, the BASE SPLAT CLOUD's
+        //     exaggeration — but at close zoom the surface on screen is the TILE
+        //     stream, which uses `/2000` (see elevToSceneY). Same mountain, ~3×
+        //     the height. Over 3000m terrain the clamp forced camera.y ≥ 1.04
+        //     while the visible tile surface was at 0.30; with minDistance 1.15
+        //     that capped tilt at ~25° off vertical. That was the actual lock.
+        //
+        // Moving the TARGET (not the camera) is the load-bearing part: OrbitControls
+        // recomputes camera.position from its stored spherical offset on every
+        // update(), so a direct write to camera.position.y is silently discarded
+        // next frame. The old clamp was fighting the controller and losing —
+        // which is why the symptom felt like sticky, unresponsive tilt rather
+        // than a hard limit. Shifting target and camera by the SAME delta leaves
+        // the spherical untouched, so the controller never fights back.
+        {
+            // Engage only where it matters. Above PIVOT_HI the pivot stays at
+            // sea level, so world and regional views are bit-for-bit unchanged.
+            const PIVOT_HI = 8.0, PIVOT_LO = 3.0;
+            const engage = THREE.MathUtils.clamp(
+                (PIVOT_HI - camera.position.y) / (PIVOT_HI - PIVOT_LO), 0, 1);
+            const t = controls.target;
+
+            let wantY = 0;
+            if (engage > 0) {
+                const hM = getTrueElevation(t.x, t.z);
+                wantY = (elevToSceneY(Math.max(0, hM)) + curveOffset(t.x, t.z)) * engage;
+            }
+            // Lerp, never snap: getTrueElevation is a nearest-texel DEM read on a
+            // coarse grid, so panning across it STEPS. Assigning directly would
+            // jolt the camera every time the pivot crossed a texel boundary.
+            const newY = THREE.MathUtils.lerp(t.y, wantY, Math.min(1, delta * 4));
+            camera.position.y += (newY - t.y);   // shift both — spherical unchanged
+            t.y = newY;
+        }
+
+        // Safety net for paths that set camera.position directly (director moves,
+        // transitions) or outrun the pivot lerp on a steep slope. Same transform
+        // as the tiles, so it can no longer disagree with what's drawn.
+        //
+        // NOTE: the old /650 sampling doubled as slop against the DEM being
+        // nearest-texel — a peak between texels reads low. Using the honest
+        // transform gives that up, so CLEARANCE carries it explicitly instead of
+        // hiding inside a 3× error. If the camera ever clips a sharp ridge,
+        // raise CLEARANCE — do not reintroduce the wrong divisor.
         if (camera.position.y < 6) {
-            const hM     = getTrueElevation(camera.position.x, camera.position.z);
-            const dist2  = (camera.position.x / 300) ** 2 + (camera.position.z / 300) ** 2;
-            const groundY = (Math.max(0, hM) / 650) * TERRAIN_VERTICAL_SCALE - dist2 * 20 + 0.12;
-            if (camera.position.y < groundY) camera.position.y = groundY;
+            const CLEARANCE = 0.10;
+            const hM = getTrueElevation(camera.position.x, camera.position.z);
+            const floorY = elevToSceneY(Math.max(0, hM))
+                         + curveOffset(camera.position.x, camera.position.z)
+                         + CLEARANCE;
+            if (camera.position.y < floorY) camera.position.y = floorY;
         }
 
         // ── Altitude-dynamic near plane (2026-07-13 near-plane surgery) ──────
@@ -2185,7 +2658,7 @@ async function init(mapData) {
         selectionRing.tick(delta, elapsed);
 
         // ── Cluster LOD ───────────────────────────────────────────────────────
-        clusterManager.tick(window.aisShips, camera, elapsed);
+        clusterManager.tick(entityStore.all(), camera, elapsed);
 
         // ── Real-AIS hull sync (instanced rendering) ──────────────────────────
         // Ships, unlike aircraft, snap directly to each fresh AIS position in
@@ -2196,10 +2669,21 @@ async function init(mapData) {
         // onVesselReappear all toggle ship.visible directly. Placed AFTER
         // clusterManager.tick() so same-frame zoom-threshold visibility
         // changes are picked up immediately instead of lagging a frame.
-        for (let i = 0, n = window.aisShips.length; i < n; i++) {
-            const ship = window.aisShips[i];
+        // Altitude-aware vessel sizing (2026-07-25). One call per frame ahead of
+        // the sweep; shipInstancer applies it per vessel using each one's distance.
+        // Without this the fleet keeps its fixed ~192x exaggeration, which reads as
+        // 38km-long ships once the camera descends to the tile-terrain levels.
+        setShipViewContext(camera.position, viewport.height(), camera.fov);
+        // Hoisted only — deliberately NOT gated on ship.visible. This call PASSES
+        // visibility to the instancer, which degenerate-scales hidden slots; if we
+        // skipped hidden vessels they would keep their last matrix and stay frozen
+        // on screen. The expensive part (altitude-aware sizing, a distanceTo per
+        // vessel) already sits after update()'s own early return for !visible.
+        const _shipsInst = entityStore.all();
+        for (let i = 0, n = _shipsInst.length; i < n; i++) {
+            const ship = _shipsInst[i];
             if (!ship.userData.isRealAIS) continue;
-            shipInstancer.update(ship.userData.instanceHandle, ship.position, ship.visible);
+            shipInstancer.update(ship.userData.instanceHandle, ship.position, ship.visible, ship.userData.headingDeg, ship.userData.renderScale);
         }
 
         // ── Transition orchestrator (Plan 02) ─────────────────────────────────
@@ -2211,14 +2695,24 @@ async function init(mapData) {
         // ── Port LOD + hover + animation (Phases 1–4) ─────────────────────────
         portManager.tick(camera, mouse, delta);
 
+        // ── Bottom bezel rail ─────────────────────────────────────────────────
+        // Self-throttles to ~4 Hz and returns immediately when the rail is
+        // hidden (offsetParent === null in 'legacy'/'cinema'), so this costs
+        // essentially nothing until the bezel is on.
+        timelineRail?.update();
+        topRail?.update();
+
         // First-encounter context card: explain cluster bubbles the first time
         // the camera zooms out far enough to see them (y > 160 = cluster visible)
-        if (camera.position.y > 160 && window.aisShips.length > 0) {
+        if (camera.position.y > 160 && entityStore.all().length > 0) {
             contextCards.show('CLUSTER');
         }
 
         // ── Nav lights ────────────────────────────────────────────────────────
-        navLightManager.update(window.aisShips, sunElev);
+        navLightManager.update(entityStore.all(), sunElev, camera.position.y);
+
+        // ── Climb/descent ribbons ─────────────────────────────────────────────
+        climbRibbonManager.update(entityStore.all());
 
         // ── Continent terrain mesh LOD + point cloud crossfade ───────────────
         continentMesh.update(camera);
@@ -2249,10 +2743,10 @@ async function init(mapData) {
         discoveryManager.tick(delta);
 
         // ── Chokepoint landmarks ──────────────────────────────────────────────
-        chokepointManager.tick(delta, elapsed, window.aisShips);
+        chokepointManager.tick(delta, elapsed, entityStore.all());
 
         // ── Simulated (spline-driven) entities ────────────────────────────────
-        window.aisShips.forEach(ship => {
+        entityStore.all().forEach(ship => {
             if (!ship.userData.curve) return; // skip real AIS / flights / sats
 
             ship.userData.progress += ship.userData.speed;
@@ -2306,7 +2800,7 @@ async function init(mapData) {
         // below can share the same 1.1 Hz square-wave without recomputing.
         const blinkOn = (elapsed % (1 / 1.1)) < (0.55 / 1.1);
         {
-            window.aisShips.forEach(ship => {
+            entityStore.all().forEach(ship => {
                 if (!ship.userData.isDark) return;
                 const dm = ship.userData.darkMarker;
                 if (!dm || !dm.userData._isDarkMarker) return;
@@ -2335,13 +2829,40 @@ async function init(mapData) {
             // where port labels appear. MARKER_CLOSE_ZOOM (80) was too restrictive.
             const showClose = camera.position.y <= 150;
 
+            // Dark markers, plus their neighbour counts computed ONCE for the
+            // whole set instead of rescanning per vessel — see below.
             const darkPositions = [];
-            window.aisShips.forEach(ship => {
-                if (ship.userData.isDark && ship.userData.darkMarker)
+            const darkOwners    = [];
+            const _ships = entityStore.all();          // hoisted: was re-fetched per pass
+            for (let i = 0; i < _ships.length; i++) {
+                const ship = _ships[i];
+                if (ship.userData.isDark && ship.userData.darkMarker) {
                     darkPositions.push(ship.userData.darkMarker.position);
-            });
+                    darkOwners.push(ship.userData.darkMarker);
+                }
+            }
+            // ── O(n²) → spatial grid (2026-07-25) ────────────────────────────
+            // This used to be an inner loop over EVERY other dark marker, run per
+            // dark vessel, per frame: 200 dark vessels = 40,000 distance tests at
+            // 60fps. Same shape as the aircraft conflict check fixed earlier the
+            // same day; the fix never propagated here.
+            //
+            // The grid is EXACT, not approximate — an approximate neighbour count
+            // would show as marker opacity flickering as vessels drift across
+            // invisible cell lines, which nobody would trace back to a spatial
+            // index. tests/spatialGrid.test.mjs proves agreement with brute force,
+            // including on cell boundaries and negative coordinates.
+            const _darkCounts = countNeighborsWithin(darkPositions, 4.0);
+            const _darkIndex  = new Map();
+            for (let i = 0; i < darkOwners.length; i++) _darkIndex.set(darkOwners[i], i);
 
-            window.aisShips.forEach(ship => {
+            _ships.forEach(ship => {
+                // NOTE: deliberately NOT gated on ship.visible. This pass ASSIGNS
+                // dot.visible, so skipping hidden vessels would leave their dots
+                // stuck on screen from the last frame they were visible. The
+                // expensive part (marker sizing, a distanceTo per vessel) is
+                // already gated behind `if (dot.visible)` below, which is the
+                // correct place for it.
                 // Show dot at close zoom for all tracked vessels.
                 // Active = green (#00ff88). Dark = red (#ff1744) so the last
                 // known position stays visible but clearly signals lost contact.
@@ -2349,6 +2870,42 @@ async function init(mapData) {
                 if (dot) {
                     // Respect the class filter — hidden classes stay hidden.
                     dot.visible = showClose && !ship.userData._classHidden;
+                    // ── Dot sizing (2026-07-25) ──────────────────────────────
+                    // THIS is the "green lights" that swamp the map close up, not
+                    // the shadow sprite fixed earlier. createVesselDot builds a
+                    // CircleGeometry(0.22) — a 59 KM disc — with ADDITIVE blending,
+                    // and its own comment calls it "a tiny green dot… a halo UNDER
+                    // the ship". It is fixed-size, so at z12 each one covers the
+                    // screen and 500 of them additively blow out to solid cyan.
+                    // Same treatment as the hull and the shadow: hull-proportional
+                    // close in, pixel floor far out, capped at the legacy 0.22
+                    // radius so the far view can only shrink. Geometry radius is
+                    // baked at 0.22, hence dividing by the 0.44 legacy diameter.
+                    if (dot.visible) {
+                        const dd  = dot.position.distanceTo(camera.position);
+                        const dpx = pixelsPerSceneUnit(window.innerHeight, camera.fov, dd);
+                        const dia = vesselMarkerScale(
+                            effectiveShipScale(ship.userData.renderScale ?? SHIP_RENDER.BASELINE_SCALE,
+                                dpx, SHIP_HULL_UNITS, SHIP_RENDER.BASELINE_SCALE,
+                                SHIP_RENDER.REFERENCE_LENGTH_M),
+                            SHIP_HULL_UNITS, dpx,
+                            VESSEL_DOT_HULL_RATIO, VESSEL_DOT_MIN_PX, VESSEL_DOT_MAX_DIA);
+                        const k = dia / VESSEL_DOT_MAX_DIA;
+                        dot.scale.set(k, k, k);
+                        // ── Sit the dot UNDER the hull, not above it ─────────
+                        // createVesselDot lifts the dot +0.02 to "avoid z-fighting
+                        // with the water plane". Two things make that wrong now:
+                        // the water plane was disabled earlier today (so there is
+                        // nothing to z-fight with), and 0.02 scene units is 2.7 KM
+                        // — the dot floated far above its ship, which is exactly
+                        // what was reported. Third instance today of a fixed
+                        // world-space constant chosen at one zoom and used at all.
+                        //
+                        // Offset now scales with the MARKER, so it is always just
+                        // beneath the hull at any distance instead of a fixed
+                        // kilometre count.
+                        dot.position.y = ship.position.y - dia * VESSEL_DOT_SINK;
+                    }
                     const mat = dot.userData._vesselDotMat;
                     if (mat) {
                         if (ship.userData.isDark) {
@@ -2361,16 +2918,11 @@ async function init(mapData) {
                     }
                 }
 
-                // Dark marker overlap opacity reduction
+                // Dark marker overlap opacity reduction — count precomputed above.
                 const dm = ship.userData.darkMarker;
                 if (!dm || !dm.userData._isDarkMarker) return;
-                let nearbyCount = 0;
-                for (const pos of darkPositions) {
-                    if (pos === dm.position) continue;
-                    const dx = dm.position.x - pos.x;
-                    const dz = dm.position.z - pos.z;
-                    if (Math.sqrt(dx * dx + dz * dz) < 4.0) nearbyCount++;
-                }
+                const _di = _darkIndex.get(dm);
+                const nearbyCount = _di === undefined ? 0 : _darkCounts[_di];
                 if (nearbyCount > 0) {
                     const f = Math.max(0.35, 1.0 - nearbyCount * 0.22);
                     dm.userData._darkOuterMat.opacity *= f;
@@ -2388,8 +2940,22 @@ async function init(mapData) {
         //   AIS-DARK     (isDark)  — blinks in sync with dark marker
         {
             const _PING_CYCLE = 1.2;   // ACTIVE state sonar-ping period (seconds)
-            for (let i = 0, n = window.aisShips.length; i < n; i++) {
-                const ship = window.aisShips[i];
+            // Altitude-dependent ring scale — shrinks rings at close zoom so they
+            // wrap tightly around the vessel instead of dominating the terrain.
+            const _ringAltScale = Math.min(1.0, Math.sqrt(camera.position.y / 100.0));
+            // Hoisted (2026-07-25): entityStore.all() was called once per
+            // ITERATION as well as once for the length — 1000+ calls per pass.
+            const _ships2 = entityStore.all();
+            for (let i = 0, n = _ships2.length; i < n; i++) {
+                const ship = _ships2[i];
+                // ── VISIBILITY GATE ─────────────────────────────────────────
+                // Everything below decorates a vessel you can see: shadow sprite,
+                // anomaly ring, marker sizing (which costs a distanceTo each).
+                // An invisible vessel — off-screen, class-filtered, or clustered
+                // away — needs none of it. At close zoom most of the fleet is
+                // invisible, so this makes the cost track what is on screen
+                // rather than how many vessels exist.
+                if (!ship.visible) continue;
 
                 // Shadow sync — only show when zoomed in close enough to see the
                 // vessel models. At far zoom the 5-unit black shadows pile up
@@ -2401,6 +2967,27 @@ async function init(mapData) {
                     shadow.visible = showShadow;
                     if (showShadow) {
                         shadow.position.set(ship.position.x, 0.15, ship.position.z);
+                        // ── Marker sizing (2026-07-25) ───────────────────────
+                        // scale was set ONCE at construction to a fixed 5 scene
+                        // units — about 668 km — and never touched again. At world
+                        // view that is ~17x the length of the ship it belongs to;
+                        // at z12 it covers the screen (measured: scale-5 sprites
+                        // 0.33 units from the camera). Reported as "green lights
+                        // way overbearing… should only be underneath the vessel".
+                        // Now bounded at both ends: proportional to the RENDERED
+                        // hull up close, a pixel floor far away so the fleet stays
+                        // findable, capped at the legacy 5 so the far view can only
+                        // shrink. Same shape as the hull-scale fix.
+                        const d  = shadow.position.distanceTo(camera.position);
+                        const px = pixelsPerSceneUnit(window.innerHeight, camera.fov, d);
+                        // MUST be the effective (rendered) scale, not userData's base
+                        // — see effectiveShipScale. Using the base made this a no-op.
+                        const s = vesselMarkerScale(
+                            effectiveShipScale(ship.userData.renderScale ?? SHIP_RENDER.BASELINE_SCALE,
+                                px, SHIP_HULL_UNITS, SHIP_RENDER.BASELINE_SCALE,
+                                SHIP_RENDER.REFERENCE_LENGTH_M),
+                            SHIP_HULL_UNITS, px);
+                        shadow.scale.set(s, s, 1);
                     }
                 }
 
@@ -2411,10 +2998,10 @@ async function init(mapData) {
                     const suspect = ship.visible && integrityManager.tier(ship.userData.id) === 'SUSPECT';
                     iRing.visible = suspect;
                     if (suspect) {
-                        iRing.position.set(ship.position.x, 0.3, ship.position.z);
+                        iRing.position.set(ship.position.x, 0.05, ship.position.z);
                         const p = (Math.sin(elapsed * 6.0) + 1) * 0.5;   // ~1 Hz pulse
                         iMat.opacity = 0.45 + p * 0.5;                   // 0.45 → 0.95
-                        const s = 1.0 + p * 0.15;
+                        const s = (1.0 + p * 0.15) * _ringAltScale;
                         iRing.scale.set(s, s, s);
                     }
                 }
@@ -2430,29 +3017,28 @@ async function init(mapData) {
 
                 if (level > 0 && ship.visible) {
                     ring.visible = true;
-                    ring.position.set(ship.position.x, 0.25, ship.position.z);
+                    ring.position.set(ship.position.x, 0.05, ship.position.z);
 
                     if (isDark) {
                         // AIS-DARK: blink in sync with dark marker, softer opacity
                         mat.color.setHex(0xff1744);
                         mat.opacity = blinkOn ? 0.58 : 0.06;
-                        ring.scale.set(1, 1, 1);  // hold steady — bleed ring handles expansion
+                        ring.scale.set(_ringAltScale, _ringAltScale, _ringAltScale);
 
                     } else if (level === 2) {
                         // ACTIVE ANOMALY: inner ring contracts briefly each ping cycle
                         mat.color.setHex(0xff2244);
                         const phase = (elapsed % _PING_CYCLE) / _PING_CYCLE; // 0..1
+                        let s;
                         if (phase < 0.15) {
-                            // Contract inward during first 15% of cycle
                             const t = phase / 0.15;
-                            const s = 1.0 - t * 0.15;
-                            ring.scale.set(s, s, s);
+                            s = 1.0 - t * 0.15;
                         } else {
-                            // Recover to full size over remainder of cycle
                             const t = (phase - 0.15) / 0.85;
-                            const s = 0.85 + t * 0.15;
-                            ring.scale.set(s, s, s);
+                            s = 0.85 + t * 0.15;
                         }
+                        s *= _ringAltScale;
+                        ring.scale.set(s, s, s);
                         mat.opacity = 0.65;
 
                     } else {
@@ -2461,7 +3047,7 @@ async function init(mapData) {
                         mat.color.setHex(col);
                         const pulse = Math.sin((elapsed / 2.5) * Math.PI * 2);
                         mat.opacity = 0.30 + pulse * 0.20;  // 0.10 – 0.50
-                        ring.scale.set(1, 1, 1);
+                        ring.scale.set(_ringAltScale, _ringAltScale, _ringAltScale);
                     }
 
                 } else {
@@ -2477,8 +3063,10 @@ async function init(mapData) {
         // (contraction + expansion) happen simultaneously on the same beat.
         {
             const _PING_CYCLE = 1.2;
-            for (let i = 0, n = window.aisShips.length; i < n; i++) {
-                const ship     = window.aisShips[i];
+            const _ships3 = entityStore.all();
+            for (let i = 0, n = _ships3.length; i < n; i++) {
+                const ship     = _ships3[i];
+                if (!ship.visible) continue;          // see the gate note above
                 const pingRing = ship.userData.pingRing;
                 const pingMat  = ship.userData.pingRingMat;
                 if (!pingRing || !pingMat) continue;
@@ -2489,10 +3077,11 @@ async function init(mapData) {
 
                 if (level >= 2 && ship.visible) {
                     pingRing.visible = true;
-                    pingRing.position.set(ship.position.x, 0.25, ship.position.z);
+                    pingRing.position.set(ship.position.x, 0.05, ship.position.z);
                     const phase = (elapsed % _PING_CYCLE) / _PING_CYCLE;
                     // Expand 1.0 → 2.4, fade 0.85 → 0
-                    const s = 1.0 + phase * 1.4;
+                    const pingAltScale = Math.min(1.0, Math.sqrt(camera.position.y / 100.0));
+                    const s = (1.0 + phase * 1.4) * pingAltScale;
                     pingRing.scale.set(s, s, s);
                     pingMat.opacity = (1.0 - phase) * 0.85;
                 } else {
@@ -2506,8 +3095,10 @@ async function init(mapData) {
         // animation-fill-mode: forwards — ring is hidden after completion.
         {
             const _BLEED_DURATION = 2.4;  // seconds
-            for (let i = 0, n = window.aisShips.length; i < n; i++) {
-                const ship = window.aisShips[i];
+            const _ships4 = entityStore.all();
+            for (let i = 0, n = _ships4.length; i < n; i++) {
+                const ship = _ships4[i];
+                if (!ship.visible) continue;          // see the gate note above
                 if (!ship.userData.isDark) continue;
                 const dm = ship.userData.darkMarker;
                 if (!dm || !dm.userData._darkBleedMat) continue;
@@ -2527,7 +3118,8 @@ async function init(mapData) {
                 const ease = 1 - (1 - t) * (1 - t);
 
                 bleedRing.visible = true;
-                const s = 1.0 + ease * 3.5;   // scale 1 → 4.5
+                const bleedAltScale = Math.min(1.0, Math.sqrt(camera.position.y / 100.0));
+                const s = (1.0 + ease * 3.5) * bleedAltScale;
                 bleedRing.scale.set(s, s, s);
                 bleedMat.opacity = 0.65 * (1 - ease);   // 0.65 → 0
             }
@@ -2538,16 +3130,43 @@ async function init(mapData) {
         // This prevents any AIS event or startup condition from auto-focusing
         // on a vessel (e.g. the first ship to arrive on the live feed).
         if (_userHasInteracted) {
+            // ── Locked-ship: FOCUS + FOLLOW + selection ring (2026-07-24, Jamal) ──
+            // On a NEW lock: seed the follow tracker and show the selection ring — a
+            // circle around whatever is locked (ships, aircraft, satellites). On
+            // unlock: clear the ring. Driving both here means EVERY select path
+            // (3D click, list, watchlist) is covered from one place, and the ring
+            // clears on every deselect path too.
+            if (state.lockedShip !== _prevLockedShip) {
+                _prevLockedShip = state.lockedShip;
+                if (state.lockedShip) {
+                    _followPrevPos.copy(state.lockedShip.position);
+                    _selectVesselRing(state.lockedShip);
+                } else {
+                    _clearVesselRing();
+                }
+            }
+
             if (state.lockedShip) {
-                // Keep pivot at terrain level (y=0) so OrbitControls minDistance
-                // is computed from the ground, not from the plane's altitude.
-                // Without this, a plane cruising at y=10 raises the effective zoom
-                // floor by ~10 units, preventing close zoom-in after clicking.
-                _lockTargetGround.set(
-                    state.lockedShip.position.x,
-                    0,
-                    state.lockedShip.position.z
-                );
+                const p = state.lockedShip.position;
+                // FOLLOW: translate the whole camera rig by however far the vessel
+                // moved this frame, so it stays put on screen as it travels. The
+                // user's own orbit/zoom offset is preserved because camera AND pivot
+                // move by the same delta (a chase cam, not a re-aim).
+                _followDelta.subVectors(p, _followPrevPos);
+                if (_followDelta.lengthSq() > 1e-10) {
+                    camera.position.add(_followDelta);
+                    controls.target.add(_followDelta);
+                }
+                _followPrevPos.copy(p);
+
+                // FOCUS: keep the pivot ON the asset itself (its real position,
+                // altitude included) so a locked plane/ship is framed and stays
+                // centred as we follow. This is what makes the side-view on click
+                // (uiController.onClick) look AT the asset instead of the ground
+                // beneath it (2026-07-24, Jamal: side view, not overhead). For ships
+                // p.y ≈ 0 so this is unchanged; for aircraft the pivot rides at
+                // cruise altitude, which is correct for inspecting the aircraft.
+                _lockTargetGround.set(p.x, p.y, p.z);
                 controls.target.lerp(_lockTargetGround, 0.08);
             } else if (state.isPanningToTerrain) {
                 controls.target.lerp(state.terrainTargetPos, 0.08);
@@ -2566,10 +3185,10 @@ async function init(mapData) {
 
         // ── UI ticks ──────────────────────────────────────────────────────────
         // Vessel hover — screen-space snap, shows name / class / speed tooltip
-        tickRaycasting({ raycaster, mouse, camera, aisShips: window.aisShips, tooltipEl, stateRef: state });
-        tickVesselDetail(state);
-        tickSearchVisibility(window.aisShips);
-        tickAlertZone(window.aisShips);
+        tickRaycasting({ raycaster, mouse, camera, aisShips: entityStore.all(), tooltipEl, stateRef: state });
+        tickVesselDetail(state, flightManager.aircraft, conflictManager);
+        tickSearchVisibility(entityStore.all());
+        tickAlertZone(entityStore.all());
         window._tickDynamicStatus(performance.now());
         // Sync intensity target after threat level is updated
         window._syncThreatIntensity?.();
@@ -2590,7 +3209,12 @@ async function init(mapData) {
             const nowMs = performance.now();
             if (nowMs - _edgeLastMs > 80) {  // ~12 fps update rate — plenty for edge UI
                 _edgeLastMs = nowMs;
-                const vpW = window.innerWidth, vpH = window.innerHeight;
+                // Map-rect sized, so arrows hug the MAP boundary rather than the
+                // window boundary — otherwise off-screen threat arrows are drawn
+                // underneath the rails and dock, which is exactly where they are
+                // least visible. Requires #edge-indicators to overlay the map well
+                // (it is a child of #canvas-container, inset:0 — see index.html).
+                const vpW = viewport.width(), vpH = viewport.height();
                 let   idx = 0;
 
                 _edgeTargets.forEach(({ ship, color, label }) => {
@@ -2622,10 +3246,18 @@ async function init(mapData) {
         updateDynamicWater(elapsed, camera.position.y);
 
         // ── Render ────────────────────────────────────────────────────────────
+        // GPU timer query brackets the actual draw work, so a stall can be told
+        // apart from JS blocking the loop — wall-clock frame deltas cannot do that.
+        hitchRecorder.beginGpu();
         composer.render();
+        hitchRecorder.endGpu();
         // Sea-state contour overlay — after post-processing so the thin black isobands
         // stay crisp. Pass `scene` so the overlay mirrors cinematic-orbit rotation.
         waveFieldLayer.renderOverlay(renderer, camera, scene);
+
+        // Closes the in-frame timer. Anything in a stall NOT accounted for here
+        // happened while animate() was not running.
+        hitchRecorder.frameEnd();
     }
 
     animate();
@@ -2672,7 +3304,7 @@ async function _showPortPanel(portData, camera, controls, stateRef) {
     const _pz = -(Math.log(Math.tan(Math.PI / 4.0 + _pr / 2.0)) / Math.PI) * 150;
     const PORT_RADIUS = 5.0; // scene units
 
-    const inPort = window.aisShips.filter(ship => {
+    const inPort = entityStore.all().filter(ship => {
         if (!ship.userData.isRealAIS) return false;
         const dx = ship.position.x - _px;
         const dz = ship.position.z - _pz;

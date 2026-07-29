@@ -1,0 +1,25 @@
+{
+  "generated_by": "tools/build_tile_land_mask.py",
+  "min_zoom": 3,
+  "max_zoom": 12,
+  "dilation_rings": 1,
+  "sea_level_m": 0.0,
+  "sources": [
+    "GSHHG via global-land-mask",
+    "gebco_terrarium.png",
+    "terrain_dem_baked.png"
+  ],
+  "bytes": 5592508,
+  "fetch_fraction": {
+    "z3": 1.0,
+    "z4": 0.98828,
+    "z5": 0.85596,
+    "z6": 0.6676,
+    "z7": 0.53912,
+    "z8": 0.4576,
+    "z9": 0.41128,
+    "z10": 0.38515,
+    "z11": 0.37116,
+    "z12": 0.36358
+  }
+}

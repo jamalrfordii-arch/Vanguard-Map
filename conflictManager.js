@@ -25,15 +25,15 @@ import * as THREE from 'three';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { CONFLICT } from './config.js';
 import { simClock } from './simClock.js';
-import { pairKey, evaluatePair } from './conflictMath.js';
+import { pairKey, evaluatePair, forEachCandidatePair } from './conflictMath.js';
 
 const SEVERITY_COLOR = { CRITICAL: 0xff1744, ADVISORY: 0xff8c00 };
 
-function _dpr() { return window.devicePixelRatio || 1; }
 function _resolutionVec() {
-    return new THREE.Vector2(window.innerWidth * _dpr(), window.innerHeight * _dpr());
+    return new THREE.Vector2(viewport.bufferWidth(), viewport.bufferHeight());
 }
 
 class ConflictManager {
@@ -50,20 +50,36 @@ class ConflictManager {
         this.group.name = 'aerialConflicts';
         if (scene) scene.add(this.group);
         this._lines = new Map(); // pairKey → { mesh, material }
+        // On-map conflict LINES disabled (2026-07-24, Jamal: the web of red/orange
+        // links confused users). Detection still runs — pair data stays available
+        // via all()/flagged()/forAircraft() for card readouts, alerts, and badges.
+        // Flip window.vg1Conflicts._drawLines = true to bring the lines back.
+        this._drawLines = false;
 
         this._onResize = () => {
             const res = _resolutionVec();
             for (const { material } of this._lines.values()) material.resolution?.copy(res);
         };
         if (typeof window !== 'undefined') {
-            window.addEventListener('resize', this._onResize);
+        // Subscribe to viewport, not window 'resize'. The resolution uniform is in
+        // DRAWING-BUFFER pixels, which change on window resize, on layout change
+        // (dock/rails), AND on a runtime pixel-ratio nudge from the FPS monitor.
+        // Only viewport sees all three.
+            this._offResize = viewport.onChange(this._onResize);
             window.vg1Conflicts = this;
         }
     }
 
-    // ── Detection (timer cadence, O(n²)) ─────────────────────────────────────
+    // ── Detection (timer cadence, broad-phase + CPA) ─────────────────────────
     // aircraftList: array of flightManager.aircraft values — needs icao24,
     // callsign, latDeg, lonDeg, altMeters, speedKts, headingDeg, verticalRateMs.
+    //
+    // Was all-pairs O(n²) — 300 aircraft = 44,850 evaluatePair() calls per tick,
+    // measured 85ms avg / 197ms worst, the largest single stutter source in the
+    // app. forEachCandidatePair() applies a conservative separation bound first
+    // (see conflictMath.js): it can admit pairs that turn out fine, it can never
+    // reject a real conflict, so results are identical to the brute-force version.
+    // tests/conflictBroadPhase.test.mjs fuzzes the two against each other.
     evaluate(aircraftList) {
         const now = simClock.now();
         const live = aircraftList.filter(a =>
@@ -72,25 +88,22 @@ class ConflictManager {
         const triggered = new Set();
         const newPairs = [];
 
-        for (let i = 0; i < live.length; i++) {
-            for (let j = i + 1; j < live.length; j++) {
-                const a = live[i], b = live[j];
-                const result = evaluatePair(a, b);
-                if (!result) continue;
+        this._lastPairsConsidered = forEachCandidatePair(live, CONFLICT, (a, b) => {
+            const result = evaluatePair(a, b);
+            if (!result) return;
 
-                const key = pairKey(a.icao24, b.icao24);
-                triggered.add(key);
-                const wasActive = this._pairs.has(key);
-                const record = {
-                    key, a: a.icao24, b: b.icao24,
-                    callsignA: a.callsign, callsignB: b.callsign,
-                    ...result,
-                    lastTriggered: now,
-                };
-                this._pairs.set(key, record);
-                if (!wasActive) { this._dirty = true; newPairs.push(record); }
-            }
-        }
+            const key = pairKey(a.icao24, b.icao24);
+            triggered.add(key);
+            const wasActive = this._pairs.has(key);
+            const record = {
+                key, a: a.icao24, b: b.icao24,
+                callsignA: a.callsign, callsignB: b.callsign,
+                ...result,
+                lastTriggered: now,
+            };
+            this._pairs.set(key, record);
+            if (!wasActive) { this._dirty = true; newPairs.push(record); }
+        });
 
         // Grace-period expiry — only drop pairs that have been silent for
         // GRACE_MS, so a pair right at the threshold edge doesn't flicker.
@@ -110,6 +123,14 @@ class ConflictManager {
     // .currentPos THREE.Vector3 — flightManager.aircraft satisfies this directly.
     updateVisuals(aircraftByIcao) {
         if (!this.scene) return;
+
+        // Lines suppressed by default (see _drawLines in constructor). Detection
+        // keeps running; we just don't draw the connecting links. Clean up any
+        // lines that may already exist, then bail before creating more.
+        if (!this._drawLines) {
+            if (this._lines.size) for (const key of [...this._lines.keys()]) this._removeLine(key);
+            return;
+        }
 
         for (const key of this._lines.keys()) {
             if (!this._pairs.has(key)) this._removeLine(key);
@@ -177,7 +198,7 @@ class ConflictManager {
     forAircraft(icao24) { return this.all().filter(r => r.a === icao24 || r.b === icao24); }
 
     disconnect() {
-        if (typeof window !== 'undefined') window.removeEventListener('resize', this._onResize);
+        this._offResize?.();
         for (const key of [...this._lines.keys()]) this._removeLine(key);
     }
 }

@@ -17,6 +17,7 @@
 import { INTEGRITY } from './config.js';
 import { haversineNm } from './invariants.js';
 import { simClock } from './simClock.js';
+import { callsignToCountry } from './aisCountries.js';
 
 const W = INTEGRITY.WEIGHTS;
 
@@ -122,6 +123,23 @@ class IntegrityManager {
             const mid = parseInt(m.slice(0, 3), 10);
             if (!/^\d{9}$/.test(m) || !(mid >= 201 && mid <= 775)) {
                 this._setFlag(r, 'MMSI_INVALID', `MMSI ${m} malformed`);
+            }
+        }
+
+        // False flag — callsign's ITU prefix country vs MMSI MID country
+        // (vessel.country, already computed in aisManager.js at spawn time).
+        // Callsign only arrives via a ShipStaticData message, which can lag
+        // well behind the first position reports, so this stays a no-op
+        // until vessel.callsign is populated. Table coverage in
+        // aisCountries.js is intentionally partial — an unmapped prefix
+        // clears the flag rather than guessing, so this can only under-report.
+        if (vessel.callsign) {
+            const csCountry = callsignToCountry(vessel.callsign);
+            if (csCountry && vessel.country && csCountry !== vessel.country) {
+                this._setFlag(r, 'FALSE_FLAG',
+                    `callsign ${vessel.callsign} (${csCountry}) vs MMSI flag ${vessel.country}`);
+            } else {
+                this._clearFlag(r, 'FALSE_FLAG');
             }
         }
 

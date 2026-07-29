@@ -59,7 +59,24 @@ export class LayerCoordinator {
         // needed. On a fast dive coverage is briefly < 1 and the base fades in
         // proportionally, so nothing goes black mid-descent.
         const effectiveCoverage = Math.min(1, tileCoverage * 1.6);
-        updatePointCloud(camera, Math.max(effectiveCoverage, gsPresence));
+        // WHERE that coverage is, not just how much (2026-07-24). The base cloud
+        // fades only inside this disc; outside it stays fully opaque so that
+        // rotating the camera can never reveal unrendered ground. Anchored on the
+        // look-at point, which is the same anchor the tile loader uses — note
+        // this must NOT be shifted forward along the view direction, see the
+        // reverted "forward-shifted anchor" experiment in tileStreamManager.
+        //
+        // (The boot failure this was briefly disabled for turned out to be a stray
+        // backtick inside the GLSL template literal in terrainBuilder.js, not this
+        // logic. Set to false to fall back to a fully-opaque base cloud everywhere.)
+        const _SPATIAL_FADE = true;
+        let coverCenter = null, coverRadius = 0;
+        if (_SPATIAL_FADE && this._tiles && typeof this._tiles.coveredRadiusU === 'function') {
+            coverCenter = lookAt || camera.position;
+            coverRadius = this._tiles.coveredRadiusU(camera, lookAt);
+        }
+        updatePointCloud(camera, Math.max(effectiveCoverage, gsPresence),
+                         coverCenter, coverRadius);
 
         // TILE POINTS: fade out from under a fully-present capture (1-presence),
         // so the splat is unobstructed; full opacity everywhere else.

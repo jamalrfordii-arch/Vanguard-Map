@@ -17,6 +17,7 @@
 //   .onCardOpen(mmsi)        — call when a vessel detail card opens
 
 import { integrityManager } from './integrityManager.js';
+import { entityStore } from './entityStore.js';   // live entity lookups (was window.aisShips)
 
 const LS_WATCHED  = 'vg1_watchlist_mmsis';
 const _WL_TIER_COLOR = { TRUSTED: '#7ad97a', QUESTIONABLE: '#ffa726', SUSPECT: '#d500f9' };
@@ -115,7 +116,7 @@ export function initWatchlist(aisManager) {
 
         // Also pull from the Three.js object's userData.displayName as backup
         if (!_nameCache[mmsi]?.name) {
-            const shipObj = window.aisShips?.find(s => String(s.userData.id) === mmsi);
+            const shipObj = entityStore.byId(mmsi);
             const dn = shipObj?.userData?.displayName;
             if (dn && dn !== 'UNKNOWN' && dn !== mmsi) {
                 (_nameCache[mmsi] = _nameCache[mmsi] || {}).name = dn;
@@ -488,7 +489,7 @@ export function initWatchlist(aisManager) {
             _snapshotName(mmsi); // picks up from aisManager.vessels
             // Additional source: Three.js userData.displayName
             if (!_nameCache[mmsi]?.name || _nameCache[mmsi].name === 'UNKNOWN') {
-                const shipObj = window.aisShips?.find(s => String(s.userData.id) === mmsi);
+                const shipObj = entityStore.byId(mmsi);
                 const displayName = shipObj?.userData?.displayName;
                 if (displayName && displayName !== 'UNKNOWN' && displayName !== mmsi) {
                     (_nameCache[mmsi] = _nameCache[mmsi] || {}).name = displayName;

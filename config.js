@@ -87,6 +87,20 @@ export const TILESTREAM = {
     // return to the point-cloud aesthetic (per-level 'render' fields then apply).
     FORCE_MESH:       false,
     POINTS_PER_TILE:  6000,   // density budget per tile, spread by triangle area
+    // ── Land / water thresholds (2026-07-25) ─────────────────────────────────
+    // Two constants that used to be one number (−20 m) hardcoded in three places,
+    // conflating "shallow" with "land". They are different questions:
+    //
+    // LAND_MARGIN_M — elevation at or above which the DEM says LAND, so the tile
+    //   builder may draw points there. Sea level. Anything more negative starts
+    //   painting continental shelves as ground: at −20 m that was 13.4% of the
+    //   ocean area in the Sunda box, drawn as land-coloured points over water.
+    //
+    // SHORELINE_EPSILON_M — how far below sea level a Cesium QM triangle may sit
+    //   and still count as coastal, absorbing quantised-mesh height noise at the
+    //   waterline. Keep it small; it is an error bar, not a coastal band.
+    LAND_MARGIN_M:       0,
+    SHORELINE_EPSILON_M: -5,
     POINT_SIZE:       0.014,  // world-units, size-attenuated with distance
     POINT_OPACITY:    0.92,   // max opacity of streamed points once faded in
     // Photo-colored points (2026-07-12): sample each point's color from the
@@ -101,8 +115,21 @@ export const TILESTREAM = {
     // keeps its natural "Natural Earth" look and matches the base cloud instead
     // of going gold/over-saturated. Selected by zoom in _buildPoints.
     PHOTO_BLEND:      0.92,   // close-up (z≥8): real satellite colour dominates
-    POINT_BRIGHTNESS: 0.95,   // close-up (z≥8): strong day/night (tiles unlit)
-    POINT_SATURATION: 1.40,   // close-up (z≥8): vivid
+    POINT_BRIGHTNESS: 0.95,   // close-up (z≥8). Read by tileStreamManager._buildPoints → PointsMaterial.color, which MULTIPLIES the per-point vertex colours. This is the tile surface's only brightness control.
+    // POINT_SATURATION 1.40 → 1.15 (2026-07-25). 1.40 was the direct cause of
+    // the gold-slope / teal-hollow cast on close-up land: see the long comment
+    // in tilePointsBuilder.js's saturation stage. Same value and same failure
+    // mode as the 1.4× boost removed from IBTrACS categoryColor() on 2026-06-20
+    // and the 2.10 → 1.30 splat correction on 2026-07-13; the tile path simply
+    // never received either fix. 1.15 also lands just under SPLAT_SATURATION
+    // (1.30) rather than above it, so tiles no longer read more vivid than the
+    // base cloud they cross-fade into at the LOD seam.
+    POINT_SATURATION: 1.15,
+    // Shaping for that saturation, both new 2026-07-25. Set either to 0 to A/B
+    // against the old flat multiplier.
+    POINT_WARM_TRIM:    0.65,  // how much of the boost to withhold from orange/yellow-dominant points (1 = warm points get no boost at all). Kills the desert/rock gold cast without desaturating vegetation or water.
+    POINT_SHADOW_DESAT: 0.55,  // how much chroma to remove from points darker than POINT_SHADOW_L, where the imagery's colour is blue skylight rather than surface albedo. Stops shadowed slopes reading teal.
+    POINT_SHADOW_L:     0.20,  // luminance knee below which POINT_SHADOW_DESAT ramps in.
     PHOTO_BLEND_FAR:      0.80,  // coarse (z<8): original blend — natural world-view palette
     POINT_BRIGHTNESS_FAR: 0.85,  // 0.72→0.85 (2026-07-18): coarse/mid tiles were reading muddy at night; lifted for readability (no saturation boost on far, so minimal desert gold-cast)
     POINT_SATURATION_FAR: 1.00,  // coarse (z<8): no extra saturation — no desert gold cast
@@ -177,10 +204,30 @@ export const TERRAIN_VERTICAL_SCALE = TERRAIN_VSCALE_LAND;
 //   window.splatCloud.material.uniforms.uSplatScale.value = 1.3  (point size, closes gaps)
 //   window.splatCloud.material.uniforms.uRidgePulse.value = 0.3  (ridge energy glow, 0 = off)
 export const SPLAT_FX = {
-    SCALE:       1.40,  // 1.15→1.40 (2026-07-18): global point-size multiplier. Bigger splats overlap
-                        // into a continuous surface at mid/far zoom, killing the grainy speckle look
-                        // from a distance. Base cloud fades out at close zoom, so this only affects the
-                        // world/regional view (where the grain shows) — close-up detail is unaffected.
+    SCALE:       1.15,  // 1.40→1.15 (2026-07-24). Global point-size multiplier: bigger splats overlap
+                        // into a continuous surface at mid/far zoom, killing grainy speckle — but they
+                        // also blur coastlines, which is the cost 1.40 was paying. A/B'd on one frame at
+                        // pixel ratio 1.0 (whole-world camera, Mediterranean crop): 1.40 gave soft, blobby
+                        // coastlines with no defined Med edge; 1.00 gave sharp edges but visible mottling
+                        // between points; 1.15 held the surface continuous while clearly sharpening the
+                        // coast. NOTE the 1.15→1.40 bump on 2026-07-18 was made while the quality
+                        // controller was silently pinning pixel ratio to its 0.6 floor (see
+                        // qualityManager.js, fixed 2026-07-24) — so that comparison was run at 36% of
+                        // native resolution and the speckle it was fighting was partly upscaling
+                        // artifact, not splat density. Re-A/B before moving this again.
+                        // Base cloud fades out at close zoom, so this only affects the world/regional view.
+    // Grazing-angle coverage boost — max point-size multiplier at a fully
+    // horizontal view, ramped in as uTilt² so near-nadir framing is untouched.
+    // A points cloud only covers ground while point size >= on-screen neighbour
+    // spacing; spacing stretches by 1/cos(incidence) as you tilt toward the
+    // horizon while gl_PointSize does not, so the cloud tears into speckle at low
+    // oblique angles. 2.4 ≈ the stretch at ~65° from vertical, which is about
+    // where the tearing became obvious in the reported view (2026-07-24, low
+    // oblique over Chad). Raise if the horizon still speckles; lower if distant
+    // terrain looks smeared at oblique angles. Tunable live:
+    //   window.splatCloud.material.uniforms.uTiltCoverage.value = 2.4
+    // Set to 1.0 to disable entirely and restore pre-2026-07-24 behaviour.
+    TILT_COVERAGE: 2.4,
     RIDGE_PULSE: 0.0,   // 0.18→0 (2026-07-18): the animated blue ridge glow rode along steep/high-relief
                         // terrain — invisible on flat deserts but shimmering over hilly GREEN regions
                         // (Europe, forests), which read as moving 'static/distortion'. Disabled.
@@ -212,6 +259,105 @@ export const AIS = {
     // Only vessels whose lat/lon falls inside this box are ingested.
     // Set to null to show all received vessels (no geographic restriction).
     CLIENT_BBOX: null,  // null = show all vessels globally; set to [[latMin, lonMin], [latMax, lonMax]] to restrict region
+};
+
+// ── Cargo intelligence — Phase 1: draft-based load estimation only ───────────
+// (research/vanguard1-cargo-intel-spec-2026-07-23.md). No port-call detection,
+// cargo labeling, or UI surfacing yet — this namespace exists so aisManager.js
+// has a home for the laden/ballast thresholds and per-class draft seeds.
+export const CARGO = {
+    LADEN_THRESHOLD:   0.85,  // loadFactor at/above this reads LADEN
+    BALLAST_THRESHOLD: 0.55,  // loadFactor at/below this reads BALLAST — between the two is PARTIAL
+
+    // Coarse per-class seed max-draught (meters), used only until a vessel's own
+    // observed high-water-mark (draughtCache.js) is available and higher. AIS ship
+    // type only distinguishes CARGO vs TANKER (see aisManager.js's aisTypeToClass
+    // comment — container/bulk/RoRo are indistinguishable within CARGO), so these
+    // are necessarily rough fleet averages, not per-vessel figures. Every other
+    // class has no seed (null) — draft-based load estimation only makes sense for
+    // bulk/tanker-shaped vessels; PASSENGER/FISHING/etc. don't get a laden/ballast
+    // read even once observed.
+    MAX_DRAFT_BY_CLASS: {
+        CARGO:  12,   // spans small general cargo (~8m) to large bulkers/boxships (~16m) — coarse on purpose
+        TANKER: 16,   // spans product tankers (~12m) to VLCC-class (~20m) — coarse on purpose
+    },
+
+    // Phase 2: port-call detection (portCallManager.js). Ports are centroid-only
+    // (portManager.js's PORTS array has no polygon/harbor-shape data), so this is a
+    // deliberately generous radius+dwell approximation, not exact geofencing — see
+    // research/vanguard1-cargo-intel-spec-2026-07-23.md §5 for the known false-
+    // positive/negative tradeoffs (anchorage-offshore misses, close-together ports).
+    PORT_CALL_RADIUS_NM: 12,
+    DWELL_MIN_MS:        45 * 60 * 1000,  // continuous time inside radius + stopped to count as a real call, not a transit
+    STOPPED_SPEED_KTS:   1.5,             // below this reads as "stopped", not just "slow"
+    TICK_MS:             10_000,          // state-machine recompute cadence — timer-driven, not per-frame (same two-speed shape as conflictManager.js)
+};
+
+// ── Vessel true-scale rendering (2026-07-23) ─────────────────────────────────
+// Ships previously all rendered at one fixed scale (shipInstancer.js's old
+// SHIP_SCALE=0.08) regardless of real size — a fishing boat and a VLCC looked
+// identical. This drives per-vessel scale proportional to real hull length (AIS
+// ShipStaticData's Dimension A+B), anchored so a REFERENCE_LENGTH_M vessel
+// renders at exactly today's old baseline size — the overall exaggeration factor
+// doesn't change, only the RELATIVE proportions between vessels, which is the
+// part that's actually "to scale."
+//
+// A literal 1:1 real-world scale is NOT attempted, and this is a deliberate,
+// disclosed choice, not a shortcut: MAP_WIDTH=300 spans the planet's full
+// longitude circumference, so a real 300m tanker would render at roughly 0.002
+// scene units — sub-pixel at every zoom level. At true 1:1 scale, EVERY vessel,
+// including the largest supertankers, would collapse to the same invisible
+// floor, which would destroy the exact proportional differences this feature
+// exists to show. Anchoring to a reference length instead keeps the fleet
+// visible while making relative size differences between vessels honest.
+//
+// ── AMENDED 2026-07-25: the values here are no longer the final word ─────────
+// The reasoning above is still correct for the FAR view, and that view is
+// unchanged. Two things about it were incomplete, both now measured rather than
+// inferred:
+//
+//  1. THE EXAGGERATION IS ~192x, not the modest factor these constants suggest.
+//     BASELINE_SCALE is an instance scale, and the hull template's longest axis
+//     is 3.4 scene units — so 0.0844 (the measured median) renders a vessel
+//     0.287 units ≈ 38 KILOMETRES long. Reading BASELINE_SCALE as though the
+//     model were 1 unit long understates the effect by 3.4x, which is exactly
+//     the mistake made when this was first estimated.
+//
+//  2. "Sub-pixel at every zoom level" was true when written, because the camera
+//     was capped at z9 / minDistance 2.3. It no longer is: the camera now
+//     descends to ~1.15 over real photographic terrain, where a true-scale
+//     vessel is ~2px — small, but no longer invisible, and a 38km ship next to
+//     a real island is not.
+//
+// So the exaggeration is no longer a constant. shipInstancer applies an
+// altitude-aware factor (vesselScale.js) that leaves these values EXACTLY as-is
+// at world and regional zoom and shrinks vessels toward true scale as the camera
+// descends, with a floor expressed in screen pixels. The constants below remain
+// the far-view anchor and the source of relative proportion; they are just no
+// longer the whole story. Change them and you move the far view.
+export const SHIP_RENDER = {
+    BASELINE_SCALE:     0.08,  // matches the old fixed SHIP_SCALE — an anchor point, not a new tuning
+    REFERENCE_LENGTH_M: 180,   // real length (m) that renders at BASELINE_SCALE
+    MIN_RENDER_SCALE:   0.02,  // floor — smallest craft never shrink below this, so nothing vanishes
+
+    // Fallback typical length (m) by class — used only when a vessel has no real
+    // Dimension data yet (fresh spawn, static message not received). Coarse fleet
+    // averages, same spirit as CARGO.MAX_DRAFT_BY_CLASS above — refined
+    // automatically the moment a real ShipStaticData message arrives.
+    TYPICAL_LENGTH_BY_CLASS: {
+        TANKER:    228,
+        CARGO:     190,   // spans small general cargo to large bulkers/boxships
+        PASSENGER: 220,   // cruise/ferry average
+        HSC:        40,
+        FISHING:    30,
+        TUG:        30,
+        DREDGER:    60,
+        PILOT:      15,
+        SAILING:    15,
+        PLEASURE:   15,
+        SERVICE:    35,
+        OTHER:      100,  // unclassified — generic mid-size assumption
+    },
 };
 
 // ── Simulation / replay (simClock.js + dataSource.js) ────────────────────────
@@ -294,6 +440,7 @@ export const FLIGHT_INTEGRITY = {
         SPEED_MISMATCH:   20,   // reported ground speed << implied speed from track
         EXCESSIVE_SPEED:  15,   // implied speed exceeds plausible-aircraft ceiling
         DARK:             15,   // ADS-B went silent (removed after STALE_MS with no update)
+        WRONG_WAY_LEVEL:  10,   // cruising a hemispheric-rule-wrong flight level for its heading — ADVISORY (lone hit stays TRUSTED; many legit exceptions exist)
         DEFAULT:          10,
     },
     TIER_TRUSTED:      80,      // score ≥ → TRUSTED (green) — mirrors INTEGRITY tiers for UI consistency
@@ -306,6 +453,12 @@ export const FLIGHT_INTEGRITY = {
     SPEED_MISMATCH_FACTOR:  1.6,  // implied speed must exceed reported gs by this factor to flag
     ALTITUDE_JUMP_FPM:  12000,  // implied climb/descent rate (ft/min) beyond this is impossible
     IMPOSSIBLE_ALT_FT:  60000,  // absolute altitude above this (~FL600) is bad data, not a real civil/most-military aircraft
+    // Hemispheric ("wrong-way") flight-level check — see hemisphericRule.js.
+    // Scoped to the RVSM band, only for aircraft established at a level.
+    RVSM_BAND_LO_FT:    29000,  // FL290 — hemispheric rule takes over here (RVSM floor)
+    RVSM_BAND_HI_FT:    41000,  // FL410 — RVSM ceiling
+    LEVEL_TOL_FT:         200,  // within this of a whole flight level = "at" that level (else mid-transition)
+    LEVEL_RATE_MS:        2.5,  // |vertical rate| below this (~500 fpm) = level flight; above = climbing/descending, skip the check
     TICK_MS:            5000,   // periodic flag-decay cadence
 };
 
@@ -365,6 +518,24 @@ export const FLIGHT = {
     API_URL:       'http://localhost:8787/flights',
     POLL_INTERVAL: 30_000,           // ms — safe for anonymous tier
     MAX_AIRCRAFT:  300,
+
+    // ── Aircraft render scale (2026-07-24, Jamal) ────────────────────────────────
+    // History: models were ~700× oversized (visible but cartoonish) → tried TRUE
+    // real scale vs Earth (REAL_SCALE, ~40 m: physically correct but sub-pixel, so
+    // invisible) → tried a constant-on-screen-size floor (always visible but looked
+    // "disproportionate from a distance", because a constant PIXEL size means planes
+    // never shrink with distance the way the terrain does). CURRENT: WORLD-SPACE
+    // scale — a small FIXED physical size (cls.scale × VIEW_SCALE) so aircraft shrink
+    // with distance under normal perspective and read as proportionate to the ground.
+    // VIEW_SCALE 0.22 ≈ 1/4.5 the old size (still ~100× real — true real scale can't
+    // be both visible AND perspective-correct, since it's sub-pixel at every viewable
+    // distance). MIN_SCREEN_FRAC is now only a TINY anti-vanish floor (~1.5 px) so a
+    // very distant plane holds a faint dot instead of disappearing — small enough not
+    // to reintroduce the disproportion. All live-tunable in DevTools; VIEW_SCALE up =
+    // bigger planes, MIN_SCREEN_FRAC = 0 lets far planes vanish entirely.
+    VIEW_SCALE:      0.22,      // cls.scale × this = rendered world-space size (perspective-correct)
+    MIN_SCREEN_FRAC: 0.0003,    // tiny anti-vanish screen floor (~1.5px); 0 = none
+    REAL_SCALE:      0.0005,    // reference only (not used for rendering): cls.scale × this ≈ true physical size vs Earth
     STALE_MS:      120 * 1000,       // remove after 2 min silence
     MIN_ALT_M:      300 * 0.3048,    // ~91.4m = 300ft AGL — symmetric appear/disappear floor.
                                       // An aircraft is only tracked above this altitude; a poll
@@ -382,8 +553,45 @@ export const FLIGHT = {
     // vertical geometry of the airspace and the altitude decks read from it.
     ALT_Y_BASE:       2.0,           // scene Y of the ground/near-ground floor
     ALT_Y_SPAN_M:     12000,         // metres mapped across ALT_Y_SPAN_UNITS…
-    ALT_Y_SPAN_UNITS: 20,            // …scene units (→ 1 scene unit ≈ 600 m ≈ 1,970 ft)
+    ALT_Y_SPAN_UNITS: 20,            // …scene units — sets the OVERALL height of the scale (top-of-scale = CEIL·UNITS/SPAN_M ≈ 30.5 units)
     ALT_CEIL_M:       18300,         // ~FL600 — clamp so bad-data altitudes can't fly off-scale
+    ALT_Y_GAMMA:      0.65,          // vertical-exaggeration curve. <1 EXPANDS low/terminal altitudes and compresses the thin upper air (readability); 1.0 = the old linear scale. Endpoints are pinned either way, so scene framing/camera are unchanged. Tune by eye — decks re-space automatically.
+
+    // ── Climb/descent ribbon (climbRibbonManager.js) ─────────────────────────
+    // A short vertical tail on each aircraft showing where it's headed vertically,
+    // so climbing / level / descending traffic reads at a glance. Length is the
+    // projected altitude change over RIBBON_SEC, mapped through the altitude curve.
+    RIBBON_SEC:          45,          // seconds of vertical trend to project (how far the tail reaches)
+    RIBBON_MIN_RATE_MS:  5.0,         // |vertical rate| below this (~1,000 fpm) = don't draw. High because the rate is a coarse 30 s baro estimate — only show clear maneuvers, not jitter
+    RIBBON_MAX_UNITS:    5,           // clamp on ribbon length (scene units) so low-altitude maneuvers can't dominate
+    RIBBON_CLIMB_COLOR:   0x36e07a,   // green — climbing
+    RIBBON_DESCENT_COLOR: 0xff7043,   // orange-red — descending
+
+    // ── Canonical altitude-band taxonomy (2026-07-22) ────────────────────────
+    // ONE source of truth shared by: the aircraft altitude glow/trail colour
+    // (getAltColor in main.js), the flight-level decks (altitudeDeckManager.js),
+    // and the Altitude Watch panel (uiController.js). Before this they used three
+    // DIFFERENT schemes — the glow was a yellow→cyan gradient, and the panel's
+    // colours were off-by-one from the decks — so one plane could read three
+    // colours at once. Now a plane's glow, its highlighted deck, and its
+    // occupancy row are always the same colour.
+    //
+    // Each band is coloured by its CEILING flight-level line — the same line the
+    // deck grid is drawn at, and the same colour the #aw-legend rows use:
+    //   0–18,000 ft   → FL180 line, blue
+    //   18–29,000 ft  → FL290 line, amber
+    //   29–41,000 ft  → FL410 line, purple
+    //   41,000+ ft    → above RVSM, pink (rare high-flyers stand out)
+    // Band membership comes from altitudeBandIndex(altFt, ceilings) in flightManager.js.
+    // The decks use only the finite-ceiling bands (you can't draw a grid at ∞);
+    // the glow and panel use all four. `flLabel` is the FL-range caption the panel
+    // shows; `label` is the altitude-range caption the deck shows.
+    ALT_BANDS: [
+        { ceilFt: 18000,    color: 0x40c4ff, labelColor: '#9cd9ff', label: '0–18,000 FT',      flLabel: 'Below FL180' },
+        { ceilFt: 29000,    color: 0xffab40, labelColor: '#ffd9a0', label: '18,000–29,000 FT', flLabel: 'FL180–FL290' },
+        { ceilFt: 41000,    color: 0xd9b3ff, labelColor: '#e6d4ff', label: '29,000–41,000 FT', flLabel: 'FL290–FL410' },
+        { ceilFt: Infinity, color: 0xff8fce, labelColor: '#ffc7e8', label: '41,000+ FT',       flLabel: 'Above FL410' },
+    ],
 };
 
 // ── Trail pool sizing (trailManager.js) ───────────────────────────────────────
@@ -418,6 +626,7 @@ export const FLIGHT_DYNAMICS = {
     PITCH_GAIN:            1.0,  // deg of pitch per m/s of vertical rate
     PITCH_EASE_RATE:       3,    // how fast pitch eases toward its target (per sec)
     SPAWN_EASE_SEC:        0.5,  // motion-graphics polish (2026-06-27): newly spawned aircraft scale in over this many seconds instead of popping to full size instantly — see flightManager.js tick() spawnEase and aircraftInstancer.js's easeOutBack
+    VERTICAL_RATE_EMA:     0.4,  // smoothing for the per-poll vertical rate (0..1; lower = smoother). ADS-B altitude is quantized + polled ~30s, so a single delta is noisy — see smoothVerticalRate in flightManager.js
 };
 
 // ── Aircraft classification (visual variety) ─────────────────────────────────
@@ -635,10 +844,6 @@ export const AIRLINE_TAIL_COLORS = {
 };
 
 // ── Layer manager ─────────────────────────────────────────────────────────────
-export const LAYER = {
-    STORAGE_KEY: 'vg1_central_system',
-};
-
 // ── Cinematic director ────────────────────────────────────────────────────────
 export const DIRECTOR = {
     IDLE_THRESHOLD: 15.0,  // s — idle before activating

@@ -21,6 +21,7 @@ import * as THREE from 'three';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineSegments2 }        from 'three/addons/lines/LineSegments2.js';
 import { LineMaterial }         from 'three/addons/lines/LineMaterial.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 import { legendManager } from './legendManager.js';
 
@@ -60,6 +61,12 @@ export class BeaufortWarningManager {
         this._tiers  = [];                   // { glowMat, coreMat }
         this._lastBuild = 0;
         this._fillOpacity = 1.0;             // glow strength multiplier (live-tunable)
+
+        // These contours had NO resize handling at all: resolution was written
+        // once in rebuild() and then left, so any window resize, layout change or
+        // runtime pixel-ratio nudge left the gale/storm/hurricane outlines at the
+        // wrong line thickness until something happened to trigger a rebuild.
+        this._offResize = viewport.onChange(() => this.onResize());
     }
 
     setWindSource(windManager) { this._wind = windManager; }
@@ -103,8 +110,8 @@ export class BeaufortWarningManager {
         }
 
         this._clear();
-        const resW = (typeof window !== 'undefined') ? window.innerWidth  : 1920;
-        const resH = (typeof window !== 'undefined') ? window.innerHeight : 1080;
+        const resW = (typeof window !== 'undefined') ? viewport.bufferWidth()  : 1920;
+        const resH = (typeof window !== 'undefined') ? viewport.bufferHeight() : 1080;
 
         for (const tier of TIERS) {
             const pts = this._contour(spd, cols, rows, tier.mps);
@@ -208,11 +215,14 @@ export class BeaufortWarningManager {
         }
     }
 
-    onResize(w, h) {
+    // Resolution is in DRAWING-BUFFER pixels. Args are ignored on purpose: callers
+    // were passing CSS dims, which on ULTRA (pixelRatio 2.0) left these contours at
+    // half resolution. Read the authoritative size so no caller can get it wrong.
+    onResize() {
         for (const t of this._tiers) {
             if (!t) continue;
-            t.glowMat.resolution.set(w, h);
-            t.coreMat.resolution.set(w, h);
+            t.glowMat.resolution.set(viewport.bufferWidth(), viewport.bufferHeight());
+            t.coreMat.resolution.set(viewport.bufferWidth(), viewport.bufferHeight());
         }
     }
 
@@ -301,8 +311,11 @@ export class BeaufortWarningManager {
     _makePinned(p, cx, cy) {
         const card = document.createElement('div');
         const offset = (this._pins++ % 5) * 14;
-        card.style.cssText = `position:fixed; z-index:121; left:${Math.min(cx + 16, window.innerWidth - 200) + offset}px;
-            top:${Math.min(cy + 16, window.innerHeight - 140) + offset}px; width:180px;
+        // Clamp to the map rect so pinned cards never slide under the rails/dock.
+        const _pp = viewport.clampToRect(cx + 16 + offset, cy + 16 + offset,
+                                         180, 140, viewport.rect());
+        card.style.cssText = `position:fixed; z-index:121; left:${_pp.x}px;
+            top:${_pp.y}px; width:180px;
             background:rgba(1,10,20,0.95); border:1px solid rgba(64,196,255,0.5);
             font-family:'Courier New',monospace; font-size:10px; letter-spacing:1px; box-shadow:0 0 24px rgba(64,196,255,0.12);`;
         const col = '#' + p.tier.glow.toString(16).padStart(6, '0');

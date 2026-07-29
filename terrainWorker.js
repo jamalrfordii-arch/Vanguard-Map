@@ -9,6 +9,8 @@
 // 0 ocean splats ever rendered, undetected for weeks). Grid values in config.js
 // must keep land+ocean candidates comfortably under MAX_ALLOC — the console.warn
 // below fires if that budget is ever blown again.
+import { landElevToUnits, formulaFor, resolveMode } from './terrainHeight.js';
+
 self.onmessage = function(e) {
     const {
         demData, imgW, imgH,
@@ -18,7 +20,14 @@ self.onmessage = function(e) {
         prngSeed,
         VSCALE_LAND  = 1.0,  // land vertical exaggeration (config.TERRAIN_VSCALE_LAND)
         VSCALE_OCEAN = 1.0,  // ocean vertical exaggeration (config.TERRAIN_VSCALE_OCEAN)
+        TERRAIN_MODE_IN,     // 'legacy' | 'tall' | 'flat' — see terrainHeight.js
     } = e.data;
+
+    // Land height formula for THIS surface. Shared with tilePointsBuilder via
+    // terrainHeight.js so the base cloud and the streamed tiles can no longer
+    // disagree about where the ground is — they did, by ~3x, which is why base
+    // cloud points floated above solidly-tiled terrain.
+    const LAND_FORMULA = formulaFor('base', resolveMode(TERRAIN_MODE_IN));
 
     // ── Seeded PRNG (mulberry32) ───────────────────────────────────────────────
     function mulberry32(seed) {
@@ -45,7 +54,11 @@ self.onmessage = function(e) {
     function getSceneY(x, z) {
         const hM   = getTrueElevation(x, z);
         const dist = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
-        return (hM < 0 ? (hM / 600.0) * VSCALE_OCEAN : (hM / 650.0) * VSCALE_LAND) - Math.pow(dist, 2) * 20.0;
+        // Ocean keeps its own /600 curve — it is not part of the land disagreement
+        // and the sea plane governs that band anyway.
+        return (hM < 0 ? (hM / 600.0) * VSCALE_OCEAN
+                       : landElevToUnits(hM, LAND_FORMULA) * VSCALE_LAND)
+               - Math.pow(dist, 2) * 20.0;
     }
 
     const normalDelta = (MAP_WIDTH / imgW) * 1.2;
@@ -65,12 +78,33 @@ self.onmessage = function(e) {
     // an expected ~0.587, i.e. most ocean splats were silently dropped).
     // Raised with real headroom this time, not just past the observed count.
     const MAX_ALLOC = 24000000;
+    // ── Attribute precision (2026-07-24) ─────────────────────────────────────
+    // At the shipped SPLAT_LAND_GRID the cloud is ~20.4M points, and six f32
+    // attributes came to 935MB of a 1342MB JS heap. That heap size was the
+    // dominant cost of GC pauses (measured: 40 of 53 frame hitches correlated
+    // with heap movement, worst 369ms, at an allocation rate of only 0.9MB/s —
+    // so it was the SIZE of the live set being scanned, not churn), and those
+    // pauses were what stopped the renderer holding 2× supersampling.
+    //
+    // colour and steepness are both bounded 0..1, so 8 bits each is plenty:
+    // 256 levels of colour per channel is what a JPEG delivers anyway, and
+    // steepness only ever feeds a smoothstep. Declared `normalized` on the
+    // BufferAttribute (terrainBuilder), so GLSL still reads plain 0..1 floats
+    // and no shader code changes. Saves ~233MB.
+    //
+    // position/height stay f32 — they carry world-scale values, not 0..1.
+    // normals are the next candidate (Int8, ~175MB) but are a signed range and
+    // were deliberately left for a separate step.
     const positions = new Float32Array(MAX_ALLOC * 3);
-    const colors    = new Float32Array(MAX_ALLOC * 3);
+    const colors    = new Uint8Array(MAX_ALLOC * 3);
     const sizes     = new Float32Array(MAX_ALLOC);
     const heights   = new Float32Array(MAX_ALLOC);
     const normals   = new Float32Array(MAX_ALLOC * 3);
-    const ridges    = new Float32Array(MAX_ALLOC);
+    const ridges    = new Uint8Array(MAX_ALLOC);
+    // Quantise 0..1 → 0..255. Explicit clamp: Uint8Array WRAPS on overflow
+    // (unlike Uint8ClampedArray), so an out-of-range colour would silently come
+    // back as a wildly wrong one rather than saturating.
+    const q8 = (t) => (t <= 0 ? 0 : t >= 1 ? 255 : (t * 255 + 0.5) | 0);
     let count = 0;
     let overflowWarned = false;
 
@@ -191,11 +225,12 @@ self.onmessage = function(e) {
             // ── Earth-curvature Y offset ──────────────────────────────────────
             const dist   = Math.sqrt((x / MAP_WIDTH) ** 2 + (z / MAP_HEIGHT) ** 2);
             const curveY = -Math.pow(dist, 2) * 20.0;
-            // Smooth exaggeration taper: 650 at low elevation → 1100 at peaks ≥4000m
-            // Reduces apparent steepness on mountain faces so grid points cluster tighter
-            const highBlend = Math.min(1.0, Math.max(0.0, (hMeters - 2000.0) / 2000.0));
-            const exag  = 650.0 + highBlend * 450.0;
-            const finalY = (hMeters / exag) * VSCALE_LAND;
+            // Height now comes from the SHARED transform (terrainHeight.js). The
+            // 'tall' formula is this worker's historical curve verbatim — 650 at low
+            // elevation easing to 1100 at peaks >= 4000m, which reduces apparent
+            // steepness on mountain faces so grid points cluster tighter. In LEGACY
+            // mode that is exactly what runs, so the world view is unchanged.
+            const finalY = landElevToUnits(hMeters, LAND_FORMULA) * VSCALE_LAND;
 
             // ── Satellite colour pipeline ─────────────────────────────────────
             let cU = Math.floor((x / MAP_WIDTH  + 0.5) * (colorW - 1));
@@ -380,16 +415,16 @@ self.onmessage = function(e) {
             positions[count * 3]     = x;
             positions[count * 3 + 1] = finalY + curveY;
             positions[count * 3 + 2] = z;
-            colors[count * 3]     = r;
-            colors[count * 3 + 1] = g;
-            colors[count * 3 + 2] = b;
+            colors[count * 3]     = q8(r);
+            colors[count * 3 + 1] = q8(g);
+            colors[count * 3 + 2] = q8(b);
             const jitter = prng() * (0.08 * (1.0 - steepness * 0.85));
             sizes[count]   = Math.max(0.18, 0.20 + steepness * 0.32 + latFactor * 0.22) + jitter;
             heights[count] = finalY;
             normals[count * 3]     = nx;
             normals[count * 3 + 1] = ny;
             normals[count * 3 + 2] = nz;
-            ridges[count]  = steepness;
+            ridges[count]  = q8(steepness);
             count++;
         }
     }
@@ -463,15 +498,15 @@ self.onmessage = function(e) {
             positions[count * 3]     = x;
             positions[count * 3 + 1] = finalY + curveY;
             positions[count * 3 + 2] = z;
-            colors[count * 3]     = r;
-            colors[count * 3 + 1] = g;
-            colors[count * 3 + 2] = b;
+            colors[count * 3]     = q8(r);
+            colors[count * 3 + 1] = q8(g);
+            colors[count * 3 + 2] = q8(b);
             sizes[count]   = 0.28;
             heights[count] = finalY;
             normals[count * 3]     = 0.0;
             normals[count * 3 + 1] = 1.0;
             normals[count * 3 + 2] = 0.0;
-            ridges[count]  = 0.0;
+            ridges[count]  = 0;
             count++;
         }
     }

@@ -40,3 +40,12 @@ captures/
 # ── Backups ───────────────────────────────────────────────────────────────────
 *.backup.js
 agents/reports/
+
+# Large local-only assets (GitHub rejects >100MB)
+splats/*.ksplat
+splats/*.spz
+
+# Session-local / temp
+.claude/
+_tmp_unnamed.png
+*.tmp

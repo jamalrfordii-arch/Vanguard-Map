@@ -1,0 +1,36 @@
+{
+  "_comment": "3DGS capture manifest — the ingestion point for the agent sourcing pipeline (Phase 4, 2026-07-15). main.js loads this at boot and registers every entry with status 'sourced' onto the map via gsManager. To add a capture: drop the .spz/.splat/.ksplat in this folder, then append an entry here with status 'sourced' and its lat/lon + placement. No code change needed. See SOURCING.md for the agent workflow.",
+  "version": 1,
+  "captures": [
+    {
+      "id": "airmuseum2",
+      "name": "Museum of Flight",
+      "status": "disabled",
+      "path": "./splats/airmuseum2_crop.ksplat",
+      "lat": 47.518607,
+      "lon": -122.296747,
+      "sceneScale": 0.05,
+      "yOffset": 0.03,
+      "rotation": [0, 0, 0, 1],
+      "showCamY": 3.0,
+      "fullCamY": 1.0,
+      "showHorizDist": 4.0,
+      "source": "user-provided (SPZ v3 -> ksplat via 3dgsconverter)",
+      "notes": "Cropped capture: raw was 191u wide with a background dome+floaters washing white. Cropped in Python to the dense subject core (r<3.2, opacity>-2) = 867k pts, tight bounds ~6x4.4x4.3u, then reconverted to ksplat. sceneScale 0.01 => ~0.06 scene-unit landmark. Render integration: viewer.update(renderer,camera) is driven per-frame from gsManager.update + gpuAcceleratedSort:false (CPU sort) since the app is not cross-origin isolated."
+    }
+  ],
+  "targets": [
+    { "id": "hormuz",      "name": "Strait of Hormuz",     "category": "chokepoint", "lat": 26.5667, "lon":  56.2500, "status": "pending" },
+    { "id": "malacca",     "name": "Strait of Malacca",    "category": "chokepoint", "lat":  1.4300, "lon": 102.9000, "status": "pending" },
+    { "id": "suez",        "name": "Suez Canal",           "category": "chokepoint", "lat": 30.5000, "lon":  32.3500, "status": "pending" },
+    { "id": "gibraltar",   "name": "Strait of Gibraltar",  "category": "chokepoint", "lat": 35.9500, "lon":  -5.6000, "status": "pending" },
+    { "id": "bab-el-mandeb","name": "Bab-el-Mandeb",       "category": "chokepoint", "lat": 12.6000, "lon":  43.4000, "status": "pending" },
+    { "id": "bosphorus",   "name": "Bosphorus (Istanbul)", "category": "chokepoint", "lat": 41.1000, "lon":  29.0500, "status": "pending" },
+    { "id": "panama",      "name": "Panama Canal",         "category": "chokepoint", "lat":  9.0800, "lon": -79.6800, "status": "pending" },
+    { "id": "singapore",   "name": "Port of Singapore",    "category": "port",       "lat":  1.2640, "lon": 103.8400, "status": "pending" },
+    { "id": "rotterdam",   "name": "Port of Rotterdam",    "category": "port",       "lat": 51.9500, "lon":   4.1400, "status": "pending" },
+    { "id": "shanghai",    "name": "Port of Shanghai",     "category": "port",       "lat": 31.3500, "lon": 121.5000, "status": "pending" },
+    { "id": "jebel-ali",   "name": "Jebel Ali (Dubai)",    "category": "port",       "lat": 25.0000, "lon":  55.0600, "status": "pending" },
+    { "id": "long-beach",  "name": "LA / Long Beach",      "category": "port",       "lat": 33.7400, "lon":-118.2700, "status": "pending" }
+  ]
+}

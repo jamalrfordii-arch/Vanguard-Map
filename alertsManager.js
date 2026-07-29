@@ -95,6 +95,31 @@ export function initAlertsManager(aiCopilot, aisManager, discoveryManager) {
     let _renderPending = false;
     let _search = '';         // vessel name / MMSI filter
     let _searchFocused = false;
+    let _expandedGroups = new Set();   // group keys currently expanded (see _groupEntries)
+
+    // Collapse runs of 3+ consecutive same-type, non-CRITICAL entries into one
+    // summary row (2026-07-22 — collection-lead walkthrough: a feed-outage
+    // flood of near-identical "AIRCRAFT LOST SIGNAL" entries buried the rare
+    // CRITICAL "AERIAL CONFLICT" ones at equal visual weight). CRITICAL always
+    // renders individually — it's exactly the thing this must never bury.
+    function _groupEntries(visible) {
+        const out = [];
+        let i = 0;
+        while (i < visible.length) {
+            const e = visible[i];
+            if (e.severity === 'CRITICAL') { out.push({ kind: 'single', entry: e }); i++; continue; }
+            let j = i + 1;
+            while (j < visible.length && visible[j].type === e.type && visible[j].severity === e.severity) j++;
+            const run = visible.slice(i, j);
+            if (run.length >= 3) {
+                out.push({ kind: 'group', key: `${e.type}-${e.id}`, entries: run });
+            } else {
+                for (const r of run) out.push({ kind: 'single', entry: r });
+            }
+            i = j;
+        }
+        return out;
+    }
 
     // Recalculate unread on load (entries that aren't dismissed or read)
     _unread = _log.filter(e => !e.read && !e.dismissed).length;
@@ -290,6 +315,28 @@ export function initAlertsManager(aiCopilot, aisManager, discoveryManager) {
     }
 
     // ── LOG view ──────────────────────────────────────────────────────────────
+    function _entryHtml(e, isNew) {
+        return `
+        <div class="al-entry${isNew ? ' al-new' : ''}${e.mmsi ? ' al-clickable' : ''}"
+             data-id="${e.id}" data-mmsi="${e.mmsi || ''}">
+            <div class="al-entry-left">
+                <span class="al-icon" style="color:${e.color}">${e.icon}</span>
+                <div class="al-entry-body">
+                    <div class="al-entry-header">
+                        <span class="al-type" style="color:${e.color}">${e.label}</span>
+                        <span class="al-sev al-sev-${e.severity.toLowerCase()}">${e.severity}</span>
+                    </div>
+                    <div class="al-vessel">${e.vesselName}</div>
+                    <div class="al-msg">${e.message}</div>
+                </div>
+            </div>
+            <div class="al-entry-right">
+                <span class="al-time">${_relTime(e.timestamp)}</span>
+                <button class="al-dismiss" data-id="${e.id}" title="Dismiss">✕</button>
+            </div>
+        </div>`;
+    }
+
     function _renderLog(pane) {
         const q       = _search.toLowerCase().trim();
         const all     = _log.filter(e => !e.dismissed);
@@ -332,25 +379,30 @@ export function initAlertsManager(aiCopilot, aisManager, discoveryManager) {
             </div>`;
         } else {
             html += `<div class="al-log">`;
-            for (const e of visible) {
-                const isNew = !e.read;
+            const grouped = _groupEntries(visible);
+            for (const g of grouped) {
+                if (g.kind === 'single') {
+                    const e = g.entry;
+                    const isNew = !e.read;
+                    html += _entryHtml(e, isNew);
+                    continue;
+                }
+                // Collapsed run of 3+ same-type, non-CRITICAL entries.
+                const first  = g.entries[0];
+                const isOpen = _expandedGroups.has(g.key);
+                const anyNew = g.entries.some(e => !e.read);
                 html += `
-                <div class="al-entry${isNew ? ' al-new' : ''}${e.mmsi ? ' al-clickable' : ''}"
-                     data-id="${e.id}" data-mmsi="${e.mmsi || ''}">
-                    <div class="al-entry-left">
-                        <span class="al-icon" style="color:${e.color}">${e.icon}</span>
-                        <div class="al-entry-body">
-                            <div class="al-entry-header">
-                                <span class="al-type" style="color:${e.color}">${e.label}</span>
-                                <span class="al-sev al-sev-${e.severity.toLowerCase()}">${e.severity}</span>
-                            </div>
-                            <div class="al-vessel">${e.vesselName}</div>
-                            <div class="al-msg">${e.message}</div>
-                        </div>
+                <div class="al-group${isOpen ? ' al-group-open' : ''}" data-group-key="${g.key}">
+                    <div class="al-group-header">
+                        <span class="al-group-chevron">▶</span>
+                        <span class="al-icon" style="color:${first.color}">${first.icon}</span>
+                        <span class="al-group-count">${g.entries.length}×</span>
+                        <span class="al-group-label" style="color:${first.color}">${first.label}</span>
+                        ${anyNew ? '<span class="al-unread-dot"></span>' : ''}
+                        <span class="al-group-range">${_relTime(g.entries[g.entries.length - 1].timestamp)} – ${_relTime(first.timestamp)}</span>
                     </div>
-                    <div class="al-entry-right">
-                        <span class="al-time">${_relTime(e.timestamp)}</span>
-                        <button class="al-dismiss" data-id="${e.id}" title="Dismiss">✕</button>
+                    <div class="al-group-body">
+                        ${g.entries.map(e => _entryHtml(e, !e.read)).join('')}
                     </div>
                 </div>`;
             }
@@ -362,6 +414,17 @@ export function initAlertsManager(aiCopilot, aisManager, discoveryManager) {
     }
 
     function _bindLogEvents(pane) {
+        // Collapsed-group expand/collapse toggle
+        pane.querySelectorAll('.al-group-header').forEach(header => {
+            header.addEventListener('click', () => {
+                const key = header.closest('.al-group')?.dataset.groupKey;
+                if (!key) return;
+                if (_expandedGroups.has(key)) _expandedGroups.delete(key);
+                else _expandedGroups.add(key);
+                _render();
+            });
+        });
+
         // Search input
         const searchEl = pane.querySelector('#al-search-input');
         if (searchEl) {

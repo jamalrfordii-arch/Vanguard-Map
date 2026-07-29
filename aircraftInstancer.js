@@ -197,7 +197,20 @@ class AircraftInstancer {
         _aircraftQuat.setFromEuler(_aircraftEuler);
 
         _aircraftPos.copy(position);
-        const s = cls.scale * (spawnEase >= 1 ? 1 : Math.max(0, _easeOutBack(spawnEase)));
+        // ── World-space proportionate scale + anti-vanish floor (2026-07-24) ─────
+        // Aircraft render at a small FIXED world size (cls.scale × VIEW_SCALE) so
+        // they shrink with distance under normal perspective and stay proportionate
+        // to the terrain — unlike the earlier constant-screen-size floor, which held
+        // a fixed pixel size at every distance and looked oversized far away. The
+        // MIN_SCREEN_FRAC term is now just a tiny floor so a very distant plane holds
+        // a ~1px dot instead of vanishing. (40px selection snap keeps it clickable.)
+        const easeF = (spawnEase >= 1 ? 1 : Math.max(0, _easeOutBack(spawnEase)));
+        let s = cls.scale * FLIGHT.VIEW_SCALE * easeF;
+        const _cam = (typeof window !== 'undefined') ? window.camera : null;
+        if (_cam && FLIGHT.MIN_SCREEN_FRAC > 0) {
+            const floorS = _cam.position.distanceTo(_aircraftPos) * FLIGHT.MIN_SCREEN_FRAC * easeF;
+            if (s < floorS) s = floorS;
+        }
         _aircraftScale.set(s, s, s);
         _aircraftMatrix.compose(_aircraftPos, _aircraftQuat, _aircraftScale);
 

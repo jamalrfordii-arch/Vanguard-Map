@@ -1,8 +1,9 @@
 // aisManager.js — AISStream WebSocket manager, vessel registry, and API key prompt
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT, AIS } from './config.js';
+import { MAP_WIDTH, MAP_HEIGHT, AIS, CARGO, SHIP_RENDER } from './config.js';
 import { MID_TO_COUNTRY } from './aisCountries.js';
 import { typeCache } from './typeCache.js';
+import { draughtCache } from './draughtCache.js';
 import { simClock } from './simClock.js';
 import { checkPositionReport, parseEventTime } from './invariants.js';
 
@@ -47,6 +48,58 @@ function aisTypeToClass(t) {
     if (t === 51 || t === 53 || t === 54 ||
         t === 58 || t === 59)                     return 'SERVICE';   // SAR / tender / anti-pollution / medical / noncombatant
     return 'OTHER';                                                   // 20-29 WIG, 35 military, 55 law enf., 90-99 other, unknown
+}
+
+// ── Cargo intelligence, Phase 1: draft-based load estimate ───────────────────
+// (research/vanguard1-cargo-intel-spec-2026-07-23.md). Pure derived computation —
+// no port-call detection or cargo labeling yet, just draughtM → loadFactor →
+// LADEN/BALLAST/PARTIAL. Called only when v.draughtM or v.class may have changed
+// (inside the ShipStaticData handler), never per-frame.
+//
+// HONESTY PRINCIPLE (same one behind aisTypeToClass above, and the reason this
+// exists as an explicit function rather than a silent default): if draught or a
+// usable max-draught reference isn't actually known, every derived field must
+// read null so the UI can render "—" — never guess a state from missing data.
+function computeCargoEstimate(v) {
+    if (v.draughtM == null) {
+        v.maxDraughtM = null; v.loadFactor = null; v.ladenState = null;
+        return;
+    }
+    const seed    = CARGO.MAX_DRAFT_BY_CLASS[v.class] ?? null;
+    const learned = draughtCache.get(v.mmsi);
+    const maxDraughtM = (seed != null || learned != null)
+        ? Math.max(seed ?? 0, learned ?? 0)
+        : null;
+
+    v.maxDraughtM = maxDraughtM;
+    if (!maxDraughtM) { v.loadFactor = null; v.ladenState = null; return; }
+
+    const factor = Math.min(1, v.draughtM / maxDraughtM);
+    v.loadFactor = factor;
+    v.ladenState = factor >= CARGO.LADEN_THRESHOLD   ? 'LADEN'
+                 : factor <= CARGO.BALLAST_THRESHOLD ? 'BALLAST'
+                 : 'PARTIAL';
+}
+
+// ── Vessel true-scale rendering ───────────────────────────────────────────────
+// (config.js SHIP_RENDER header has the full "why not literal 1:1" reasoning —
+// short version: MAP_WIDTH spans the whole planet, so real physical scale would
+// make every vessel, including supertankers, an invisible sub-pixel dot. Instead
+// this computes RELATIVE proportions — a real vessel's length vs. a reference
+// length, anchored to the old fixed visual scale — which is the part that's
+// actually meaningful to render "to scale.")
+//
+// Always resolves to a real number (never null): unlike computeCargoEstimate,
+// there's no legitimate "unknown, show a dash" state for a 3D model's scale —
+// something has to render. Falls back through real length → class-typical
+// length → the old fixed baseline, in that order, so an unclassified vessel
+// with no static data yet still renders at a sane size instead of the floor.
+function computeRenderScale(v) {
+    const lengthM = v.lengthM
+        ?? SHIP_RENDER.TYPICAL_LENGTH_BY_CLASS[v.class]
+        ?? SHIP_RENDER.REFERENCE_LENGTH_M;
+    const proportional = SHIP_RENDER.BASELINE_SCALE * (lengthM / SHIP_RENDER.REFERENCE_LENGTH_M);
+    v.renderScale = Math.max(proportional, SHIP_RENDER.MIN_RENDER_SCALE);
 }
 
 // ── API Key prompt (styled to match VANGUARD HUD) ────────────────────────────
@@ -224,6 +277,23 @@ export class AISManager {
         this._sources.clear();
     }
 
+    /**
+     * Is any attached source TIME-BACKED — i.e. does it know where its entities
+     * actually were at a scrubbed past time, rather than only "now"?
+     *
+     * A getter rather than a global, per the dependency policy: the timeline
+     * rail needs to read current shared state, so it asks the owning module.
+     * See DataSource.isTimeBacked() for why this distinction is load-bearing —
+     * without it the rail implies that scrubbing rewinds vessel positions, which
+     * it does not unless a recording is driving them.
+     */
+    hasTimeBackedSource() {
+        for (const s of this._sources) {
+            if (s.isTimeBacked?.()) return true;
+        }
+        return false;
+    }
+
     // Pause/resume the LIVE WebSocket feed without closing the socket —
     // used during replay so recorded and live traffic don't fight.
     setLivePaused(v) { this._livePaused = !!v; }
@@ -323,6 +393,13 @@ export class AISManager {
                 const dest = (static_.Destination || '').trim().replace(/[@\x00]+/g, '').trim();
                 if (dest) existing.destination = dest.toUpperCase();
 
+                // Callsign — only the static message carries it. Feeds the
+                // FALSE_FLAG check in integrityManager.js (callsign ITU prefix
+                // vs MMSI MID country); position reports never touch it, so
+                // it just sits on the vessel record until it changes class.
+                const callsign = (static_.CallSign || '').trim().replace(/[@\x00]+/g, '').trim();
+                if (callsign) existing.callsign = callsign.toUpperCase();
+
                 const eta = static_.Eta;
                 if (eta && eta.Month > 0) {
                     const pad = n => String(n).padStart(2, '0');
@@ -355,6 +432,37 @@ export class AISManager {
                         }
                     }
                 }
+
+                // Draught — cargo-intelligence Phase 1 (research/vanguard1-cargo-intel-
+                // spec-2026-07-23.md). Only the static message carries it, field name is
+                // `MaximumStaticDraught` per aisstream.io's own API reference (confirmed
+                // against live docs, NOT the AIS-spec name "Draught" — the two are easy to
+                // confuse). Despite the field's name this is the vessel's CURRENT draught
+                // as set by the crew for this voyage, not a structural maximum — that's
+                // exactly why draughtCache.js exists, to learn the real per-vessel ceiling
+                // over repeated sightings. Sanity-bounded the same way draughtCache bounds
+                // its own writes (0 < draught <= 30m) so one garbled field can't corrupt
+                // the vessel's cargo estimate.
+                const draught = static_.MaximumStaticDraught;
+                if (draught != null && draught > 0 && draught <= 30) {
+                    existing.draughtM = draught;
+                    draughtCache.observe(mmsi, draught);
+                }
+                computeCargoEstimate(existing);
+
+                // Hull length — true-scale rendering (config.js SHIP_RENDER). AIS
+                // Dimension {A,B,C,D} is distance in meters from the GPS antenna to
+                // bow(A)/stern(B)/port(C)/starboard(D); total length = A+B, total
+                // beam = C+D (beam isn't used yet, only length). Sanity-bounded
+                // (0 < length <= 500 — the longest real ships, ULCCs/largest
+                // container ships, top out well under 500m) so one garbled field
+                // can't produce an absurd model size.
+                const dim = static_.Dimension;
+                if (dim && dim.A != null && dim.B != null) {
+                    const length = dim.A + dim.B;
+                    if (length > 0 && length <= 500) existing.lengthM = length;
+                }
+                computeRenderScale(existing);
             }
             return;
         }
@@ -446,6 +554,20 @@ export class AISManager {
                 lonDeg:      lon,
                 destination: null,
                 eta:         null,
+                callsign:    null,
+                // Cargo intelligence, Phase 1 — draft-based load estimate. All null
+                // until a ShipStaticData message arrives; computeCargoEstimate() fills
+                // these in, never guessing from missing data (see its own comment).
+                draughtM:    null,
+                maxDraughtM: null,
+                loadFactor:  null,
+                ladenState:  null,
+                // True-scale rendering. lengthM stays null until a static message's
+                // Dimension field arrives; renderScale always gets a real number
+                // (computed just below, before onVesselNew fires) since a 3D model
+                // has to render at SOME size — see computeRenderScale()'s comment.
+                lengthM:     null,
+                renderScale: SHIP_RENDER.BASELINE_SCALE,
                 // Three.js positions — lerped each frame
                 currentPos:  scenePos.clone(),
                 prevPos:     scenePos.clone(),
@@ -460,6 +582,7 @@ export class AISManager {
                 isDark:      false,
                 darkSince:   null
             };
+            computeRenderScale(v); // resolve a real scale before the first render (uses cached class if typeCache has one — see comment above)
             this.vessels.set(mmsi, v);
             if (this.onVesselNew) this.onVesselNew(mmsi, v);
         }

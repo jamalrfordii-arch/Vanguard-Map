@@ -1625,7 +1625,11 @@ export function createVesselDot(position, parentGroup) {
     // rises above this point, so the dot reads as a halo UNDER the ship
     // when viewed from oblique angles instead of over its deck.
     // Tiny 0.02 lift avoids z-fighting with the water plane.
-    dot.position.set(position.x, (position.y ?? 0) + 0.02, position.z);
+    // NO lift (2026-07-25). This used to be +0.02 "to avoid z-fighting with the
+    // water plane" — but the water plane is disabled, and 0.02 scene units is
+    // 2.7 KM, so the dot rendered well ABOVE its vessel. main.js re-places this
+    // every frame with a marker-proportional sink; this is just the spawn value.
+    dot.position.set(position.x, (position.y ?? 0), position.z);
     dot.renderOrder  = 4;
     dot.userData._vesselDotMat = mat;
     dot.userData._isVesselDot  = true;

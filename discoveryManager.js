@@ -31,7 +31,7 @@ import { runDiscoveryRules, OPTION_MENUS } from './discoveryRules.js';
 function _buildTestFixture(triggerType) {
     const base = {
         developingStories: [], invariantViolations: [], integrityFlagged: [],
-        rfEvents: [], chokepointActivity: [],
+        aircraftFlagged: [], rfEvents: [], chokepointActivity: [],
     };
     switch (triggerType) {
         case 'STS_GROUP': {
@@ -65,11 +65,20 @@ function _buildTestFixture(triggerType) {
                 name: 'STRAIT OF HORMUZ', count: 4, state: 'ELEVATED', dark: 1,
                 vessels: [{ mmsi, dark: true, stopped: true }],
             }];
+            // Aircraft-flagged fixture (2026-07-22) — exercises the new
+            // aircraftFlagged snapshot field end to end via testOptionsMode,
+            // shaped as the exact scenario the data-scope memo named:
+            // a military aircraft loitering near the same chokepoint as
+            // flagged vessel/RF activity.
+            base.aircraftFlagged = [{
+                icao24: 'ae01c3', callsign: 'REACH409', score: 58, tier: 'QUESTIONABLE',
+                flags: ['ALTITUDE_JUMP'],
+            }];
             return {
                 snapshot: base,
                 trigger: {
                     type: 'CROSS_DOMAIN',
-                    text: '[TEST] 3 domains active simultaneously (RF/chokepoint/AIS-story) — worth checking for a single underlying incident',
+                    text: '[TEST] 3 domains active simultaneously (RF/chokepoint/AIS-story) plus a flagged aircraft in the same sector — worth checking for a single underlying incident',
                     mmsis: [mmsi],
                 },
             };
@@ -140,6 +149,17 @@ export class DiscoveryManager {
         // name (string) → (args) => void   — what Claude is allowed to DO
         this._tools = new Map();
         this._registerBuiltinTools();
+
+        // passId (string) → actions[]  — options-mode actions the model
+        // proposed but that haven't been confirmed by a human yet (2026-07-22,
+        // see memory/decisions.md "options-card decision gap"). Options-mode
+        // renders a ranked menu implying a human weighs it; auto-executing the
+        // model's own top pick before that happens defeats the point of
+        // showing a menu at all. Assessment-mode (`assessment` + `actions`,
+        // no ranked options) still auto-executes as before — there's no menu
+        // implying a choice there, just the model's own conclusion.
+        this._pendingActions = new Map();
+        this._passIdCounter = 0;
 
         this._aiCopilot = null;
 
@@ -239,6 +259,19 @@ export class DiscoveryManager {
             integrityFlagged: (typeof window !== 'undefined' && window.vg1Integrity)
                 ? window.vg1Integrity.flagged().slice(0, DISCOVERY.MAX_SNAPSHOT_ENTITIES).map(r => ({
                     mmsi: r.mmsi, score: r.score, tier: r.tier, flags: [...(r.flags?.keys?.() ?? [])],
+                  }))
+                : [],
+            // Aircraft-flagged (2026-07-22) — flightIntegrityManager.js already runs
+            // (evaluate() on every poll, tick() for flag decay — see main.js) and was
+            // already visible in its own UI surfaces; it just never reached this
+            // snapshot, so Claude's cross-domain reasoning was blind to it even
+            // though the detection logic existed. Same shape as integrityFlagged,
+            // read from the same kind of already-global surface (window.vg1FlightIntegrity)
+            // per this file's "never import managers directly" rule above.
+            aircraftFlagged: (typeof window !== 'undefined' && window.vg1FlightIntegrity)
+                ? window.vg1FlightIntegrity.flagged().slice(0, DISCOVERY.MAX_SNAPSHOT_ENTITIES).map(r => ({
+                    icao24: r.icao24, callsign: r.callsign, score: r.score, tier: r.tier,
+                    flags: [...(r.flags?.keys?.() ?? [])],
                   }))
                 : [],
             // RF and chokepoint domains — added 2026-06-21 so "cross-domain" actually
@@ -475,6 +508,15 @@ export class DiscoveryManager {
 
                 if (options && options.length) {
                     // OPTIONS mode — render as cards (uiController.js), not prose.
+                    // Actions ride along as PENDING, not executed (see
+                    // constructor comment) — the card shows what the model
+                    // proposes doing about its top-ranked option, and a human
+                    // has to confirm before any tool actually runs.
+                    let passId = null;
+                    if (Array.isArray(actions) && actions.length) {
+                        passId = `pass-${++this._passIdCounter}`;
+                        this._pendingActions.set(passId, actions);
+                    }
                     this._emit({
                         type:      'DISCOVERY',
                         cls:       'discovery',
@@ -482,6 +524,8 @@ export class DiscoveryManager {
                         triggerType: result.triggerType || primaryTrigger?.type,
                         triggerText: result.triggerText || primaryTrigger?.text,
                         options,
+                        passId,
+                        pendingActions: passId ? actions : null,
                         isAiEnriched: true,
                         timestamp: Date.now(),
                         timeStr:   'JUST NOW',
@@ -516,7 +560,12 @@ export class DiscoveryManager {
                     });
                 }
 
-                this._executeActions(actions);
+                // Options-mode actions are held pending above, not run here —
+                // see the branch that builds `passId`. Assessment-mode (no
+                // ranked options) still auto-executes: there's no menu of
+                // alternatives implying a choice, just the model's own
+                // conclusion, which matches how it worked before this change.
+                if (!(options && options.length)) this._executeActions(actions);
             } else {
                 const errBody = await res.text().catch(() => '');
                 this.stats.claudeErrors++;
@@ -610,6 +659,30 @@ export class DiscoveryManager {
             window.watchlist.add(m);   // flagging implies watching
             if (note) window.watchlist.setNote(m, `[AI DISCOVERY] ${note}`);
         });
+    }
+
+    // ── Options-mode action confirmation (2026-07-22) ──────────────────────
+    // The UI (uiController.js) calls these from the Confirm/Dismiss buttons
+    // on an options card's pending-action strip. Public because they're the
+    // one place a human decision crosses back into the tool-execution path —
+    // deliberately NOT auto-wired to anything else.
+    confirmActions(passId) {
+        const actions = this._pendingActions.get(passId);
+        if (!actions) return false;
+        this._pendingActions.delete(passId);
+        this._executeActions(actions);
+        return true;
+    }
+
+    dismissActions(passId) {
+        const actions = this._pendingActions.get(passId);
+        if (!actions) return false;
+        this._pendingActions.delete(passId);
+        this._emit({
+            type: 'DISCOVERY_ACTION', cls: 'discovery-action', timestamp: Date.now(),
+            body: `→ operator dismissed ${actions.length} proposed action${actions.length === 1 ? '' : 's'} — no tools run`,
+        });
+        return true;
     }
 
     _executeActions(actions) {

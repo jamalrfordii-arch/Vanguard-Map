@@ -37,7 +37,7 @@ export function haversineNm(lat1, lon1, lat2, lon2) {
     return 2 * EARTH_NM * Math.asin(Math.sqrt(a));
 }
 
-function bearingDeg(lat1, lon1, lat2, lon2) {
+export function bearingDeg(lat1, lon1, lat2, lon2) {
     const y = Math.sin((lon2 - lon1) * DEG2RAD) * Math.cos(lat2 * DEG2RAD);
     const x = Math.cos(lat1 * DEG2RAD) * Math.sin(lat2 * DEG2RAD) -
               Math.sin(lat1 * DEG2RAD) * Math.cos(lat2 * DEG2RAD) * Math.cos((lon2 - lon1) * DEG2RAD);
@@ -95,6 +95,23 @@ export class DataSource {
     _onStart() {}
     _onStop()  {}
     _tick()    {}
+
+    /**
+     * Does this source carry REAL timestamps for the positions it emits?
+     *
+     * i.e. if the sim clock is scrubbed to time T, can this source say where its
+     * entities actually were at T — or does it only ever emit "now"?
+     *
+     * The timeline rail uses this to tell the operator the truth about what they
+     * are looking at. Scrubbing into the past always moves the sun and the
+     * terminator (they are computed from simClock), but vessel positions only
+     * follow if something recorded them. Without this flag the rail would imply
+     * the whole world rewound, which is the same class of quiet falsehood
+     * invariants.js exists to prevent.
+     *
+     * Default false: a live or synthetic feed only knows the present.
+     */
+    isTimeBacked() { return false; }
 }
 
 // ── SyntheticAISSource ────────────────────────────────────────────────────────
@@ -203,6 +220,9 @@ export class SyntheticAISSource extends DataSource {
 // message when sim time passes its timestamp. Scrubbing backwards rewinds
 // the cursor and replays forward from the new position.
 export class RecordedAISSource extends DataSource {
+    // Replays stored records with their original timestamps.
+    isTimeBacked() { return true; }
+
     constructor(records) {
         super();
         this._records  = records; // [{t, msg}], sorted
@@ -259,6 +279,9 @@ export class RecordedAISSource extends DataSource {
 // wire-shaped states array — wire it to flightManager.ingest in main.js.
 // Scrubbing backwards rewinds the cursor, same contract as RecordedAISSource.
 export class ZoneRecordedSource extends DataSource {
+    // Mixed ship+plane zone capture — records carry their own event times.
+    isTimeBacked() { return true; }
+
     constructor(records, { flightSink = null } = {}) {
         super();
         this._records    = records; // [{t, d, msg}], sorted
@@ -303,6 +326,12 @@ export class ZoneRecordedSource extends DataSource {
 // ── CompositeSource ───────────────────────────────────────────────────────────
 // Live world + injected synthetic events, or several scenarios at once.
 export class CompositeSource extends DataSource {
+    // Time-backed iff ANY child is: one recorded stream is enough for the
+    // scrubbed past to be partially real, and the rail says so.
+    isTimeBacked() {
+        return (this._sources || []).some(s => s.isTimeBacked?.());
+    }
+
     constructor(sources) {
         super();
         this._sources = sources || [];

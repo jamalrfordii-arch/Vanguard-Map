@@ -11,6 +11,40 @@ import {
     TERRAIN_VSCALE_LAND, TERRAIN_VSCALE_OCEAN,
 } from './config.js';
 import { quality } from './qualityManager.js';
+import { activeTerrainMode } from './tilePointsBuilder.js';
+import { TERRAIN_MODE, resolveMode } from './terrainHeight.js';
+
+// ── Terrain height mode A/B (2026-07-25) ─────────────────────────────────────
+// The base cloud and the streamed tiles used to compute land height from two
+// independent formulas that disagreed by ~3x — see terrainHeight.js for the full
+// diagnosis and why that made base-cloud points float above tiled ground.
+//
+// Reconciling them moves one of two hand-tuned views, so the choice was a look
+// decision. Jamal flew all three on 2026-07-25 and chose FLAT — the base cloud
+// drops to meet the tiles, which is the more physically honest of the two
+// exaggerations (13x vs 24x at Everest). See terrainHeight.js DEFAULT_MODE.
+//
+// A reload is required rather than a live swap because the base cloud's ~20M point
+// heights are baked into a GPU buffer by the worker. Recomputing them in place is
+// possible (the transform is analytically invertible) but that is real complexity
+// for a decision you make once — so this stays honest and simple instead.
+if (typeof window !== 'undefined') {
+    window.vg1TerrainMode = (mode) => {
+        if (mode === undefined) {
+            let cur; try { cur = localStorage.getItem('vg1_terrain_mode'); } catch (_) {}
+            return { active: resolveMode(cur), options: Object.values(TERRAIN_MODE),
+                     usage: "vg1TerrainMode('tall'|'flat'|'legacy') — reloads" };
+        }
+        const m = resolveMode(mode);
+        if (m !== mode && mode !== TERRAIN_MODE.LEGACY) {
+            console.warn(`[Terrain] unknown mode '${mode}' — use tall | flat | legacy`);
+            return;
+        }
+        try { localStorage.setItem('vg1_terrain_mode', m); } catch (_) {}
+        console.info(`[Terrain] mode → ${m}; reloading to rebuild the splat cloud`);
+        location.reload();
+    };
+}
 
 // Module-level references set once via init
 let _demData, _imgW, _imgH, _colorData, _colorW, _colorH;
@@ -33,6 +67,17 @@ export function initTerrainData({ demData, imgW, imgH, colorData, colorW, colorH
     }
 }
 
+// DEBUG HANDLE (2026-07-25). Exposed because its ABSENCE caused two silent false
+// negatives in one session: a live check of the terrain refactor reported
+// "NO-OP CONFIRMED" while having examined zero points, and a camera-clearance
+// measurement reported ground heights that were pure curve offset with no terrain
+// term. Both read `window.getTrueElevation`, found undefined, and degraded to a
+// confident-looking wrong answer instead of an error. A diagnostic that can't be
+// reached from the console is a diagnostic that will be silently skipped.
+// Returns metres; takes SCENE x/z. Null-safe before the DEM has loaded.
+if (typeof window !== 'undefined') {
+    window.getTrueElevation = (x, z) => (_demData ? getTrueElevation(x, z) : null);
+}
 export function getTrueElevation(x, z) {
     let u = Math.floor((x / MAP_WIDTH  + 0.5) * (_imgW - 1));
     let v = Math.floor((z / MAP_HEIGHT + 0.5) * (_imgH - 1));
@@ -165,6 +210,14 @@ export function createHighFidelityPointCloud(scene) {
             // Tune live: window.splatCloud.material.uniforms.uHillshade.value
             uHillshade:     { value: SPLAT_HILLSHADE },
             uFade:          { value: 1.0 },  // crossfade LOD: 1=fully visible, 0=invisible
+            // Spatial fade anchor — see the uCoverCenter comment in the vertex
+            // shader. Radius 0 = no streamed coverage yet, base stays fully opaque.
+            uCoverCenter:   { value: new THREE.Vector2(0, 0) },
+            uCoverRadius:   { value: 0.0 },
+            // 1.0 = base cloud at full opacity outside the covered disc (the
+            // behaviour at altitude). Driven down at close range in
+            // updatePointCloud — see the uniform's comment in the vertex shader.
+            uOutsideCap:    { value: 1.0 },
             uTilt:          { value: 0.0 },  // 0=top-down, 1=horizontal — drives oblique brightness boost
             // ── Hemisphere lighting — slope-direction dependent fill ──────────
             // uHemiStrength: 0=off (flat AMBIENT), 1=full hemisphere effect.
@@ -198,6 +251,19 @@ export function createHighFidelityPointCloud(scene) {
             uNightFloor:    { value: DAYNIGHT_TERRAIN.FLOOR },
             // ── Splat FX — coverage scale + animated ridge energy ────────────
             uSplatScale:    { value: SPLAT_FX.SCALE },
+            // gl_PointSize is in DEVICE pixels, but every size constant in this
+            // shader (lodMin 1.5-2.0, maxSize 3.0-4.5) was tuned on a dpr=1
+            // display. Without this term a higher pixel ratio — supersampling, or
+            // simply a retina screen — renders every splat at the same DEVICE
+            // size, i.e. HALF the on-screen size, which opens gaps between points
+            // and makes the cloud read darker and sparser rather than sharper.
+            // Multiplying by the live ratio keeps apparent size constant in CSS
+            // pixels so the tuning holds at any resolution. Written by main.js on
+            // vg1:pixelRatioChanged. (three's own PointsMaterial already does this
+            // internally via its `scale` uniform, which is why the tile-stream
+            // point layers never needed it — only this hand-written shader did.)
+            uPixelRatio:    { value: quality.currentPixelRatio() },
+            uTiltCoverage:  { value: SPLAT_FX.TILT_COVERAGE },
             uTime:          { value: 0.0 },   // seconds, written by main.js loop
             uRidgePulse:    { value: SPLAT_FX.RIDGE_PULSE },
             // Vertical exaggeration — used to decode metres from vHeight for
@@ -222,6 +288,7 @@ export function createHighFidelityPointCloud(scene) {
             varying float vDist;
             varying float vLatitude;  // 0=equator, 1=pole — abs(Z)/150
             varying float vEdgeFade;  // 1=interior, 0=at map boundary
+            varying float vFadeLocal; // per-point base-cloud fade (see uCoverCenter)
             varying float vDayFactor; // 1=full day, 0=full night (geographic terminator)
 
             uniform float uEdgeFadeStart;
@@ -229,6 +296,52 @@ export function createHighFidelityPointCloud(scene) {
             uniform float uSubSolarLat;  // radians
             uniform float uSubSolarLon;  // radians
             uniform float uSplatScale;   // global point-size multiplier
+            uniform float uPixelRatio;   // device pixels per CSS pixel (see uniform decl)
+            uniform float uTilt;         // 0 = looking straight down, 1 = horizontal
+            uniform float uTiltCoverage; // grazing-angle point-size boost (SPLAT_FX.TILT_COVERAGE)
+            // ── Spatial base-cloud fade (2026-07-24) ─────────────────────────
+            // uFade used to be a single global scalar: the instant the ground in
+            // FRONT of the camera was covered by streamed tiles, the entire
+            // 20.4M-point global cloud faded and (below 0.2) was culled outright
+            // — including every direction not yet looked at. Rotating then showed
+            // black, because the one layer that is always resident everywhere and
+            // needs no loading had been switched off on the strength of a purely
+            // local measurement.
+            //
+            // Now the fade is spatial: uFade applies only INSIDE the streamed
+            // footprint (a disc of uCoverRadius around uCoverCenter, in scene XZ).
+            // Outside it the base stays fully opaque, because nothing else covers
+            // that ground. Rotate anywhere and there is always real terrain to
+            // see, which then sharpens as tiles stream in.
+            uniform vec2  uCoverCenter;  // scene XZ where streamed coverage is anchored
+            uniform float uCoverRadius;  // world-unit radius of that coverage (0 = none)
+            // Ceiling on base-cloud opacity OUTSIDE the covered disc, at close range.
+            //
+            // uCoverRadius models tile coverage as a CIRCLE (the inscribed radius of
+            // the loaded block). Since tile loading became frustum-shaped the same
+            // day, tiles reach much further forward than that circle — so ground
+            // that IS covered by tiles sits outside the fade disc and was getting
+            // base cloud painted over it at full brightness. That is the yellow
+            // speckle reported over otherwise-clean satellite imagery, densest
+            // toward the far field where the mismatch is widest.
+            //
+            // Capping (rather than zeroing) is deliberate: the base cloud is the
+            // coverage floor and must never be fully absent while tiles are the
+            // primary terrain, or rotating into unloaded ground shows black again —
+            // the exact bug the spatial fade was added to fix. A faint wash is
+            // invisible against imagery but still catches an uncovered gap.
+            //
+            // The correct fix is real per-tile coverage in the shader instead of a
+            // circle; this is a bounded approximation of it. See decisions.md.
+            uniform float uOutsideCap;
+            // uFade is also declared in the fragment shader. It has to be declared
+            // in BOTH: the two stages are compiled as separate programs, so a
+            // uniform used in each needs its own declaration. Omitting it here gave
+            // "ERROR: 0:224: 'uFade' : undeclared identifier", the vertex shader
+            // failed to compile, and the whole 20.4M-point cloud silently stopped
+            // rendering — land went black while the ocean-floor mesh (a different
+            // material) kept drawing, which reads as "the map didn't load".
+            uniform float uFade;
 
             void main() {
                 vColor       = color;
@@ -305,7 +418,83 @@ export function createHighFidelityPointCloud(scene) {
                 // made land shapes look pixelated / lost. Keep points small (sharp
                 // shapes) until you're nearly at the whole-globe view.
                 float splatScaleD = mix(1.0, uSplatScale, clamp((dist - 160.0) / 70.0, 0.0, 1.0));
-                gl_PointSize    = clamp(perspSize, lodMin, maxSize) * splatScaleD;
+                // ── Grazing-angle coverage (2026-07-24) ──────────────────────
+                // A points cloud covers the ground only while point SIZE >= the
+                // on-screen spacing between neighbours. Spacing is what changes
+                // with viewing angle: on a ground plane seen at incidence θ from
+                // vertical, spacing along the view direction stretches by 1/cos θ,
+                // while gl_PointSize is fixed in device pixels and does not.
+                // So the cloud tears open into speckle as the camera tilts toward
+                // the horizon — exactly the black dots reported over the Sahara at
+                // a low oblique view, densest toward the horizon where θ is worst.
+                //
+                // Note this is NOT a resolution problem and no amount of extra
+                // points fixes it: doubling density halves spacing but also halves
+                // point size at the same distance. It is specifically a size-vs-
+                // spacing coverage problem, so the size is what has to give.
+                //
+                // uTilt² rather than uTilt: stay honest (boost ≈ 1) through normal
+                // near-nadir and gently-tilted framing, where the cloud already
+                // covers and any growth would only blur, and ramp in hard only at
+                // the steep angles where it genuinely tears.
+                float tiltCover = 1.0 + uTilt * uTilt * (uTiltCoverage - 1.0);
+                // × uPixelRatio: gl_PointSize is in device pixels; see the uniform's
+                // comment. Keeps apparent splat size constant in CSS pixels so the
+                // sizes above stay valid when supersampling or on a hidpi display.
+                gl_PointSize    = clamp(perspSize, lodMin, maxSize) * splatScaleD * uPixelRatio * tiltCover;
+
+                // ── Spatial fade (see uCoverCenter/uCoverRadius above) ────────
+                // Inside the streamed footprint → uFade (tiles have this ground).
+                // Outside → 1.0 (nothing else does). The 0.6..1.0 band gives a soft
+                // edge so the boundary never reads as a visible ring.
+                // uCoverRadius <= 0 means "no streamed coverage at all" → the base
+                // must stay fully opaque everywhere, which is also the correct
+                // behaviour on a cold start before any tile has landed.
+                float coverT = uCoverRadius > 0.0
+                    ? smoothstep(uCoverRadius * 0.6, uCoverRadius,
+                                 distance(position.xz, uCoverCenter))
+                    : 1.0;
+                // Outside the disc we cap rather than going to full opacity — see
+                // uOutsideCap. uOutsideCap is 1.0 at altitude (no change to the
+                // world/regional view) and drops only at close range, where the
+                // circle-vs-frustum mismatch actually exists.
+                vFadeLocal = mix(uFade, max(uFade, uOutsideCap), coverT);
+
+                // ── OCEAN POINTS NEVER FADE (2026-07-25) ─────────────────────
+                // The fade above assumes that wherever streamed tiles cover, they
+                // DRAW something — so the base cloud can safely step aside. That
+                // assumption is false over water, and two changes made today broke
+                // it from both ends:
+                //
+                //   1. Tiles are carved to the coastline (tileLandMask), so an
+                //      ocean tile produces ZERO points. It counts as coverage but
+                //      paints nothing.
+                //   2. The sea plane was disabled (waterManager seaMesh.visible =
+                //      false) at Jamal's request, removing the surface that used to
+                //      sit underneath and hide the difference.
+                //
+                // Result: inside the streamed footprint, over water, the base cloud
+                // fades out and NOTHING replaces it — a black hole in the shape of
+                // the tile grid, hard against the coastline where the land tiles do
+                // draw. That is the reported "black gap between the tile land and
+                // the continent".
+                //
+                // aHeight is the pre-curve terrain height, so <= 0 is sea level or
+                // below. Those points are the only thing rendering the ocean now,
+                // and nothing else can cover them, so they must always stay lit.
+                if (aHeight <= 0.0) vFadeLocal = 1.0;
+
+                // Collapse fully-faded points to zero size. The GPU skips
+                // rasterising zero-size points, so the covered footprint costs no
+                // fragment work — that recovers most of what the old global
+                // visible=false cull was buying, without giving up the
+                // out-of-footprint safety net that cull was destroying.
+                // NOTE: no backticks in this file's GLSL comments — the shader is a
+                // template literal, so a backtick ends the string and the rest of
+                // the shader gets parsed as JavaScript. That produced a boot-time
+                // "false is not a function" that node --check could not see,
+                // because the wreckage was still valid JS (2026-07-24).
+                if (vFadeLocal <= 0.01) gl_PointSize = 0.0;
                 gl_Position  = projectionMatrix * mvPos;
             }
         `,
@@ -341,6 +530,7 @@ export function createHighFidelityPointCloud(scene) {
             varying float vDist;
             varying float vLatitude;
             varying float vEdgeFade;
+            varying float vFadeLocal; // per-point base-cloud fade (see uCoverCenter)
             varying float vDayFactor;
 
             void main() {
@@ -607,7 +797,7 @@ export function createHighFidelityPointCloud(scene) {
                 dnColor += vec3(0.030, 0.012, 0.0) * twilight;            // subtle amber band
                 litColor = mix(litColor, dnColor, uNightDim);
 
-                gl_FragColor = vec4(litColor, softAlpha * uFade * vEdgeFade);
+                gl_FragColor = vec4(litColor, softAlpha * vFadeLocal * vEdgeFade);
             }
         `,
         // Transparent required for Gaussian softAlpha — NormalBlending means
@@ -628,12 +818,19 @@ export function createHighFidelityPointCloud(scene) {
 
     worker.onmessage = (e) => {
         const { positions, colors, sizes, heights, normals, ridges, count } = e.data;
+        // `color` and `aRidge` arrive from terrainWorker as Uint8 (see the note
+        // there). The third argument marks them NORMALIZED, so WebGL divides by
+        // 255 on read and the shaders still see plain 0..1 floats — no GLSL
+        // change. Saves ~233MB of JS heap at the shipped point count, which is
+        // what lets the renderer hold 2× supersampling instead of losing it to
+        // GC pauses. If you ever hand these attributes Float32Arrays again, the
+        // `true` MUST come off or every colour will be divided by 255.
         geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
+        geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3, true));
         geo.setAttribute('aSize',    new THREE.BufferAttribute(sizes,     1));
         geo.setAttribute('aHeight',  new THREE.BufferAttribute(heights,   1));
         geo.setAttribute('aNormal',  new THREE.BufferAttribute(normals,   3));
-        geo.setAttribute('aRidge',   new THREE.BufferAttribute(ridges,    1));
+        geo.setAttribute('aRidge',   new THREE.BufferAttribute(ridges,    1, true));
         geo.computeBoundingSphere();
         const el = document.getElementById('node-count');
         if (el) el.innerText = count.toLocaleString();
@@ -665,6 +862,10 @@ export function createHighFidelityPointCloud(scene) {
         VSCALE_LAND:  TERRAIN_VSCALE_LAND,
         VSCALE_OCEAN: TERRAIN_VSCALE_OCEAN,
         prngSeed: 12345,  // fixed seed → deterministic splat distribution
+        // Land height formula, shared with the streamed tiles (terrainHeight.js).
+        // Read here rather than inside the worker so both surfaces are guaranteed
+        // to be built from the SAME mode in a given session.
+        TERRAIN_MODE_IN: activeTerrainMode(),
     });
 
     return splatCloud;
@@ -1263,7 +1464,17 @@ export function createOceanBasinLabels(scene) {
 // Point cloud stays fully visible until close zoom, then crossfades with mesh.
 //   camera.y > 25  → uFade = 1.0  (point cloud fully visible)
 //   camera.y 25→10 → uFade 1→0    (fades as continent mesh fades in)
-export function updatePointCloud(camera, coverage = 0) {
+// coverCenter/coverRadius (2026-07-24): the scene-space disc that streamed tiles
+// actually cover. `coverage` says HOW MUCH is covered; these say WHERE. Without
+// them the fade can only be applied globally, which is what made rotation show
+// black. Omit them (or pass radius 0) and the base stays fully opaque everywhere.
+// Absolute minimum opacity for the base splat cloud. It is the map's fallback
+// surface: if it reaches zero, any gap in streamed tile coverage renders BLACK.
+// Measured 2026-07-25 at 0.086 during a close view, which is what produced the
+// tile-shaped holes over the US east coast.
+const BASE_FADE_FLOOR = 0.55;
+
+export function updatePointCloud(camera, coverage = 0, coverCenter = null, coverRadius = 0) {
     if (!_splatCloud) return;
     // Base cloud (the global fallback floor) fades out ONLY where we are close
     // AND real streamed-tile coverage has actually arrived. `coverage` is a 0..1
@@ -1305,11 +1516,71 @@ export function updatePointCloud(camera, coverage = 0) {
     // safety benefit. TILT_FADE_FLOOR keeps SOME extra caution at full oblique
     // tilt (never trust coverage AS much as top-down) without disabling fading
     // entirely — tune live: window.splatCloud (search TILT_FADE_FLOOR to relocate).
-    const TILT_FADE_FLOOR = 0.45;   // fade capacity retained at tilt=1, vs 0 before
+    const TILT_FADE_FLOOR = 0.45;
+    // See the FLOOR note below. Kept here beside TILT_FADE_FLOOR because the two
+    // are easy to confuse: that one limits how much TILT may fade the base, this
+    // one is an absolute floor under the whole expression.   // fade capacity retained at tilt=1, vs 0 before
     const tiltFactor = THREE.MathUtils.lerp(1.0, TILT_FADE_FLOOR, tilt);
-    const fade = 1 - closeness * tiltFactor * THREE.MathUtils.clamp(coverage, 0, 1);
+    let fade = 1 - closeness * tiltFactor * THREE.MathUtils.clamp(coverage, 0, 1);
+
+    // ── FLOOR: the base cloud is the FALLBACK, so it may never vanish ────────
+    // (2026-07-25) Measured uFade at 0.086 and 0.112 during close views. At 9%
+    // opacity the base cloud is effectively gone, and anywhere a streamed tile
+    // has not arrived there is then NOTHING to draw — tile-shaped black holes
+    // punched through real terrain. That is the reported "black empty spaces".
+    //
+    // `coverage` is a single global FRACTION, so it cannot see holes: 90% covered
+    // with a gap in the middle still fades the base almost to nothing, and the gap
+    // renders black. A floor is the cheap, robust answer — the base always has
+    // enough opacity to stand in as natural terrain.
+    //
+    // WHY THIS IS SAFE NOW, AND WAS NOT BEFORE. Two things changed today:
+    //   1. Tile points render at renderOrder 3+ with depthWrite:false, so they
+    //      PAINT OVER the base. A higher floor therefore shows through gaps only,
+    //      it does not haze ground that tiles already cover.
+    //   2. Terrain heights were unified (terrainHeight.js). The base cloud used to
+    //      sit ~3x too high and its points poked through tiled ground — the
+    //      "floating splat dots" of 2026-07-21, which is precisely why fading it
+    //      to nothing looked like the right idea at the time. With both surfaces
+    //      at the same height, keeping the base visible underneath is coherent.
+    //
+    // Tunable live: window.vg1BaseFadeFloor = 0.2 (lower = more aggressive fade,
+    // more risk of holes; 1.0 = never fade the base at all).
+    const floorV = (typeof window !== 'undefined' && window.vg1BaseFadeFloor != null)
+        ? window.vg1BaseFadeFloor : BASE_FADE_FLOOR;
+    fade = Math.max(fade, floorV);
     _splatCloud.material.uniforms.uFade.value = fade;
-    // Cull only when the base is genuinely near-gone (top-down + close, tiles
-    // covering). At any oblique angle fade≈1, so the base stays as the backstop.
-    _splatCloud.visible = fade > 0.2;
+
+    // ── Spatial coverage anchor (2026-07-24) ─────────────────────────────────
+    // `fade` above is now the fade applied INSIDE the streamed footprint only;
+    // the shader keeps everything outside it fully opaque. Feed it the footprint.
+    if (coverCenter && coverRadius > 0) {
+        _splatCloud.material.uniforms.uCoverCenter.value.set(coverCenter.x, coverCenter.z);
+        _splatCloud.material.uniforms.uCoverRadius.value = coverRadius;
+    } else {
+        // No streamed coverage → radius 0 → shader holds the base fully opaque
+        // everywhere. This is the cold-start and high-altitude case.
+        _splatCloud.material.uniforms.uCoverRadius.value = 0.0;
+    }
+
+    // Outside-disc opacity cap (2026-07-24). `closeness` is already 0 at altitude
+    // and 1 when close, so this leaves the world/regional view untouched and only
+    // engages where the circular coverage model diverges from the frustum-shaped
+    // tile footprint. Floor of OUTSIDE_CAP_MIN, never 0: the base cloud stays a
+    // visible backstop over genuinely uncovered ground, which is the whole reason
+    // the global cull was removed.
+    const OUTSIDE_CAP_MIN = 0.30;
+    _splatCloud.material.uniforms.uOutsideCap.value =
+        THREE.MathUtils.lerp(1.0, OUTSIDE_CAP_MIN, closeness);
+
+    // NO GLOBAL CULL. This used to be `_splatCloud.visible = fade > 0.2`, which
+    // switched off the entire global cloud whenever the ground in front of the
+    // camera was covered — so rotating to look anywhere else showed black, since
+    // the only always-resident layer had been culled on a local measurement.
+    // The base cloud is the app's coverage floor: it must never be globally
+    // absent while we are in the band where tiles are the primary terrain.
+    // Its cost is handled per-point instead — the vertex shader sets
+    // gl_PointSize = 0 inside the covered footprint, so those points cost no
+    // fragment work, which is where the cull's real saving came from anyway.
+    _splatCloud.visible = true;
 }

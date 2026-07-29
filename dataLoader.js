@@ -12,27 +12,112 @@ export function loadRawImage(url) {
     });
 }
 
-export async function loadAndStitchTiles(urls, gridCols, gridRows, tag = 'tiles') {
+const _sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ── Blank-tile guard (2026-07-24) ─────────────────────────────────────────────
+// The old stitcher did `Promise.all(urls.map(loadRawImage))`, which only guards
+// against a NETWORK error: a tile that comes back HTTP 200 but with blank/black
+// pixels (EOX s2cloudless does this intermittently under load) loaded "fine" and
+// was drawn straight into the mosaic — baking a permanent black square into
+// _colorData, i.e. every base-cloud point in that grid cell rendered black. That
+// was the "dark rectangle over Perth" bug. We now (a) tolerate per-tile failures
+// instead of failing the whole map, (b) detect near-black tiles and retry them
+// with a cache-bust, and (c) patch any still-bad tile from its nearest good
+// neighbour so nothing bakes black.
+//
+// Mean luminance via a tiny 16×16 downsample — cheap enough to run per tile.
+const _lumCanvas = (typeof document !== 'undefined') ? document.createElement('canvas') : null;
+if (_lumCanvas) { _lumCanvas.width = _lumCanvas.height = 16; }
+const _lumCtx = _lumCanvas ? _lumCanvas.getContext('2d', { willReadFrequently: true }) : null;
+function _meanLuminance(img) {
+    if (!_lumCtx) return 255;
+    _lumCtx.clearRect(0, 0, 16, 16);
+    _lumCtx.drawImage(img, 0, 0, 16, 16);
+    const d = _lumCtx.getImageData(0, 0, 16, 16).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+    return sum / (256 * 3);   // 0..255; a real land/ocean tile is well above ~4
+}
+
+// Load one tile with retry. NEVER rejects — resolves to { img, failed }. A
+// network error OR a near-black tile (when detectBlank) triggers a backoff
+// retry with a cache-bust so a cached blank isn't just re-served.
+async function _loadTileRobust(url, { detectBlank = false, attempts = 3 } = {}) {
+    for (let a = 1; a <= attempts; a++) {
+        const tryUrl = a === 1 ? url : `${url}${url.includes('?') ? '&' : '?'}vg1r=${a}`;
+        try {
+            const img = await loadRawImage(tryUrl);
+            if (detectBlank && _meanLuminance(img) < 4) {
+                if (a < attempts) { await _sleep(200 * a); continue; }
+                return { img, failed: true };   // still blank after retries
+            }
+            return { img, failed: false };
+        } catch (_) {
+            if (a < attempts) { await _sleep(200 * a); continue; }
+            return { img: null, failed: true };
+        }
+    }
+    return { img: null, failed: true };
+}
+
+// Nearest successfully-loaded tile by grid (Manhattan) distance.
+function _nearestGoodTile(idx, results, cols) {
+    const c0 = idx % cols, r0 = Math.floor(idx / cols);
+    let best = null, bestD = Infinity;
+    for (let i = 0; i < results.length; i++) {
+        if (!results[i].img || results[i].failed) continue;
+        const c = i % cols, r = Math.floor(i / cols);
+        const d = Math.abs(c - c0) + Math.abs(r - r0);
+        if (d < bestD) { bestD = d; best = results[i]; }
+    }
+    return best;
+}
+
+export async function loadAndStitchTiles(urls, gridCols, gridRows, tag = 'tiles', opts = {}) {
+    // Satellite colour tiles get blank-tile detection by default; DEM tiles do
+    // NOT — a black terrarium pixel legitimately means sea level, not a failure.
+    const detectBlank = opts.detectBlank ?? (tag === 'satellite');
+
     const tFetch = performance.now();
-    const images = await Promise.all(urls.map(loadRawImage));
+    const results = await Promise.all(urls.map(u => _loadTileRobust(u, { detectBlank })));
     mark(`fetch ${tag}`, { tiles: urls.length });
     const tStitch = performance.now();
-    const tileW = images[0].width;
-    const tileH = images[0].height;
+
+    const firstGood = results.find(r => r.img);
+    if (!firstGood) throw new Error(`loadAndStitchTiles(${tag}): every tile failed to load`);
+    const tileW = firstGood.img.width;
+    const tileH = firstGood.img.height;
+
     const canvas = document.createElement('canvas');
-    canvas.width = tileW * gridCols;
+    canvas.width  = tileW * gridCols;
     canvas.height = tileH * gridRows;
     const ctx = canvas.getContext('2d');
 
-    for (let i = 0; i < images.length; i++) {
-        let col = i % gridCols;
-        let row = Math.floor(i / gridCols);
-        ctx.drawImage(images[i], col * tileW, row * tileH);
+    // Pass 1 — draw every good tile.
+    const bad = [];
+    for (let i = 0; i < results.length; i++) {
+        const col = i % gridCols, row = Math.floor(i / gridCols);
+        if (results[i].img && !results[i].failed) {
+            ctx.drawImage(results[i].img, col * tileW, row * tileH);
+        } else {
+            bad.push(i);
+        }
+    }
+
+    // Pass 2 — patch any bad tile from its nearest good neighbour so the mosaic
+    // never bakes a black hole into the base colour cloud.
+    if (bad.length) {
+        console.warn(`[tiles] ${tag}: ${bad.length}/${urls.length} tile(s) failed or blank — patched from neighbours:`, bad);
+        for (const i of bad) {
+            const col = i % gridCols, row = Math.floor(i / gridCols);
+            const src = _nearestGoodTile(i, results, gridCols);
+            if (src && src.img) ctx.drawImage(src.img, col * tileW, row * tileH);
+        }
     }
 
     const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
     // getImageData on a 4096² canvas is a known mobile stall point — time it separately.
-    mark(`stitch+decode ${tag}`, { px: `${canvas.width}x${canvas.height}`, bufMB: +(data.byteLength / 1048576).toFixed(1) });
+    mark(`stitch+decode ${tag}`, { px: `${canvas.width}x${canvas.height}`, bufMB: +(data.byteLength / 1048576).toFixed(1), patched: bad.length });
     return { data, w: canvas.width, h: canvas.height };
 }
 

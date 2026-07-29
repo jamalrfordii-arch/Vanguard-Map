@@ -1,6 +1,15 @@
-// waterManager.js — Injects Gerstner Wave mathematics into a standard material
+// waterManager.js — Flat sea plane with a land mask and sea-state paint.
+//
+// The Gerstner wave injection this file was originally built around was removed
+// on 2026-07-24. It had never rendered: the vertex shader failed to compile for
+// its entire life (waveNormal used in the <beginnormal_vertex> hook, which three
+// emits BEFORE the <begin_vertex> hook that declared it), so the sea silently
+// fell back to a plain material. Once the compile was fixed the intended look
+// turned out to be wrong for this map — animated swell, sun glitter and a hex
+// grid competing with the land and traffic the map exists to show, at real fill
+// cost over every ocean pixel. Removed rather than flagged off.
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT, WATER_OPACITY } from './config.js';
+import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 import { getTrueElevation } from './terrainBuilder.js';
 
 // 1×1 transparent default so the uSeaState sampler is always valid (waveFieldLayer
@@ -13,11 +22,13 @@ export const waterUniforms = {
     uTime:             { value: 0.0 },
     uSunDir:           { value: new THREE.Vector3(0.0, 1.0, 0.0) },
     uSunElevation:     { value: 1.0 },
-    uHexGridScale:     { value: 18.0 }, // cell size — larger = smaller cells
-    uHexGridIntensity: { value: 3.0  }, // master brightness, 0 = off
-    // ── Photoreal pass (2026-06-12) — live tunable, 0 disables ──────────────
-    uGlitterStrength:  { value: 0.9  }, // per-pixel sun sparkle along the light path
-    uSSSStrength:      { value: 0.8  }, // translucent teal glow through wave crests
+    // Decorative sea terms (hex grid, sun glitter, subsurface glow) are pinned to
+    // zero. They are still referenced by the fragment shader, so the uniforms have
+    // to exist — but nothing drives them any more and there is no toggle.
+    uHexGridScale:     { value: 18.0 },
+    uHexGridIntensity: { value: 0.0  },
+    uGlitterStrength:  { value: 0.0  },
+    uSSSStrength:      { value: 0.0  },
     // ── Sea-state paint (2026-06-17) — significant wave height into the surface ──
     uSeaState:         { value: _seaStateDefault }, // equirectangular sea-state colour texture
     uSeaStateStrength: { value: 0.0  }, // 0 = off (water unchanged); set by waveFieldLayer toggle
@@ -58,16 +69,30 @@ export function createDynamicSeaLevel(scene) {
 
     const mat = new THREE.MeshStandardMaterial({
         name:             'Water',
-        color:            0x010e22,   // slightly deeper base — was 0x011a33
-        roughness:        0.1,
-        metalness:        0.8,
+        // ── Ocean colour (2026-07-24) ────────────────────────────────────
+        // Matched live against a reference screenshot Jamal picked, then baked in.
+        // 0x010e22 was tuned for a sea lit by glitter/SSS/hex-grid; with those
+        // removed it read as a near-black void. metalness 0.8 / roughness 0.1 was
+        // the other half of the problem — a mirror-like surface reflecting a dark
+        // sky. Low metalness + high roughness gives a flat, evenly-lit blue that
+        // stays readable at every sun angle, which is what a map wants.
+        // Tune live: window.vg1Water.material.color.setHex(0x1b4fa0)
+        color:            0x1b4fa0,
+        roughness:        0.85,
+        metalness:        0.10,
         transparent:      true,
-        opacity:          WATER_OPACITY,
+        // 0.82 rather than WATER_OPACITY (0.96): some transparency lets the
+        // ocean-floor bathymetry read through as depth shading near coasts and
+        // over ridges, which is real data and the main reason the sea is worth
+        // drawing at all.
+        opacity:          0.82,
         // Emissive keeps the water visible at low ambient light.
         // Reduced from 0.75 → 0.38 so the ocean sits in a clearly darker
         // luminance band than the land terrain (figure-ground separation).
-        emissive:         0x04213d,
-        emissiveIntensity: 0.38,
+        emissive:         0x1747a0,
+        // The emissive is what keeps the sea readable on the night side and at
+        // low sun angles now that nothing else lights it.
+        emissiveIntensity: 0.60,
     });
 
     // Inject GLSL directly into the Three.js Standard Shader
@@ -90,123 +115,60 @@ export function createDynamicSeaLevel(scene) {
             varying vec3  vWorldPos;
             varying float vLandMask;
 
-            // Gerstner Wave parameters: direction(x,y), steepness(z), wavelength(w)
-            // Steepness tripled from original — makes crests clearly visible.
-            // waveD adds short cross-chop for surface texture detail.
-            vec4 waveA = vec4( 1.0,  0.5,  0.22, 15.0);  // primary swell
-            vec4 waveB = vec4( 0.8,  0.6,  0.16, 25.0);  // secondary long swell
-            vec4 waveC = vec4(-0.2, -0.6,  0.18, 10.0);  // counter-swell
-            vec4 waveD = vec4(-0.6,  0.4,  0.10,  6.0);  // short cross-chop
-
-            vec3 gerstnerWave(vec4 wave, vec3 p, inout vec3 tangent, inout vec3 binormal) {
-                float steepness  = wave.z;
-                float wavelength = wave.w;
-                float k  = 2.0 * 3.14159 / wavelength;
-                float c  = sqrt(9.8 / k);
-                vec2  d  = normalize(wave.xy);
-                float f  = k * (dot(d, p.xz) - c * uTime * 0.55); // 0.55 — slightly faster
-                float a  = steepness / k;
-
-                tangent += vec3(
-                    -d.x * d.x * (steepness * sin(f)),
-                     d.x *        (steepness * cos(f)),
-                    -d.x * d.y * (steepness * sin(f))
-                );
-                binormal += vec3(
-                    -d.x * d.y * (steepness * sin(f)),
-                     d.y *        (steepness * cos(f)),
-                    -d.y * d.y * (steepness * sin(f))
-                );
-
-                return vec3(
-                    d.x * (a * cos(f)),
-                    a   *       sin(f),
-                    d.y * (a * cos(f))
-                );
-            }
-
             ${shader.vertexShader}
         `.replace(
-            `#include <begin_vertex>`,
+            // ── ORDER MATTERS (fixed 2026-07-24) ──────────────────────────────
+            // three emits <beginnormal_vertex> BEFORE <begin_vertex>. All the wave
+            // maths therefore has to live HERE, in the earlier hook, or `waveNormal`
+            // is referenced before its declaration and the entire vertex shader
+            // fails to compile:
+            //     ERROR: 'waveNormal' : undeclared identifier
+            //     ERROR: '=' : cannot convert from 'const highp float' to
+            //                  'highp 3-component vector of float'
+            // The material then silently renders wrong rather than erroring
+            // visibly — almost certainly the unexplained "water changes colour"
+            // and "onBeforeCompile edit produced no effect" entries in
+            // memory/scar-tissue.md. `transformed` is still declared in the
+            // begin_vertex hook below, where three expects it.
+            `#include <beginnormal_vertex>`,
             `
-            vec3 gridPoint = position;
-            vec3 tangent  = vec3(1.0, 0.0, 0.0);
-            vec3 binormal = vec3(0.0, 0.0, 1.0);
-            vec3 p = gridPoint;
-
-            p += gerstnerWave(waveA, gridPoint, tangent, binormal);
-            p += gerstnerWave(waveB, gridPoint, tangent, binormal);
-            p += gerstnerWave(waveC, gridPoint, tangent, binormal);
-            p += gerstnerWave(waveD, gridPoint, tangent, binormal);
-
-            // Pass the normalised crest height to the fragment stage.
-            // waveA amplitude ≈ steepness/k = 0.22/(2π/15) ≈ 0.525 scene units;
-            // four waves summed → max ~1.5 — divide by 1.5 to keep 0‥1 range.
-            vWaveHeight = clamp(p.y / 1.5, 0.0, 1.0);
-
-            vec3 transformed = p;
-
-            vec3 waveNormal = normalize(cross(binormal, tangent));
-
-            // World-space normal + position for Fresnel sky reflection in fragment.
-            // mat3(modelMatrix) strips translation and handles the -90° rotateX baked
-            // into the plane geometry, giving a correct upward-facing world normal.
-            vWorldNormal = normalize(mat3(modelMatrix) * waveNormal);
+            // ── FLAT SEA (2026-07-24) ────────────────────────────────────
+            // The Gerstner swell was removed outright rather than left behind a
+            // flag. It had never actually rendered (the vertex shader failed to
+            // compile — see git history / memory), and once fixed it was clear
+            // animated waves are decoration that competes with the data this map
+            // exists to show, and cost fill rate across every ocean pixel.
+            //
+            // What remains here is what the FRAGMENT stage genuinely needs:
+            // vLandMask (discards water over land), vWorldPos/vWorldNormal
+            // (Fresnel + sea-state sampling). Those are data, not decoration.
+            vec3 p = position;
+            vWaveHeight  = 0.0;
+            vec3 objectNormal = vec3(0.0, 1.0, 0.0);
+            vWorldNormal = normalize(mat3(modelMatrix) * objectNormal);
             vWorldPos    = (modelMatrix * vec4(p, 1.0)).xyz;
             vLandMask    = aLandMask;
             `
         ).replace(
-            `#include <beginnormal_vertex>`,
+            // Runs AFTER the block above, so `p` is already in scope here.
+            `#include <begin_vertex>`,
             `
-            vec3 objectNormal = waveNormal;
+            vec3 transformed = p;
             `
         );
 
-        // Inject FBM (fractal Brownian motion) noise into the vertex stage
-        // so fine-scale ripple detail rides on top of the Gerstner waves.
-        // Two octaves of scrolling hash noise perturb the surface normal in
-        // the tangent plane — no extra displacement, just normal variance.
-        // uTime * 0.18 keeps the micro-ripples slower than the main swell.
-        shader.vertexShader = shader.vertexShader.replace(
-            `vWorldNormal = normalize(mat3(modelMatrix) * waveNormal);`,
-            `
-            // ── FBM micro-ripple normal perturbation ──────────────────────
-            // Two octaves of scrolling value-noise shift the wave normal in
-            // the tangent plane, creating sub-wavelength capillary texture.
-            vec2 fbmUV = p.xz * 0.18 + vec2(uTime * 0.18, uTime * 0.11);
-            // Hash-based pseudo-noise (no texture required)
-            vec2 fbmI  = floor(fbmUV);
-            vec2 fbmF  = fract(fbmUV);
-            fbmF       = fbmF * fbmF * (3.0 - 2.0 * fbmF);  // smoothstep
-            float h00  = fract(sin(dot(fbmI + vec2(0,0), vec2(127.1, 311.7))) * 43758.5);
-            float h10  = fract(sin(dot(fbmI + vec2(1,0), vec2(127.1, 311.7))) * 43758.5);
-            float h01  = fract(sin(dot(fbmI + vec2(0,1), vec2(127.1, 311.7))) * 43758.5);
-            float h11  = fract(sin(dot(fbmI + vec2(1,1), vec2(127.1, 311.7))) * 43758.5);
-            float fbm1 = mix(mix(h00, h10, fbmF.x), mix(h01, h11, fbmF.x), fbmF.y);
-            // Second octave — finer scale, scrolling orthogonally
-            vec2 fbmUV2 = p.xz * 0.40 + vec2(-uTime * 0.09, uTime * 0.14);
-            vec2 fbmI2  = floor(fbmUV2);
-            vec2 fbmF2  = fract(fbmUV2);
-            fbmF2       = fbmF2 * fbmF2 * (3.0 - 2.0 * fbmF2);
-            float g00   = fract(sin(dot(fbmI2 + vec2(0,0), vec2(269.5, 183.3))) * 43758.5);
-            float g10   = fract(sin(dot(fbmI2 + vec2(1,0), vec2(269.5, 183.3))) * 43758.5);
-            float g01   = fract(sin(dot(fbmI2 + vec2(0,1), vec2(269.5, 183.3))) * 43758.5);
-            float g11   = fract(sin(dot(fbmI2 + vec2(1,1), vec2(269.5, 183.3))) * 43758.5);
-            float fbm2  = mix(mix(g00, g10, fbmF2.x), mix(g01, g11, fbmF2.x), fbmF2.y);
-            // Combine: map [0,1] → [-1,1] then weight by 0.12 so Gerstner
-            // normals still dominate and the effect stays physically plausible.
-            vec2 microNorm  = (vec2(fbm1, fbm2) * 2.0 - 1.0) * 0.12;
-            vec3 perturbedN = normalize(waveNormal
-                + tangent  * microNorm.x
-                + binormal * microNorm.y);
-            vWorldNormal = normalize(mat3(modelMatrix) * perturbedN);`
-        );
+        // (The FBM micro-ripple injection was removed with the waves — it perturbed
+        // the Gerstner normal, which no longer exists.)
 
         // Foam in the fragment stage — runs after all Three.js lighting so
         // we blend on top of the lit ocean colour rather than under it.
         shader.fragmentShader = `
             uniform vec3  uSunDir;
             uniform float uSunElevation;
+            // Declared in BOTH stages: vertex and fragment compile as separate
+            // programs, and uTime is used in each. Missing here gave
+            // "ERROR: 'uTime' : undeclared identifier" (2026-07-24).
+            uniform float uTime;
             uniform float uHexGridScale;
             uniform float uHexGridIntensity;
             uniform float uGlitterStrength;
@@ -256,7 +218,20 @@ export function createDynamicSeaLevel(scene) {
             vec3  viewDir  = normalize(cameraPosition - vWorldPos);
             float cosTheta = max(0.0, dot(viewDir, vWorldNormal));
             float fresnel  = 0.04 + 0.96 * pow(1.0 - cosTheta, 5.0);
-            fresnel = clamp(fresnel * 0.55, 0.0, 0.38);
+            // ── Fresnel DISABLED (2026-07-24) ─────────────────────────────────
+            // Was clamp(fresnel * 0.55, 0.0, 0.38). Fresnel is view-angle
+            // dependent: ~0.04 where you look straight down at the water and
+            // ~0.38 at grazing angles. On a map viewed obliquely that paints a
+            // visible horizontal seam across every ocean — flat lighter water
+            // toward the horizon, darker water in the foreground, with a hard
+            // transition between them. Physically correct for a photoreal sea,
+            // wrong for a chart, where the ocean should read as one uniform
+            // surface whose only variation is real bathymetry showing through.
+            //
+            // The block below is left intact rather than deleted because
+            // viewDir/reflDir are still referenced further down; with the mix
+            // weight at zero none of it reaches the framebuffer.
+            fresnel = 0.0;
 
             vec3 reflDir = reflect(-viewDir, vWorldNormal);
 
@@ -407,13 +382,43 @@ export function createDynamicSeaLevel(scene) {
     //   window.waterUniforms.uHexGridScale.value = 12.0
     window.waterUniforms = waterUniforms;
 
+    // ── SEA PLANE HIDDEN BY DEFAULT (2026-07-24) ─────────────────────────────
+    // Jamal's call, and it is the right one: the real ocean in this map is the
+    // BATHYMETRY on the ocean-floor mesh — depth-shaded, with shelves, ridges and
+    // trenches that are actual data. This plane is a flat tinted sheet laid on top
+    // of it, and no amount of colour tuning stops it flattening that detail into
+    // one uniform blue. Hiding it is what finally matched the reference look.
+    //
+    // The mesh is still built rather than deleted: it carries the baked land mask
+    // and is the surface waveFieldLayer paints significant-wave-height onto, so
+    // that layer can show it when it needs it. Nothing else should.
+    //   window.vg1Water.visible = true   // to see it again
+    seaMesh.visible = false;
+
+    // Debug handle (Tier 3 per CLAUDE.md — debug only, never a data path).
+    if (typeof window !== 'undefined') window.vg1Water = seaMesh;
+
     scene.add(seaLevelGroup);
     return seaLevelGroup;
 }
 
-// Call this from the main animation loop.
-// cameraY is accepted for API compatibility — previously drove polar-grid
-// opacity, but the grid is gone now and cameraY is currently unused.
+// ── Sea surface: flat and blue (2026-07-24) ──────────────────────────────────
+// Animated swell, sun glitter, subsurface glow and the hex grid have all been
+// removed — not disabled behind a flag, removed. They were decoration on a map
+// whose job is showing land and traffic, and they cost fill rate over every
+// ocean pixel at world view where they conveyed nothing.
+//
+// The one piece of history worth keeping: none of it had ever rendered. The
+// water vertex shader failed to compile for its whole life (waveNormal was used
+// in the <beginnormal_vertex> hook, which three emits BEFORE the <begin_vertex>
+// hook where it was declared), so the sea had silently fallen back to a plain
+// material. CLAUDE.md's "waveA/B/C/D were tuned to look physically correct" was
+// describing something nobody had seen. Fixing the compile is what finally made
+// the design question answerable, and the answer was no.
+//
+// uSeaState / uSeaStateStrength are NOT decoration and remain wired: that is
+// waveFieldLayer painting real significant-wave-height data onto the surface.
 export function updateDynamicWater(time, _cameraY = 500) {
+    // Still advanced so the fragment-side sea-state sampling stays live.
     waterUniforms.uTime.value = time;
 }

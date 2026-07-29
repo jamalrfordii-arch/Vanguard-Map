@@ -18,6 +18,7 @@
 //   setupUI({ portMarkersGroup: portManager.group, ... });
 
 import * as THREE from 'three';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 
 // ── Port database ─────────────────────────────────────────────────────────────
@@ -28,7 +29,7 @@ import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 // teuRank   : global container TEU rank (null = not ranked)
 // maxVessel : largest vessel class that can enter
 // serves    : strategic chokepoints / waterways this port feeds
-const PORTS = [
+export const PORTS = [
     // ── NORTH SEA ─────────────────────────────────────────────────────────────
     { name: 'ROTTERDAM',    lat: 51.92,  lon:  4.48,  tier: 1, region: 'NORTH SEA',       type: 'Container + Bulk + Energy', teuRank:  11, maxVessel: 'Post-Panamax (24,000 TEU)', serves: ['English Channel', 'Danish Straits'] },
     { name: 'ANTWERP',      lat: 51.26,  lon:  4.40,  tier: 1, region: 'NORTH SEA',       type: 'Container + Chemicals',     teuRank:  13, maxVessel: 'Post-Panamax (24,000 TEU)', serves: ['English Channel'] },
@@ -261,7 +262,10 @@ export class PortManager {
     // Returns the port data object if a port label is within clickPx of mouse,
     // null otherwise. Same screen-space approach as hover detection.
     checkClick(mouse, camera, clickPx = 52) {
-        const vpW = window.innerWidth, vpH = window.innerHeight;
+        // Both `mouse` and the projected port are NDC, so the rect ORIGIN cancels
+        // out here — but the SCALE does not. A window-sized vpW inflates every
+        // distance, so clickPx stops meaning 52 on-screen pixels.
+        const vpW = viewport.width(), vpH = viewport.height();
         const msx = (mouse.x *  0.5 + 0.5) * vpW;
         const msy = (mouse.y * -0.5 + 0.5) * vpH;
         let nearest = null, nearestDist = clickPx;
@@ -291,8 +295,8 @@ export class PortManager {
     tick(camera, mouse, delta) {
         const nowMs = Date.now();
         const camY  = camera.position.y;
-        const vpW   = window.innerWidth;
-        const vpH   = window.innerHeight;
+        const vpW   = viewport.width();
+        const vpH   = viewport.height();
 
         // ── Phase 2: zoom tier ────────────────────────────────────────────────
         const zoomTier = camY > MACRO_Y ? 1 : camY > MESO_Y ? 2 : 3;

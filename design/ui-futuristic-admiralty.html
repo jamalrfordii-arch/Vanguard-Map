@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VANGUARD1 — Futuristic Admiralty</title>
+<!--
+  DIRECTION: FUTURISTIC ADMIRALTY — 2026-07-26
+  Static mockup. No dependencies, no JS logic, not wired to anything.
+
+  THESIS
+  ──────
+  Admiralty chart bones, instrument-grade execution.
+  "Futuristic" comes from PRECISION, not from glow:
+      · registration marks and graduated scales
+      · tabular numerals, optical alignment, hairline leader lines
+      · motion that ENCODES STATE (a live-feed sweep) and nothing decorative
+
+  EFFECTIVENESS RULE
+  ──────────────────
+  Data is DRAWN, not spelled. A bearing is a dial. Time is a trace.
+  Load is a meter. You read a shape in ~100ms and a number in ~800ms.
+  Any value that has a natural geometry gets that geometry.
+
+  COLOUR DISCIPLINE
+  ─────────────────
+  Chrome is monochrome navy + bone + brass. Three semantic colours only:
+      --lume    live / healthy / active
+      --warn    degraded, needs attention
+      --caution anomaly — magenta, the Admiralty cautionary-area convention
+  If a colour isn't carrying meaning, it isn't allowed on screen.
+-->
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+
+  :root {
+    /* ── surfaces ─────────────────────────────── */
+    --void:       #05080d;
+    --panel-top:  #0c1622;
+    --panel-bot:  #081018;
+    --edge:       #1c2f42;
+    --edge-lit:   rgba(196,220,240,0.10);
+    --hair:       #16273a;
+
+    /* ── type ─────────────────────────────────── */
+    --bone:       #ece6d8;   /* primary readout — chart paper */
+    --bone-dim:   #aab6c2;
+    --slate:      #66757f;   /* field labels */
+    --slate-deep: #3a4854;   /* ornament, ticks */
+
+    /* ── accents ──────────────────────────────── */
+    --brass:      #d3bd8b;   /* structural accent, scales, marks */
+    --lume:       #5fd9c0;   /* LIVE / healthy — the only "future" colour */
+    --warn:       #f0a63c;   /* degraded */
+    --caution:    #ff4d9a;   /* anomaly — chart magenta */
+
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", "Segoe UI Mono", Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+  }
+
+  body {
+    margin: 0; min-height: 100vh; background: var(--void);
+    font-family: var(--sans); color: var(--bone-dim);
+    padding: 26px 24px 60px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .head { max-width: 1180px; margin: 0 auto 22px; }
+  .head h1 { font-size: 14px; font-weight: 650; color: var(--bone); margin: 0 0 7px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .head p { font-size: 12.5px; line-height: 1.65; margin: 0; max-width: 78ch; color: #7a8792; }
+  .head code { font-family: var(--mono); color: var(--brass); font-size: 11.5px; }
+
+  /* ═══ STAGE: map backdrop so chrome is judged in situ ═══ */
+  .stage {
+    max-width: 1180px; margin: 0 auto; position: relative;
+    border: 1px solid #141d27; overflow: hidden;
+    background: radial-gradient(130% 100% at 68% 24%, #14202c 0%, #0a121a 46%, #05080d 100%);
+    padding: 22px;
+    display: flex; gap: 18px; align-items: flex-start;
+  }
+  .stage-map { position: absolute; inset: 0; pointer-events: none; }
+
+  /* ═══════════════════════════════════════════════════════
+     PANEL — the frame. Hairlines, registration marks, no glow.
+     ═══════════════════════════════════════════════════════ */
+  .p {
+    position: relative;
+    width: 268px; flex-shrink: 0;
+    background: linear-gradient(180deg, var(--panel-top), var(--panel-bot));
+    border: 1px solid var(--edge);
+    box-shadow: 0 10px 34px rgba(0,0,0,0.55), inset 0 1px 0 var(--edge-lit);
+  }
+  /* Registration marks — diagonal pair. Instrument, not decoration. */
+  .p::before, .p::after {
+    content: ''; position: absolute; width: 8px; height: 8px;
+    border-color: var(--brass); opacity: 0.55;
+  }
+  .p::before { top: -1px; left: -1px;  border-top: 1px solid; border-left: 1px solid; }
+  .p::after  { bottom: -1px; right: -1px; border-bottom: 1px solid; border-right: 1px solid; }
+
+  .p + .p { }
+  .col { display: flex; flex-direction: column; gap: 16px; }
+
+  /* ── panel header ─────────────────────────── */
+  .p-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    padding: 9px 11px 7px;
+  }
+  .p-title {
+    font-size: 10.5px; font-weight: 700; color: var(--bone);
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .p-id {
+    font-family: var(--mono); font-size: 8.5px; color: var(--slate-deep);
+    letter-spacing: 0.10em;
+  }
+  /* Graduated scale rule — a chart scale bar, doubling as a divider. */
+  .scale-rule {
+    height: 5px; margin: 0 11px;
+    background:
+      repeating-linear-gradient(90deg, var(--slate-deep) 0 1px, transparent 1px 5px) bottom/100% 3px no-repeat,
+      repeating-linear-gradient(90deg, var(--brass)     0 1px, transparent 1px 30px) bottom/100% 5px no-repeat;
+    opacity: 0.5;
+  }
+  .p-body { padding: 10px 11px 12px; }
+
+  .sec {
+    font-size: 8.5px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--slate-deep); margin: 13px 0 7px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .sec:first-child { margin-top: 0; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: var(--hair); }
+
+  /* ── data rows ────────────────────────────── */
+  .row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 10px; padding: 3px 0; font-size: 11px;
+  }
+  .row .k { color: var(--slate); flex-shrink: 0; letter-spacing: 0.02em; }
+  .row .v {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    color: var(--bone-dim); text-align: right; font-size: 11px;
+  }
+  .row .v.hi { color: var(--bone); }
+  .row .v .u { color: var(--slate-deep); font-size: 9.5px; margin-left: 2px; }
+
+  /* ═══════════════════════════════════════════════════════
+     DRAWN INSTRUMENTS — data with a natural geometry gets it
+     ═══════════════════════════════════════════════════════ */
+
+  /* Feed strip: name + live sweep + throughput meter + count */
+  .feed { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+  .feed .fname { font-size: 10.5px; color: var(--slate); width: 34px; flex-shrink: 0; letter-spacing: 0.04em; }
+  .feed .meter { flex: 1; height: 12px; position: relative; }
+  .feed .meter i {
+    position: absolute; bottom: 0; width: 2px; background: var(--lume);
+    opacity: 0.75; display: block;
+  }
+  .feed.degraded .meter i { background: var(--warn); }
+  .feed .fcount {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: 11px; color: var(--bone); width: 42px; text-align: right;
+  }
+  /* Live sweep — ENCODES STATE. Only ever on a healthy feed. */
+  .pip { width: 7px; height: 7px; position: relative; flex-shrink: 0; }
+  .pip b { position: absolute; inset: 2px; border-radius: 50%; background: var(--lume); display: block; }
+  .pip s {
+    position: absolute; inset: 0; border-radius: 50%;
+    border: 1px solid var(--lume); display: block;
+    animation: sweep 2.6s cubic-bezier(.2,.6,.3,1) infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: scale(0.5); opacity: 0.9; }
+    70%  { transform: scale(2.3); opacity: 0; }
+    100% { transform: scale(2.3); opacity: 0; }
+  }
+  .feed.degraded .pip b { background: var(--warn); }
+  .feed.degraded .pip s { animation: none; border-color: var(--warn); opacity: 0.25; }
+
+  /* Bearing dial + speed gauge sit side by side */
+  .instr-pair { display: flex; gap: 12px; align-items: center; margin: 4px 0 8px; }
+  .dial-wrap { flex-shrink: 0; }
+  .gauges { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+
+  .gauge .glabel {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 8.5px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--slate-deep); margin-bottom: 3px;
+  }
+  .gauge .gval {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: 12.5px; color: var(--bone); letter-spacing: -0.01em;
+  }
+  .gauge .gval .u { font-size: 9px; color: var(--slate); margin-left: 2px; }
+
+  /* Anomaly block — the ONE saturated thing on screen */
+  .anom {
+    margin-top: 11px; border: 1px solid rgba(255,77,154,0.40);
+    background: linear-gradient(180deg, rgba(255,77,154,0.11), rgba(255,77,154,0.05));
+    position: relative;
+  }
+  .anom-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 6px 9px 4px;
+  }
+  .anom-lbl {
+    font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--caution);
+  }
+  .anom-val {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: 12px; color: var(--caution);
+  }
+  .anom-foot {
+    padding: 0 9px 7px; font-size: 9.5px; color: rgba(255,77,154,0.62);
+    letter-spacing: 0.02em;
+  }
+
+  /* Layer rows — each carries the glyph it actually draws on the map */
+  .lyr {
+    display: flex; align-items: center; gap: 9px;
+    padding: 4px 0; font-size: 11px; color: var(--bone-dim);
+  }
+  .lyr .lname { flex: 1; }
+  .lyr .lglyph { width: 16px; flex-shrink: 0; opacity: 0.95; }
+  .lyr .lsw {
+    width: 18px; height: 9px; flex-shrink: 0; position: relative;
+    border: 1px solid var(--slate-deep); background: transparent;
+  }
+  .lyr .lsw::after {
+    content: ''; position: absolute; top: 1px; left: 1px;
+    width: 6px; height: 5px; background: var(--brass);
+    transition: transform .15s;
+  }
+  .lyr.off { color: var(--slate-deep); }
+  .lyr.off .lglyph { opacity: 0.30; }
+  .lyr.off .lsw::after { transform: translateX(0); background: var(--slate-deep); opacity: .5; }
+  .lyr:not(.off) .lsw::after { transform: translateX(9px); }
+  .lyr:not(.off) .lsw { border-color: rgba(211,189,139,0.5); }
+
+  .foot { max-width: 1180px; margin: 24px auto 0; font-size: 12.5px; line-height: 1.7; color: #74818c; }
+  .foot strong { color: var(--bone); font-weight: 620; }
+  .foot ul { padding-left: 18px; margin: 8px 0 0; }
+  .foot li { margin-bottom: 6px; }
+  .foot em { color: var(--brass); font-style: normal; }
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>Futuristic Admiralty</h1>
+  <p>Chart bones, instrument execution. The "future" here is precision — registration marks, graduated scales, tabular numerals, one state-encoding animation — not glow. Every value with a natural geometry is <em>drawn</em> instead of spelled: bearing is a dial, feed health is a meter, the AIS gap is a break in an actual track trace.</p>
+</div>
+
+<div class="stage">
+
+  <!-- ═══ map backdrop: graticule + depth contours ═══ -->
+  <svg class="stage-map" viewBox="0 0 1140 760" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <pattern id="grat" width="76" height="76" patternUnits="userSpaceOnUse">
+        <path d="M76 0V76M0 76H76" stroke="#2b4358" stroke-width="1" opacity="0.20" fill="none"/>
+      </pattern>
+      <radialGradient id="landwash" cx="66%" cy="34%" r="42%">
+        <stop offset="0%"  stop-color="#2b3a33" stop-opacity="0.55"/>
+        <stop offset="70%" stop-color="#1a2622" stop-opacity="0.20"/>
+        <stop offset="100%" stop-color="#0a1218" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect width="1140" height="760" fill="url(#grat)"/>
+    <ellipse cx="760" cy="250" rx="300" ry="190" fill="url(#landwash)"/>
+
+    <!-- depth contours -->
+    <g fill="none" stroke="#31536b" stroke-width="1" opacity="0.30">
+      <path d="M470 700 C 560 600, 520 500, 610 440 S 800 400, 880 320 S 980 200, 1090 170"/>
+      <path d="M420 720 C 520 620, 470 500, 570 428 S 790 372, 872 286 S 966 168, 1080 128"/>
+      <path d="M530 700 C 610 610, 578 512, 662 458 S 826 432, 900 358 S 1000 244, 1100 214"/>
+    </g>
+    <g fill="none" stroke="#31536b" stroke-width="1" opacity="0.16" stroke-dasharray="2 5">
+      <path d="M360 740 C 470 640, 420 494, 528 414 S 776 340, 860 250 S 950 128, 1064 86"/>
+    </g>
+
+    <!-- sounding numerals — chart texture -->
+    <g font-family="ui-monospace, Consolas, monospace" font-size="9" fill="#3f6178" opacity="0.42">
+      <text x="330" y="470">1842</text><text x="415" y="560">2106</text>
+      <text x="255" y="620">2380</text><text x="480" y="380">1215</text>
+      <text x="600" y="620">988</text> <text x="700" y="520">642</text>
+      <text x="820" y="560">431</text> <text x="930" y="470">288</text>
+    </g>
+
+    <!-- a few vessel marks so panels sit over real content -->
+    <g opacity="0.85">
+      <path d="M640 470 l4 9 -8 0 z" fill="#5fd9c0"/>
+      <path d="M712 392 l4 9 -8 0 z" fill="#5fd9c0"/>
+      <path d="M868 452 l4 9 -8 0 z" fill="#5fd9c0"/>
+      <path d="M790 300 l4 9 -8 0 z" fill="#ff4d9a"/>
+      <circle cx="792" cy="303" r="11" fill="none" stroke="#ff4d9a" stroke-width="1" opacity="0.6"/>
+    </g>
+  </svg>
+
+  <!-- ═══════════ COLUMN A ═══════════ -->
+  <div class="col">
+
+    <!-- ── OPERATIONAL THEATRE ── -->
+    <div class="p">
+      <div class="p-head"><span class="p-title">Operational Theatre</span><span class="p-id">OT·01</span></div>
+      <div class="scale-rule"></div>
+      <div class="p-body">
+
+        <div class="sec">Feeds</div>
+        <!-- Feed = name · live pip · throughput meter · count.
+             Four channels of state in one 12px strip. -->
+        <div class="feed">
+          <span class="fname">AIS</span>
+          <span class="pip"><s></s><b></b></span>
+          <span class="meter">
+            <i style="left:0;   height:5px"></i><i style="left:4px; height:8px"></i>
+            <i style="left:8px; height:6px"></i><i style="left:12px;height:11px"></i>
+            <i style="left:16px;height:7px"></i><i style="left:20px;height:9px"></i>
+            <i style="left:24px;height:12px"></i><i style="left:28px;height:8px"></i>
+            <i style="left:32px;height:6px"></i><i style="left:36px;height:10px"></i>
+            <i style="left:40px;height:9px"></i><i style="left:44px;height:7px"></i>
+            <i style="left:48px;height:11px"></i><i style="left:52px;height:8px"></i>
+            <i style="left:56px;height:5px"></i><i style="left:60px;height:9px"></i>
+          </span>
+          <span class="fcount">2 884</span>
+        </div>
+
+        <div class="feed">
+          <span class="fname">AIR</span>
+          <span class="pip"><s></s><b></b></span>
+          <span class="meter">
+            <i style="left:0;   height:7px"></i><i style="left:4px; height:5px"></i>
+            <i style="left:8px; height:9px"></i><i style="left:12px;height:6px"></i>
+            <i style="left:16px;height:10px"></i><i style="left:20px;height:7px"></i>
+            <i style="left:24px;height:5px"></i><i style="left:28px;height:9px"></i>
+            <i style="left:32px;height:11px"></i><i style="left:36px;height:6px"></i>
+            <i style="left:40px;height:8px"></i><i style="left:44px;height:10px"></i>
+            <i style="left:48px;height:6px"></i><i style="left:52px;height:7px"></i>
+            <i style="left:56px;height:9px"></i><i style="left:60px;height:5px"></i>
+          </span>
+          <span class="fcount">528</span>
+        </div>
+
+        <!-- Degraded feed: no sweep, amber. State difference is visible
+             at a squint without reading the word "STANDBY". -->
+        <div class="feed degraded">
+          <span class="fname">CBL</span>
+          <span class="pip"><s></s><b></b></span>
+          <span class="meter">
+            <i style="left:0;  height:3px"></i><i style="left:8px; height:2px"></i>
+            <i style="left:16px;height:3px"></i><i style="left:28px;height:2px"></i>
+            <i style="left:40px;height:3px"></i><i style="left:52px;height:2px"></i>
+          </span>
+          <span class="fcount">—</span>
+        </div>
+
+        <div class="sec">Theatre</div>
+        <div class="row"><span class="k">On-screen assets</span><span class="v hi">3 412</span></div>
+        <div class="row"><span class="k">Dark vessels</span><span class="v hi">7</span></div>
+        <div class="row"><span class="k">Topography</span><span class="v">BATHY · MATRIX</span></div>
+
+        <div class="sec">Render</div>
+        <!-- Frame time as a sparkline: you see the hitch, you don't read it -->
+        <div style="display:flex; align-items:flex-end; gap:9px; padding:2px 0 4px;">
+          <svg width="132" height="30" viewBox="0 0 132 30" style="flex-shrink:0">
+            <line x1="0" y1="21" x2="132" y2="21" stroke="#3a4854" stroke-width="1" stroke-dasharray="2 4" opacity="0.7"/>
+            <polyline fill="none" stroke="#5fd9c0" stroke-width="1.2" opacity="0.9"
+              points="0,18 4,17 8,19 12,16 16,18 20,17 24,15 28,18 32,16 36,19 40,17 44,16 48,18 52,20 56,17 60,9 64,6 68,14 72,17 76,16 80,18 84,15 88,17 92,19 96,16 100,18 104,17 108,15 112,18 116,16 120,17 124,19 128,16 132,17"/>
+            <circle cx="64" cy="6" r="1.8" fill="#f0a63c"/>
+          </svg>
+          <div style="min-width:0">
+            <div style="font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:14px; color:var(--bone); line-height:1">58<span style="font-size:9px;color:var(--slate); margin-left:2px">fps</span></div>
+            <div style="font-family:var(--mono); font-size:9.5px; color:var(--slate); margin-top:3px">17.2 ms</div>
+          </div>
+        </div>
+        <div class="row"><span class="k">GPU backend</span><span class="v">WebGL2</span></div>
+      </div>
+    </div>
+
+    <!-- ── MAP LAYERS ── -->
+    <div class="p">
+      <div class="p-head"><span class="p-title">Map Layers</span><span class="p-id">LYR·4/5</span></div>
+      <div class="scale-rule"></div>
+      <div class="p-body">
+        <div class="sec">Maritime</div>
+
+        <!-- Each row shows the ACTUAL glyph it draws. The legend and the
+             control are the same object — one less thing to memorise. -->
+        <div class="lyr">
+          <svg class="lglyph" width="16" height="10" viewBox="0 0 16 10">
+            <path d="M8 1 l3.4 7.5 -6.8 0 z" fill="#5fd9c0"/>
+          </svg>
+          <span class="lname">AIS Vessels</span><span class="lsw"></span>
+        </div>
+
+        <div class="lyr">
+          <svg class="lglyph" width="16" height="10" viewBox="0 0 16 10">
+            <path d="M1 8 C 5 8, 5 2, 9 2 S 14 3, 15 2" fill="none" stroke="#5fd9c0" stroke-width="1.2" stroke-dasharray="3 2" opacity="0.85"/>
+          </svg>
+          <span class="lname">Vessel Trails</span><span class="lsw"></span>
+        </div>
+
+        <div class="lyr">
+          <svg class="lglyph" width="16" height="10" viewBox="0 0 16 10">
+            <path d="M8 1 l4 4 -4 4 -4 -4 z" fill="none" stroke="#d3bd8b" stroke-width="1.2"/>
+          </svg>
+          <span class="lname">Chokepoint Labels</span><span class="lsw"></span>
+        </div>
+
+        <div class="lyr">
+          <svg class="lglyph" width="16" height="10" viewBox="0 0 16 10">
+            <rect x="4.5" y="1.5" width="7" height="7" fill="none" stroke="#d3bd8b" stroke-width="1.2"/>
+            <circle cx="8" cy="5" r="1.3" fill="#d3bd8b"/>
+          </svg>
+          <span class="lname">Port Markers</span><span class="lsw"></span>
+        </div>
+
+        <div class="lyr off">
+          <svg class="lglyph" width="16" height="10" viewBox="0 0 16 10">
+            <path d="M0 6 C 2.7 3, 5.3 9, 8 6 S 13.3 3, 16 6" fill="none" stroke="#8ba3b5" stroke-width="1.2"/>
+          </svg>
+          <span class="lname">Sea State (Waves)</span><span class="lsw"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ COLUMN B — VESSEL DETAIL ═══════════ -->
+  <div class="col">
+    <div class="p">
+      <div class="p-head"><span class="p-title">Maersk Seletar</span><span class="p-id">TANKER</span></div>
+      <div class="scale-rule"></div>
+      <div class="p-body">
+
+        <!-- ── The core move: bearing gets a dial, speed gets a scale ── -->
+        <div class="instr-pair">
+          <div class="dial-wrap">
+            <svg width="72" height="72" viewBox="0 0 72 72">
+              <!-- graduated bezel: minor every 15°, major every 45° -->
+              <g stroke="#3a4854" stroke-width="1">
+                <g>
+                  <line x1="36" y1="5"  x2="36" y2="10"/><line x1="36" y1="62" x2="36" y2="67"/>
+                  <line x1="5"  y1="36" x2="10" y2="36"/><line x1="62" y1="36" x2="67" y2="36"/>
+                </g>
+                <g opacity="0.55">
+                  <line x1="36" y1="6" x2="36" y2="9" transform="rotate(45 36 36)"/>
+                  <line x1="36" y1="6" x2="36" y2="9" transform="rotate(90 36 36)"/>
+                  <line x1="36" y1="6" x2="36" y2="9" transform="rotate(135 36 36)"/>
+                  <line x1="36" y1="6" x2="36" y2="9" transform="rotate(180 36 36)"/>
+                  <line x1="36" y1="6" x2="36" y2="9" transform="rotate(225 36 36)"/>
+                  <line x1="36" y1="6" x2="36" y2="9" transform="rotate(270 36 36)"/>
+                  <line x1="36" y1="6" x2="36" y2="9" transform="rotate(315 36 36)"/>
+                </g>
+              </g>
+              <circle cx="36" cy="36" r="27" fill="none" stroke="#1c2f42" stroke-width="1"/>
+              <!-- north index, brass -->
+              <path d="M36 3 l2.6 4.6 -5.2 0 z" fill="#d3bd8b"/>
+              <!-- heading needle @ 213° -->
+              <g transform="rotate(213 36 36)">
+                <line x1="36" y1="36" x2="36" y2="13" stroke="#ece6d8" stroke-width="1.6"/>
+                <path d="M36 11 l2.8 5 -5.6 0 z" fill="#ece6d8"/>
+                <line x1="36" y1="36" x2="36" y2="45" stroke="#66757f" stroke-width="1.2"/>
+              </g>
+              <circle cx="36" cy="36" r="2" fill="#0c1622" stroke="#66757f" stroke-width="1"/>
+            </svg>
+          </div>
+
+          <div class="gauges">
+            <div class="gauge">
+              <div class="glabel"><span>Heading</span></div>
+              <div class="gval">213.4<span class="u">°</span></div>
+            </div>
+            <div class="gauge">
+              <div class="glabel"><span>Speed</span><span style="color:var(--slate-deep)">0 – 24 kn</span></div>
+              <div class="gval">11.4<span class="u">kn</span></div>
+              <!-- speed scale: position within the vessel's envelope -->
+              <svg width="100%" height="9" viewBox="0 0 140 9" preserveAspectRatio="none" style="margin-top:4px; display:block">
+                <line x1="0" y1="7" x2="140" y2="7" stroke="#3a4854" stroke-width="1"/>
+                <g stroke="#3a4854" stroke-width="1" opacity="0.75">
+                  <line x1="35"  y1="4" x2="35"  y2="7"/>
+                  <line x1="70"  y1="3" x2="70"  y2="7"/>
+                  <line x1="105" y1="4" x2="105" y2="7"/>
+                </g>
+                <rect x="0" y="6" width="66.5" height="2" fill="#5fd9c0" opacity="0.55"/>
+                <path d="M66.5 0 l3.4 4.4 -6.8 0 z" fill="#ece6d8"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="sec">Identity</div>
+        <div class="row"><span class="k">MMSI</span><span class="v hi">477 995 123</span></div>
+        <div class="row"><span class="k">Flag</span><span class="v">Hong Kong</span></div>
+        <div class="row"><span class="k">Class</span><span class="v">Crude oil tanker</span></div>
+
+        <div class="sec">Position</div>
+        <div class="row"><span class="k">Lat</span><span class="v hi">01° 15.85′ N</span></div>
+        <div class="row"><span class="k">Lon</span><span class="v hi">103° 49.31′ E</span></div>
+        <div class="row"><span class="k">Region</span><span class="v">Singapore Strait</span></div>
+
+        <div class="sec">Reporting</div>
+        <!-- THE POINT OF THE WHOLE MOCKUP.
+             The AIS gap is not a badge that says "AIS GAP". It is a
+             literal hole in the reporting trace, bracketed in magenta.
+             You see the shape of the problem before you read a word. -->
+        <svg width="100%" height="40" viewBox="0 0 246 40" preserveAspectRatio="none" style="display:block; margin:2px 0 0">
+          <!-- baseline + hour ticks -->
+          <line x1="0" y1="26" x2="246" y2="26" stroke="#3a4854" stroke-width="1" opacity="0.7"/>
+          <g stroke="#3a4854" stroke-width="1" opacity="0.55">
+            <line x1="0"   y1="26" x2="0"   y2="31"/>
+            <line x1="41"  y1="26" x2="41"  y2="29"/>
+            <line x1="82"  y1="26" x2="82"  y2="31"/>
+            <line x1="123" y1="26" x2="123" y2="29"/>
+            <line x1="164" y1="26" x2="164" y2="31"/>
+            <line x1="205" y1="26" x2="205" y2="29"/>
+            <line x1="245" y1="26" x2="245" y2="31"/>
+          </g>
+          <!-- reported positions, healthy -->
+          <g fill="#5fd9c0" opacity="0.9">
+            <rect x="2"  y="14" width="2" height="12"/><rect x="12" y="12" width="2" height="14"/>
+            <rect x="22" y="15" width="2" height="11"/><rect x="32" y="11" width="2" height="15"/>
+            <rect x="42" y="14" width="2" height="12"/><rect x="52" y="13" width="2" height="13"/>
+            <rect x="62" y="15" width="2" height="11"/><rect x="72" y="12" width="2" height="14"/>
+            <rect x="82" y="14" width="2" height="12"/><rect x="92" y="13" width="2" height="13"/>
+          </g>
+          <!-- THE GAP -->
+          <rect x="100" y="8" width="74" height="18" fill="rgba(255,77,154,0.10)"/>
+          <g stroke="#ff4d9a" stroke-width="1">
+            <line x1="100" y1="8" x2="100" y2="26"/>
+            <line x1="174" y1="8" x2="174" y2="26"/>
+            <line x1="100" y1="8" x2="174" y2="8"/>
+          </g>
+          <line x1="100" y1="26" x2="174" y2="26" stroke="#ff4d9a" stroke-width="1.4" stroke-dasharray="3 3"/>
+          <text x="137" y="6" font-family="ui-monospace, Consolas, monospace" font-size="8"
+                fill="#ff4d9a" text-anchor="middle" letter-spacing="0.5">4h 12m</text>
+          <!-- resumed reporting -->
+          <g fill="#5fd9c0" opacity="0.9">
+            <rect x="178" y="13" width="2" height="13"/><rect x="188" y="15" width="2" height="11"/>
+            <rect x="198" y="12" width="2" height="14"/><rect x="208" y="14" width="2" height="12"/>
+            <rect x="218" y="13" width="2" height="13"/><rect x="228" y="15" width="2" height="11"/>
+            <rect x="238" y="12" width="2" height="14"/>
+          </g>
+          <g font-family="ui-monospace, Consolas, monospace" font-size="7.5" fill="#3a4854">
+            <text x="0" y="38">−12h</text>
+            <text x="112" y="38">−6h</text>
+            <text x="228" y="38">NOW</text>
+          </g>
+        </svg>
+
+        <div class="anom">
+          <div class="anom-head">
+            <span class="anom-lbl">Reporting gap</span>
+            <span class="anom-val">4h 12m</span>
+          </div>
+          <div class="anom-foot">Resumed 84 NM from last fix · 19.1 kn implied</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="foot">
+  <p><strong>What changed, and why it's the effectiveness fix rather than a paint job:</strong></p>
+  <ul>
+    <li><strong>The AIS gap is a hole in a trace, not a badge.</strong> You see the shape of the problem — reports, then nothing, then reports — before reading a single character. The old version spelled <code style="font-family:var(--mono)">AIS GAP 4h 12m</code> and made you parse it.</li>
+    <li><strong>Bearing is a dial.</strong> 213° means nothing at a glance; a needle pointing south-west means something instantly. Same pixels, ~8× faster read.</li>
+    <li><strong>Feed rows carry four channels in one strip</strong> — name, health pip, throughput histogram, count. The degraded cable feed is distinguishable at a squint with no text at all.</li>
+    <li><strong>Layer rows show the glyph they actually draw.</strong> The legend and the control collapse into one object.</li>
+    <li><strong>Frame time is a sparkline</strong> with the hitch marked amber. A number can't show you a hitch.</li>
+    <li><strong>The only animation encodes state</strong> — the live sweep runs on healthy feeds and stops on degraded ones. Contrast with the nine decorative <code style="font-family:var(--mono)">@keyframes</code> pulses in <code style="font-family:var(--mono)">index.html</code>, which fire regardless of what's true.</li>
+    <li><strong>"Futuristic" is carried by registration marks, graduated scale rules, sounding numerals and tabular figures</strong> — precision cues. No blur, no bloom, no glow. Nothing here would read as a movie prop.</li>
+  </ul>
+</div>
+
+</body>
+</html>

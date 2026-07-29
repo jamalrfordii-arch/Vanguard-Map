@@ -4,3 +4,7 @@
 numpy>=1.24
 Pillow>=10.0
 scipy>=1.10
+# build_tile_land_mask.py only — ships the GSHHG-derived 43200×21600 land/water
+# grid the tile cull is baked from. Build-time dependency; the runtime reads the
+# baked data/tile-land-mask.bin and needs nothing.
+global-land-mask>=1.0

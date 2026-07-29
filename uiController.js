@@ -1,6 +1,8 @@
 // uiController.js — HUD toggles, tooltip, raycasting, vessel/flight panels, search, alert zones
 import * as THREE from 'three';
-import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
+import { entityStore } from './entityStore.js';   // live entity collection (was window.aisShips)
+import { MAP_WIDTH, MAP_HEIGHT, FLIGHT } from './config.js';
+import { pairSeparation } from './conflictMath.js';   // nearest-traffic / CPA readout on the aircraft card
 
 // ── Scene ↔ lat/lon helpers (inverse of lonLatToScene in aisManager.js) ────────
 function _scenePosToLonLat(x, z) {
@@ -15,7 +17,40 @@ let _lastTerritoryCheck = 0;   // hover territory lookup throttle
 import { CITIES } from './cityManager.js';
 import { contextCards } from './contextCardManager.js';
 import { integrityManager } from './integrityManager.js';
+import { portCallManager } from './portCallManager.js';
+import { PORTS } from './portManager.js';
+import { simClock } from './simClock.js';
+import viewport from './viewport.js';   // map rect (was window.innerWidth/Height)
+import { vesselInstruments } from './vesselInstruments.js';   // right-dock dial + speed gauge
 import { quality } from './qualityManager.js';
+import { measureManager } from './measureManager.js';
+import { surveyManager } from './surveyManager.js';   // coordinate readout / control points / area / import
+import { measurementToGeoJSON, vesselTrackToGeoJSON, downloadGeoJSON } from './geoExport.js';
+
+// ── Cargo intelligence, Phase 3 — probable-cargo inference ───────────────────
+// (research/vanguard1-cargo-intel-spec-2026-07-23.md §6). Pure, stateless, and
+// deliberately capped at MEDIUM confidence — this is a structural guess (vessel
+// class + laden state + last departure port's free-text specialization), not a
+// manifest. LOW confidence for anything genuinely ambiguous (mixed-use ports,
+// unmapped classes) rather than forcing a guess to sound more certain than it is.
+function _inferProbableCargo(shipClass, portType) {
+    if (!portType) return null;
+    const t = portType.toUpperCase();
+
+    if (shipClass === 'TANKER') {
+        if (t.includes('OIL') || t.includes('ENERGY')) return { label: 'Crude / product oil', confidence: 'MEDIUM' };
+        return { label: 'Oil (unspecified grade)', confidence: 'LOW' };
+    }
+    if (shipClass === 'CARGO') {
+        const hasBulk      = t.includes('BULK');
+        const hasContainer = t.includes('CONTAINER');
+        if (hasBulk && !hasContainer)      return { label: 'Dry bulk (ore/coal/grain)', confidence: 'MEDIUM' };
+        if (hasContainer && !hasBulk)      return { label: 'Containerized goods',       confidence: 'MEDIUM' };
+        if (hasBulk && hasContainer)       return { label: 'Bulk or containerized goods', confidence: 'LOW' }; // port serves both — can't disambiguate from draft alone
+        return { label: 'General cargo (unspecified)', confidence: 'LOW' };
+    }
+    return null; // class isn't one this inference covers (see config.js CARGO.MAX_DRAFT_BY_CLASS)
+}
 
 // ── Module-level state ────────────────────────────────────────────────────────
 let _searchQuery  = '';
@@ -253,10 +288,10 @@ function _computeBehaviorScore(ud) {
  */
 function _computeComparativeContext(ship) {
     const ud     = ship.userData;
-    if (ud.latDeg == null || !window.aisShips) return null;
+    if (ud.latDeg == null) return null;
 
     const region  = detectRegion(ud.latDeg, ud.lonDeg);
-    const peers   = window.aisShips.filter(s =>
+    const peers   = entityStore.all().filter(s =>
         s.userData.isRealAIS &&
         s.userData.latDeg != null &&
         detectRegion(s.userData.latDeg, s.userData.lonDeg) === region
@@ -696,7 +731,7 @@ export function initIntegrityBoard({ flyTo } = {}) {
                 const mmsi = row.dataset.mmsi;
                 const rec  = integrityManager.getRecord(mmsi);
                 if (rec && flyTo && rec.latDeg != null) flyTo(rec.latDeg, rec.lonDeg);
-                const ship = (window.aisShips || []).find(o => String(o.userData.id) === String(mmsi));
+                const ship = entityStore.byId(mmsi);
                 if (ship && window._openVesselDetail) window._openVesselDetail(ship);
             });
         });
@@ -716,29 +751,33 @@ export function initIntegrityBoard({ flyTo } = {}) {
 // information as a list instead: occupancy per band right now, plus which
 // aircraft are actively climbing/descending into the next one, with an ETA.
 //
-// Reads window.aisShips directly (filtered to userData.isRealFlight) — no
+// Reads entityStore.flights() (real ADS-B aircraft) — no
 // flightManager reference of its own, consistent with how every other panel
 // here reads live aircraft/vessel state. verticalRateMs is synced onto
 // userData in main.js's onAircraftUpdate; see the comment there.
 //
-// Flight-level boundaries duplicated from DECKS in altitudeDeckManager.js
-// (deliberately not imported — uiController.js shouldn't depend on the 3D
-// rendering module for three numbers). Keep these in sync if the real-world
-// levels ever change.
-const ALT_DECKS = [
-    { id: 'fl180', altFt: 18000, label: 'FL180', color: '#40c4ff' },
-    { id: 'fl290', altFt: 29000, label: 'FL290', color: '#ffab40' },
-    { id: 'fl410', altFt: 41000, label: 'FL410', color: '#d9b3ff' },
-];
+// Flight-level bands come from the canonical FLIGHT.ALT_BANDS taxonomy in
+// config.js (pure data, no 3D dependency) — the SAME source the decks and the
+// aircraft glow use, so occupancy colours can't drift off-by-one from the map
+// (which is exactly the bug this replaced: the panel used to colour 0–18k teal,
+// 18–29k blue… one band offset from the decks).
+const _hex = (n) => '#' + (n >>> 0).toString(16).padStart(6, '0');
+// Only the finite-ceiling bands are real FL boundaries a climb/descent can target.
+const ALT_DECKS = FLIGHT.ALT_BANDS
+    .filter(b => Number.isFinite(b.ceilFt))
+    .map(b => ({ altFt: b.ceilFt, label: `FL${Math.round(b.ceilFt / 100)}`, color: _hex(b.color) }));
 const ALT_FT_TO_M   = 0.3048;
 const ALT_MIN_RATE_MS = 0.5;       // ~100 fpm floor — below this, treat as level (cruise jitter, not a real climb/descent)
 const ALT_MAX_ETA_SEC = 5 * 60;    // only surface transitions expected within 5 minutes — "about to happen," not a long-range forecast
 
+// Containing-band lookup (first band whose ceiling ≥ altFt; clamps to the top).
 function _altBandFor(altFt) {
-    if (altFt < ALT_DECKS[0].altFt) return { label: 'Below FL180', color: '#7ad9d9' };
-    if (altFt < ALT_DECKS[1].altFt) return { label: 'FL180–FL290', color: ALT_DECKS[0].color };
-    if (altFt < ALT_DECKS[2].altFt) return { label: 'FL290–FL410', color: ALT_DECKS[1].color };
-    return { label: 'Above FL410', color: ALT_DECKS[2].color };
+    const bands = FLIGHT.ALT_BANDS;
+    for (let i = 0; i < bands.length; i++) {
+        if (altFt <= bands[i].ceilFt) return { label: bands[i].flLabel, color: _hex(bands[i].color) };
+    }
+    const last = bands[bands.length - 1];
+    return { label: last.flLabel, color: _hex(last.color) };
 }
 
 export function initAltitudeWatch({ flyTo } = {}) {
@@ -747,22 +786,21 @@ export function initAltitudeWatch({ flyTo } = {}) {
     const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
 
     function render() {
-        const flights = (window.aisShips || []).filter(o => o.userData?.isRealFlight && o.visible);
+        const flights = entityStore.flights().filter(o => o.visible);
 
         // ── Occupancy by band ────────────────────────────────────────────────
-        const bandOrder = ['Below FL180', 'FL180–FL290', 'FL290–FL410', 'Above FL410'];
-        const counts = new Map(bandOrder.map(l => [l, 0]));
+        const counts = new Map(FLIGHT.ALT_BANDS.map(b => [b.flLabel, 0]));
         for (const f of flights) {
             const altFt = (f.userData.altMeters ?? 0) / ALT_FT_TO_M;
             const band = _altBandFor(altFt);
             counts.set(band.label, (counts.get(band.label) || 0) + 1);
         }
         const occupancyHTML = `<div style="display:flex; gap:6px; padding:6px 9px; flex-wrap:wrap;">
-            ${bandOrder.map(label => {
-                const color = _altBandFor(label === 'Below FL180' ? 0 : label === 'FL180–FL290' ? ALT_DECKS[0].altFt : label === 'FL290–FL410' ? ALT_DECKS[1].altFt : ALT_DECKS[2].altFt).color;
+            ${FLIGHT.ALT_BANDS.map(b => {
+                const color = _hex(b.color);
                 return `<div style="flex:1 1 auto; min-width:72px; border-left:3px solid ${color}; padding:4px 7px; background:rgba(255,255,255,0.02);">
-                    <div style="font-size:9px; color:#8aabc4;">${label}</div>
-                    <div style="font-size:15px; font-weight:700; color:${color};">${counts.get(label)}</div>
+                    <div style="font-size:9px; color:#8aabc4;">${b.flLabel}</div>
+                    <div style="font-size:15px; font-weight:700; color:${color};">${counts.get(b.flLabel)}</div>
                 </div>`;
             }).join('')}
         </div>`;
@@ -833,6 +871,17 @@ export function initDiscoveryConsole(discoveryManager) {
 
     const MAX_LINES = 300;
     const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    // Linkify bare MMSIs in already-escaped text (2026-07-22 — watch-analyst
+    // walkthrough finding: RULE lines and options reasoning reference vessels
+    // by MMSI only, with no way to jump to the vessel short of manually
+    // searching elsewhere). MMSIs are exactly 9 digits — narrow enough not to
+    // catch timestamps or other numbers. Reuses the SAME event selectVessel()
+    // already dispatches (vg1:selectVessel) — zero new wiring on the receiving
+    // end, just a new way to fire it.
+    const linkMmsi = (escapedText) => escapedText.replace(
+        /\b(\d{9})\b/g,
+        (m, mmsi) => `<span class="disc-mmsi-link" data-mmsi="${mmsi}">${mmsi}</span>`
+    );
     // DISCOVERY_RULE is the local rule-engine's own line (see discoveryRules.js)
     // — kept visually distinct from DISCOVERY (an actual Claude assessment) so
     // an analyst never mistakes a $0 template for an AI judgment call.
@@ -884,18 +933,67 @@ export function initDiscoveryConsole(discoveryManager) {
             const cards = evt.options.map(o => `
                 <div class="disc-option">
                     <span class="disc-option-conf conf-${esc(o.confidence || 'LOW')}">${esc(o.confidence || 'LOW')}</span>
-                    <span class="disc-option-label">${esc(o.label)}</span>
-                    ${o.reasoning ? `<div class="disc-option-reason">${esc(o.reasoning)}</div>` : ''}
+                    <span class="disc-option-label">${linkMmsi(esc(o.label))}</span>
+                    ${o.reasoning ? `<div class="disc-option-reason">${linkMmsi(esc(o.reasoning))}</div>` : ''}
                 </div>`).join('');
-            line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX.DISCOVERY}${headline}`
-                + `<div class="disc-options-block">${cards}</div>`;
+            // Pending-action confirmation (2026-07-22) — the model's proposed
+            // actions ride along with the card but sit here, unexecuted, until
+            // an operator explicitly confirms or dismisses them. See
+            // discoveryManager.js confirmActions()/dismissActions().
+            let pendingBlock = '';
+            if (evt.passId && Array.isArray(evt.pendingActions) && evt.pendingActions.length) {
+                const items = evt.pendingActions.map(a =>
+                    `<div class="disc-pending-item">${esc(a.tool)}(${esc(JSON.stringify(a.args || {}))})</div>`
+                ).join('');
+                pendingBlock = `
+                    <div class="disc-pending" data-pass-id="${esc(evt.passId)}">
+                        <span class="disc-pending-label">AI PROPOSES</span>
+                        ${items}
+                        <div class="disc-pending-btns">
+                            <button class="disc-pending-btn disc-pending-confirm" data-act="confirm">CONFIRM</button>
+                            <button class="disc-pending-btn disc-pending-dismiss" data-act="dismiss">DISMISS</button>
+                        </div>
+                    </div>`;
+            }
+            line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX.DISCOVERY}${linkMmsi(headline)}`
+                + `<div class="disc-options-block">${cards}</div>${pendingBlock}`;
         } else {
-            line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX[evt.type] || ''}${esc(evt.body)}`;
+            line.innerHTML = `<span class="disc-ts">[${ts}]</span> ${tag}${PREFIX[evt.type] || ''}${linkMmsi(esc(evt.body))}`;
         }
         log.appendChild(line);
 
         while (log.children.length > MAX_LINES) log.removeChild(log.firstChild);
         if (isNearBottom) log.scrollTop = log.scrollHeight;
+    });
+
+    // MMSI-link clicks (2026-07-22) — same event selectVessel() already
+    // dispatches for the AI's own tool calls, just fired from a human click
+    // instead. Event-delegated for the same reason as the pending-action
+    // handler below: lines are added dynamically.
+    log.addEventListener('click', e => {
+        const link = e.target.closest('.disc-mmsi-link');
+        if (!link) return;
+        window.dispatchEvent(new CustomEvent('vg1:selectVessel', {
+            detail: { mmsi: link.dataset.mmsi, source: 'discoveryLogClick', openCard: true },
+        }));
+    });
+
+    // Pending-action Confirm/Dismiss (2026-07-22) — event-delegated since
+    // .disc-pending blocks are added dynamically by the renderer above.
+    log.addEventListener('click', e => {
+        const btn = e.target.closest('.disc-pending-btn');
+        if (!btn) return;
+        const block  = btn.closest('.disc-pending');
+        const passId = block?.dataset.passId;
+        if (!passId) return;
+        const confirmed = btn.dataset.act === 'confirm'
+            ? discoveryManager.confirmActions(passId)
+            : discoveryManager.dismissActions(passId);
+        if (confirmed) {
+            block.innerHTML = btn.dataset.act === 'confirm'
+                ? '<span class="disc-pending-done">✓ CONFIRMED — ACTIONS EXECUTED</span>'
+                : '<span class="disc-pending-label">✕ DISMISSED — NO ACTIONS RUN</span>';
+        }
     });
 
     // ── Manual controls — RUN NOW button + freeform query input ───────────────
@@ -932,6 +1030,14 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
         ? Math.round(ud.headingDeg) + '°' : '—';
     document.getElementById('vd-country').innerText  = ud.country   || '—';
 
+    // Traffic / proximity readouts — aircraft only. Reset the throttle so the
+    // next tick populates it immediately instead of after the ~500 ms interval.
+    const trafficSection = document.getElementById('vd-traffic-section');
+    if (trafficSection) {
+        trafficSection.style.display = isAircraft ? '' : 'none';
+        if (isAircraft) _lastTrafficMs = 0;
+    }
+
     const aircraftSection = document.getElementById('vd-aircraft-section');
     if (aircraftSection) {
         aircraftSection.style.display = isAircraft ? '' : 'none';
@@ -947,6 +1053,73 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
                 const originEl = document.getElementById('vd-origin');
                 if (originEl) originEl.innerText = 'ERR: ' + e.message;
             }
+        }
+    }
+
+    // Cargo intelligence, Phase 1 (research/vanguard1-cargo-intel-spec-2026-07-23.md)
+    // — draft-based load estimate. AIS surface vessels only, and only classes with a
+    // usable draft seed (config.js CARGO.MAX_DRAFT_BY_CLASS: CARGO, TANKER — AIS ship
+    // type can't distinguish bulk/container/RoRo within CARGO, per aisManager.js's
+    // aisTypeToClass comment, so this section covers both broadly rather than
+    // pretending to a precision the data doesn't have). Shown even before a static
+    // message arrives (fields render "—" via computeCargoEstimate's null-handling)
+    // so the section's presence itself signals "this vessel type gets an estimate,
+    // we just don't have the number yet" rather than popping in unannounced later.
+    const cargoSection = document.getElementById('vd-cargo-section');
+    if (cargoSection) {
+        const cargoEligible = ud.isRealAIS && (ud.class === 'CARGO' || ud.class === 'TANKER');
+        cargoSection.style.display = cargoEligible ? '' : 'none';
+        if (cargoEligible) {
+            document.getElementById('vd-draft').innerText = ud.draughtM != null
+                ? ud.draughtM.toFixed(1) + 'm' : '—';
+            document.getElementById('vd-load-factor').innerText = ud.loadFactor != null
+                ? Math.round(ud.loadFactor * 100) + '%' : '—';
+            document.getElementById('vd-laden-state').innerText = ud.ladenState || '—';
+
+            // Phase 2/3 — portCallManager.js state, read once and shared by the
+            // PROBABLE CARGO, LAST PORT, and VOYAGE fields below.
+            const live = portCallManager.current(ud.id);
+            const last = portCallManager.lastCall(ud.id);
+
+            // Phase 3 — probable-cargo inference. BALLAST means nothing is aboard
+            // right now, so showing a cargo guess would be actively wrong, not just
+            // uncertain — render the honest "no cargo aboard" state instead. LADEN/
+            // PARTIAL attempt the inference from the last completed departure port's
+            // specialization; unknown ladenState (no draught yet) or no port history
+            // both render "—", never a fabricated guess.
+            const probableEl = document.getElementById('vd-probable-cargo');
+            if (ud.ladenState === 'BALLAST') {
+                probableEl.innerText = 'BALLAST — no cargo aboard';
+            } else if ((ud.ladenState === 'LADEN' || ud.ladenState === 'PARTIAL') && last) {
+                const portDef  = PORTS.find(p => p.name === last.port);
+                const inferred = _inferProbableCargo(ud.class, portDef?.type);
+                probableEl.innerText = inferred ? `${inferred.label} (${inferred.confidence})` : '—';
+            } else {
+                probableEl.innerText = '—';
+            }
+
+            // Phase 2 — portCallManager.js. Prefer a live in-progress call over the
+            // last completed one: "AT <port>" is more useful than stale history if
+            // the vessel is sitting in port right now. Same ageMin formatting
+            // convention as vd-last-contact above (h/m, not raw ms).
+            const lastPortEl = document.getElementById('vd-last-port');
+            if (live && live.state === 'IN_PORT') {
+                const ageMin = Math.round((simClock.now() - live.arrivedAt) / 60000);
+                const ageStr = ageMin < 60 ? `${ageMin}m` : `${Math.floor(ageMin / 60)}h ${ageMin % 60}m`;
+                lastPortEl.innerText = `AT ${live.port.name} (${ageStr})`;
+            } else if (last) {
+                const ageMin = Math.round((simClock.now() - last.departedAt) / 60000);
+                const ageStr = ageMin < 60 ? `${ageMin}m AGO` : `${Math.floor(ageMin / 60)}h ${ageMin % 60}m AGO`;
+                lastPortEl.innerText = `${last.port} (${ageStr})`;
+            } else {
+                lastPortEl.innerText = '—';
+            }
+
+            // VOYAGE only renders when BOTH a completed last port AND a known AIS
+            // destination exist — anything less would be presenting a guess as an
+            // inference, the exact mistake this whole section exists to avoid.
+            const voyageEl = document.getElementById('vd-voyage');
+            voyageEl.innerText = (last && ud.destination) ? `${last.port} → ${ud.destination}` : '—';
         }
     }
 
@@ -1091,6 +1264,12 @@ export function showVesselDetail(ship, camera, controls, stateRef) {
     }
 
     panel.style.display = 'block';
+    // Bezel: bring the selection dock in (operate → inspect). No-op outside
+    // bezel modes, and no-op if the dock is already open.
+    _syncDockMode(true);
+    // Populate the drawn instruments for the newly-selected entity immediately,
+    // rather than waiting for the next per-frame refresh to fill them in.
+    vesselInstruments().update(ud);
 
     // Plan 02 — begin reverse (zoom-in) transition: approach → fade → vignette
     window.transitionMgr?.onLock(ship);
@@ -1100,11 +1279,111 @@ export function hideVesselDetail() {
     const panel = document.getElementById('vessel-detail');
     if (panel) panel.style.display = 'none';
     _detailShip = null;
+    // Clear the top-rail ALT readout — a stale altitude left behind after
+    // deselection would read as the current selection's.
+    const topAlt = document.getElementById('coord-alt');
+    if (topAlt) { topAlt.innerText = '—'; topAlt.classList.add('dim'); }
+    _syncDockMode(false);
 }
 
-export function tickVesselDetail(stateRef) {
+/**
+ * Couple the selection dock to the chrome mode.
+ *
+ * The dock costs ~15% of a 1080p viewport, which is too much standing rent for
+ * a panel that only means anything while something is selected — so 'inspect'
+ * (dock present) and 'operate' (dock collapsed, map wider) follow selection
+ * rather than being a manual toggle.
+ *
+ * Only ever switches BETWEEN the two bezel modes. If the app is in 'legacy' or
+ * 'cinema' this does nothing at all: selecting a vessel must not drag a user
+ * into the bezel, and it must not tear down a cinematic shot.
+ */
+function _syncDockMode(selected) {
+    const mode = document.body.dataset.chrome;
+    if (mode !== 'operate' && mode !== 'inspect') return;
+    const want = selected ? 'inspect' : 'operate';
+    if (mode !== want) window.vg1Chrome?.(want);
+}
+
+// ── Aircraft traffic / proximity readout (2026-07-24) ─────────────────────────
+// Replaces the on-map conflict lines. Computes, for the selected aircraft:
+//   • NEAREST — closest other aircraft + horizontal separation
+//   • SEPARATION — vertical gap, converging/opening, time-to-CPA
+//   • AREA — local traffic density (count within radius + how many below FL180)
+//   • proximity badge — flagged CPA conflicts involving this aircraft
+// Throttled (~2 Hz) from tickVesselDetail so the O(n) sweep is cheap.
+const _TRAFFIC_AREA_NM = 250;
+const _FT_PER_M        = 3.28084;
+let   _lastTrafficMs   = 0;
+
+function _fmtEta(sec) {
+    if (sec == null) return null;
+    if (sec < 60) return `${Math.round(sec)}s`;
+    return `${Math.floor(sec / 60)}m${String(Math.round(sec % 60)).padStart(2, '0')}s`;
+}
+
+function _updateAircraftTraffic(sel, flightMap, conflictMgr) {
+    const nearestEl = document.getElementById('vd-nearest');
+    const sepEl     = document.getElementById('vd-separation');
+    const areaEl    = document.getElementById('vd-area');
+    const badgeEl   = document.getElementById('vd-proximity');
+    if (!nearestEl || !sepEl || !areaEl || !badgeEl || !flightMap) return;
+
+    // One pass: nearest neighbour + area density.
+    let best = null, bestNm = Infinity, areaCount = 0, belowFL180 = 0;
+    for (const o of flightMap.values()) {
+        if (!o || o.icao24 === sel.icao24) continue;
+        if (o.latDeg == null || o.lonDeg == null) continue;
+        const s = pairSeparation(sel, o);
+        if (s.horizontalNm <= _TRAFFIC_AREA_NM) {
+            areaCount++;
+            if ((o.altMeters ?? 0) * _FT_PER_M < 18000) belowFL180++;
+        }
+        if (s.horizontalNm < bestNm) { bestNm = s.horizontalNm; best = { o, s }; }
+    }
+
+    if (best) {
+        const cs = best.o.callsign || best.o.icao24 || '—';
+        nearestEl.textContent = `${cs} · ${best.s.horizontalNm.toFixed(1)} nm`;
+        const dir   = (sel.altMeters ?? 0) >= (best.o.altMeters ?? 0) ? 'below' : 'above';
+        const trend = best.s.closing ? 'converging' : 'opening';
+        const eta   = best.s.closing ? _fmtEta(best.s.cpaSec) : null;
+        sepEl.textContent = `${Math.round(best.s.verticalFt).toLocaleString()} ft ${dir} · ${trend}${eta ? ` · CPA ${eta}` : ''}`;
+    } else {
+        nearestEl.textContent = 'none in range';
+        sepEl.textContent     = '—';
+    }
+
+    areaEl.textContent = `${areaCount} within ${_TRAFFIC_AREA_NM} nm · ${belowFL180} below FL180`;
+
+    // Proximity badge — flagged CPA conflicts involving this aircraft (detection
+    // still runs even though the lines are off — see conflictManager.js).
+    const pairs = conflictMgr?.forAircraft?.(sel.icao24) ?? [];
+    if (pairs.length === 0) {
+        badgeEl.textContent      = 'CLEAR';
+        badgeEl.style.color       = '#00e87a';
+        badgeEl.style.borderColor = 'rgba(0,232,122,0.4)';
+    } else {
+        const crit = pairs.some(p => p.severity === 'CRITICAL');
+        badgeEl.textContent      = `⚠ ${pairs.length} CONFLICT${pairs.length > 1 ? 'S' : ''}`;
+        badgeEl.style.color       = crit ? '#ff4455' : '#e0a728';
+        badgeEl.style.borderColor = crit ? 'rgba(255,68,85,0.5)' : 'rgba(224,167,40,0.4)';
+    }
+}
+
+export function tickVesselDetail(stateRef, flightMap, conflictMgr) {
     if (!_detailShip) return;
     const ud = _detailShip.userData;
+
+    // Aircraft traffic / proximity readouts — throttled ~2 Hz (see _updateAircraftTraffic).
+    if (ud.isRealFlight && flightMap) {
+        const nowMs = performance.now();
+        if (nowMs - _lastTrafficMs > 500) {
+            _lastTrafficMs = nowMs;
+            const sel = flightMap.get(String(ud.id));
+            if (sel) _updateAircraftTraffic(sel, flightMap, conflictMgr);
+        }
+    }
 
     const speedEl = document.getElementById('vd-speed');
     if (speedEl) {
@@ -1114,10 +1393,18 @@ export function tickVesselDetail(stateRef) {
     }
 
     const altEl = document.getElementById('vd-altitude');
+    const altM  = ud.altMeters != null ? ud.altMeters
+                : ud.altKm != null ? ud.altKm * 1000 : null;
     if (altEl) {
-        altEl.innerText = ud.altMeters != null
-            ? Math.round(ud.altMeters) + ' M'
-            : ud.altKm != null ? Math.round(ud.altKm * 1000) + ' M' : '—';
+        altEl.innerText = altM != null ? Math.round(altM) + ' M' : '—';
+    }
+    // Mirror into the top rail's ALT readout — the "looking at planes" case.
+    // Dimmed when there is no airborne selection, so an empty slot reads as
+    // "nothing selected" rather than "altitude zero".
+    const topAlt = document.getElementById('coord-alt');
+    if (topAlt) {
+        topAlt.innerText = altM != null ? Math.round(altM).toLocaleString() + ' m' : '—';
+        topAlt.classList.toggle('dim', altM == null);
     }
 
     const latEl = document.getElementById('vd-lat');
@@ -1136,6 +1423,11 @@ export function tickVesselDetail(stateRef) {
 
     const hdgEl = document.getElementById('vd-heading');
     if (hdgEl && ud.headingDeg != null) hdgEl.innerText = Math.round(ud.headingDeg) + '°';
+
+    // Drawn instruments (right dock). Fed the SAME userData object the text
+    // rows above were just written from, so the dial and the numbers can never
+    // drift apart. No-ops when the bezel is off — the nodes are display:none.
+    vesselInstruments().update(ud);
 
     const regionEl = document.getElementById('vd-region');
     if (regionEl && latDeg != null && lonDeg != null) {
@@ -1326,7 +1618,7 @@ export function setupUI(deps) {
         ssaoPass, bloomPass, bokehPass,
         camera, controls,
         stateRef, aisShipsRef, scene,
-        dayNightManager, satelliteManager, predGroup,
+        dayNightManager, predGroup,
         cinematicDirector,
     } = deps;
 
@@ -1475,7 +1767,7 @@ export function setupUI(deps) {
 
     // ── Sector bookmarks ──────────────────────────────────────────────────────
     // Buttons now live in the top-right zoom column; active state shown in amber.
-    const _sectorBtns = ['btn-na','btn-eu','btn-as'].map(id => document.getElementById(id));
+    const _sectorBtns = ['btn-na','btn-eu','btn-as','btn-me'].map(id => document.getElementById(id));
     function _activateSector(btn) {
         _sectorBtns.forEach(b => b && b.classList.remove('active'));
         if (btn) btn.classList.add('active');
@@ -1483,6 +1775,9 @@ export function setupUI(deps) {
     document.getElementById('btn-na').onclick = () => { flyToSector(-100, 40,  camera, controls, stateRef, 90); _activateSector(document.getElementById('btn-na')); };
     document.getElementById('btn-eu').onclick = () => { flyToSector(15,   50,  camera, controls, stateRef, 90); _activateSector(document.getElementById('btn-eu')); };
     document.getElementById('btn-as').onclick = () => { flyToSector(130,  20,  camera, controls, stateRef, 90); _activateSector(document.getElementById('btn-as')); };
+    // Middle East / Persian Gulf — centred on the Gulf (Hormuz, Iran, Arabian
+    // Peninsula) at a slightly tighter altitude than the continents (2026-07-24).
+    document.getElementById('btn-me').onclick = () => { flyToSector(51,   27,  camera, controls, stateRef, 80); _activateSector(document.getElementById('btn-me')); };
 
     // ── Home button — reset to default global overview ────────────────────────
     const btnHome = document.getElementById('btn-home');
@@ -1544,6 +1839,20 @@ export function setupUI(deps) {
         }
     };
 
+    // ── Export vessel track (real-world coordinates, GeoJSON) ────────────────
+    const vdExportTrack = document.getElementById('vd-export-track');
+    if (vdExportTrack) vdExportTrack.onclick = () => {
+        if (!_detailShip) return;
+        const geojson = vesselTrackToGeoJSON(_detailShip.userData);
+        if (!geojson) {
+            vdExportTrack.innerText = 'NO TRACK YET';
+            setTimeout(() => { vdExportTrack.innerText = '⇩ EXPORT TRACK'; }, 1500);
+            return;
+        }
+        const mmsi = _detailShip.userData.id ?? 'unknown';
+        downloadGeoJSON(geojson, `vg1-track-${mmsi}`);
+    };
+
     // ── Search ────────────────────────────────────────────────────────────────
     const searchInput = document.getElementById('search-input');
     if (searchInput && aisShipsRef) {
@@ -1581,6 +1890,166 @@ export function setupUI(deps) {
                 btnPlace.innerText = 'PLACE ALERT ZONE';
                 btnPlace.classList.remove('active');
             }
+        });
+    }
+
+    // ── Measurement tool (distance/bearing ruler + GeoJSON export) ───────────
+    // Two-click flow driven from here because requestMapPick's raycasting
+    // lives in this file; measureManager itself owns no picking (see its
+    // header comment on why — avoids an import cycle with this module).
+    const btnMeasure       = document.getElementById('measure-toggle');
+    const measurePanel     = document.getElementById('measure-panel');
+    const measureReadout   = document.getElementById('measure-readout');
+    const measureExportBtn = document.getElementById('measure-export-btn');
+    const measureClearBtn  = document.getElementById('measure-clear-btn');
+
+    if (btnMeasure && scene) {
+        measureManager.onChange(({ phase, result }) => {
+            switch (phase) {
+                case 'arm-a':
+                    btnMeasure.innerText = 'CLICK POINT A…';
+                    btnMeasure.classList.add('active');
+                    if (measurePanel) measurePanel.style.display = 'none';
+                    break;
+                case 'arm-b':
+                    btnMeasure.innerText = 'CLICK POINT B…';
+                    break;
+                case 'complete':
+                    btnMeasure.innerText = 'CLEAR MEASUREMENT';
+                    if (measurePanel && measureReadout && result) {
+                        const brg3 = result.bearingDeg.toFixed(0).padStart(3, '0');
+                        measureReadout.innerText =
+                            `${result.distanceNm.toFixed(1)} NM  ·  ${result.distanceKm.toFixed(1)} KM  ·  BRG ${brg3}°`;
+                        measurePanel.style.display = 'block';
+                    }
+                    break;
+                case 'clear':
+                case 'cancel':
+                default:
+                    btnMeasure.innerText = 'MEASURE';
+                    btnMeasure.classList.remove('active');
+                    if (measurePanel) measurePanel.style.display = 'none';
+                    break;
+            }
+        });
+
+        const armMeasurePickA = () => {
+            requestMapPick(pick => {
+                measureManager.submitPointA(pick);
+                armMeasurePickB();
+            });
+        };
+        const armMeasurePickB = () => {
+            requestMapPick(pick => measureManager.submitPointB(pick));
+        };
+
+        btnMeasure.addEventListener('click', () => {
+            if (measureManager.isActive() || measureManager.current()) {
+                requestMapPick(null);
+                measureManager.clear();
+                return;
+            }
+            measureManager.start(scene);
+            armMeasurePickA();
+        });
+
+        if (measureExportBtn) {
+            measureExportBtn.addEventListener('click', () => {
+                const result = measureManager.current();
+                if (!result) return;
+                downloadGeoJSON(measurementToGeoJSON(result), 'vg1-measurement');
+            });
+        }
+        if (measureClearBtn) {
+            measureClearBtn.addEventListener('click', () => {
+                requestMapPick(null);
+                measureManager.clear();
+            });
+        }
+    }
+
+    // ── Survey toolkit (coordinate readout, control points, area, import) ─────
+    // Same pick-driven pattern as the measure ruler above: requestMapPick lives
+    // here, surveyManager owns the math/visuals. Readout/control/area re-arm the
+    // pick so you can keep clicking; toggling a tool off (or CLEAR) cancels it.
+    const surveyToggle  = document.getElementById('survey-toggle');
+    const surveyPanel   = document.getElementById('survey-panel');
+    const surveyReadout = document.getElementById('survey-readout');
+    const surveyStatus  = document.getElementById('survey-status');
+    const surveyFile    = document.getElementById('survey-file');
+    const svReadoutBtn  = document.getElementById('survey-readout-btn');
+    const svControlBtn  = document.getElementById('survey-control-btn');
+    const svAreaBtn     = document.getElementById('survey-area-btn');
+    const svImportBtn   = document.getElementById('survey-import-btn');
+    const svClearBtn    = document.getElementById('survey-clear-btn');
+
+    if (surveyToggle && surveyPanel && scene) {
+        let surveyOpen = false;
+        let surveyTool = null;   // 'readout' | 'control' | 'area' | null
+
+        const _svHighlight = () => {
+            svReadoutBtn.classList.toggle('active', surveyTool === 'readout');
+            svControlBtn.classList.toggle('active', surveyTool === 'control');
+            svAreaBtn.classList.toggle('active', surveyTool === 'area');
+            svAreaBtn.innerText = (surveyTool === 'area') ? '▱ FINISH' : '▱ AREA';
+        };
+        const _svStopTool = () => { surveyTool = null; requestMapPick(null); surveyManager.clearReadout(); _svHighlight(); };
+
+        surveyManager.onChange((kind, payload) => {
+            if (kind === 'readout' && surveyReadout) {
+                const el = payload.elevM != null ? `${Math.round(payload.elevM)} m (DEM)` : '—';
+                surveyReadout.innerText =
+                    `LAT  ${payload.latDMS}\nLON  ${payload.lonDMS}\nDEC  ${payload.lat.toFixed(5)}, ${payload.lon.toFixed(5)}\nUTM  ${payload.utmStr}\nELEV ${el}`;
+            } else if (kind === 'points' && surveyStatus) {
+                const c = payload.filter(p => p.type === 'control').length;
+                surveyStatus.innerText = `${payload.length} points · ${c} control · ${payload.length - c} survey`;
+            } else if (kind === 'area' && surveyReadout) {
+                if (payload.verts >= 3) {
+                    const km2 = payload.areaM2 / 1e6;
+                    const a = km2 >= 1 ? `${km2.toFixed(3)} km²` : `${Math.round(payload.areaM2).toLocaleString()} m²`;
+                    surveyReadout.innerText = `AREA  ${a}\nPERIM ${(payload.perimeterM / 1000).toFixed(2)} km\nVERTS ${payload.verts}${payload.done ? '\n(done)' : ' — FINISH to close'}`;
+                } else {
+                    surveyReadout.innerText = `AREA — ${payload.verts} vertex${payload.verts === 1 ? '' : 'es'} (need ≥3)`;
+                }
+            }
+        });
+
+        const _armReadout = () => requestMapPick(p => { surveyManager.describe(p); if (surveyTool === 'readout') _armReadout(); });
+        const _armControl = () => requestMapPick(p => { surveyManager.addPointFromPick(p, { type: 'control' }); if (surveyTool === 'control') _armControl(); });
+        const _armArea    = () => requestMapPick(p => { surveyManager.addAreaVertex(p); if (surveyTool === 'area') _armArea(); });
+
+        surveyToggle.addEventListener('click', () => {
+            surveyOpen = !surveyOpen;
+            surveyPanel.style.display = surveyOpen ? 'block' : 'none';
+            surveyToggle.classList.toggle('active', surveyOpen);
+            if (!surveyOpen) _svStopTool();
+        });
+        svReadoutBtn.addEventListener('click', () => {
+            if (surveyTool === 'readout') return _svStopTool();
+            _svStopTool(); surveyTool = 'readout'; _svHighlight(); _armReadout();
+        });
+        svControlBtn.addEventListener('click', () => {
+            if (surveyTool === 'control') return _svStopTool();
+            _svStopTool(); surveyTool = 'control'; _svHighlight(); _armControl();
+        });
+        svAreaBtn.addEventListener('click', () => {
+            if (surveyTool === 'area') { surveyManager.finishArea(); return _svStopTool(); }
+            _svStopTool(); surveyTool = 'area'; _svHighlight(); surveyManager.startArea(); _armArea();
+        });
+        svImportBtn.addEventListener('click', () => surveyFile && surveyFile.click());
+        if (surveyFile) surveyFile.addEventListener('change', e => {
+            const f = e.target.files?.[0]; if (!f) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                const res = surveyManager.importText(String(reader.result || ''));
+                if (surveyStatus) surveyStatus.innerText = res.error ? `Import failed: ${res.error}` : `Imported ${res.added} points`;
+            };
+            reader.readAsText(f);
+            surveyFile.value = '';   // allow re-importing the same file
+        });
+        svClearBtn.addEventListener('click', () => {
+            _svStopTool(); surveyManager.clearAll();
+            if (surveyReadout) surveyReadout.innerText = 'Pick a tool, then click the map.';
         });
     }
 
@@ -1720,6 +2189,24 @@ export function setupSettingsPanel(weatherManager) {
         if (fb) fb.textContent = `Set to ${b.dataset.tier}. Reload to apply terrain-detail change.`;
     }));
     _syncTier();
+
+    // ── Render scale / supersampling (live + persisted) ───────────────────────
+    // Unlike the tier buttons this needs no reload: qualityManager applies the
+    // pixel ratio immediately and the composer follows via vg1:pixelRatioChanged.
+    const rsBtns = panel.querySelectorAll('.render-scale-btn');
+    const _syncRs = () => rsBtns.forEach(b =>
+        b.classList.toggle('active', Math.abs(parseFloat(b.dataset.scale) - quality.renderScale()) < 0.001));
+    rsBtns.forEach(b => b.addEventListener('click', () => {
+        quality.setRenderScale(parseFloat(b.dataset.scale));
+        _syncRs();
+        const fb = document.getElementById('render-scale-feedback');
+        if (!fb) return;
+        const i = quality.info();
+        fb.textContent = i.renderScale > 1
+            ? `Rendering at ${i.livePixelRatio.toFixed(2)}× (${i.superSampling}) — about ${((i.livePixelRatio / Math.max(0.01, i.autoCap)) ** 2).toFixed(1)}× the pixels. Drop to Native if the frame rate suffers.`
+            : 'Native resolution. Higher settings supersample: sharper terrain, glyphs and text, at quadratic GPU cost.';
+    }));
+    _syncRs();
 
     // ── Camera feel (OrbitControls damping; live + persisted) ─────────────────
     const camBtns = panel.querySelectorAll('.cam-feel-btn');
@@ -1905,8 +2392,14 @@ function _setFeedback(el, msg, color) {
 export function onMouseMove(event, deps) {
     const { mouse, tooltipEl, raycaster, camera, boardPlane, hoverReticle, stateRef } = deps;
 
-    mouse.x = ( event.clientX / window.innerWidth)  * 2 - 1;
-    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    // NDC must be relative to the MAP RECT, not the window. With the bezel's
+    // 48px left rail and 36px top rail, window-relative maths puts a click at the
+    // visual centre of the map ~102px off target — you select the vessel up and
+    // left of the one you clicked, with no error anywhere. Covered by
+    // tests/viewport.test.mjs ("the regression this module prevents").
+    const _ndc = viewport.ndcFromEvent(event);
+    mouse.x = _ndc.x;
+    mouse.y = _ndc.y;
 
     // Pointer over a UI panel/control? (mousemove is bound to window, so it fires
     // over panels too.) Anything that isn't the WebGL <canvas> counts as UI —
@@ -1918,8 +2411,15 @@ export function onMouseMove(event, deps) {
     }
 
     if (tooltipEl) {
-        tooltipEl.style.left = (event.clientX + 15) + 'px';
-        tooltipEl.style.top  = (event.clientY + 15) + 'px';
+        // Clamp to the map rect, not the window — otherwise a tooltip near the
+        // right edge slides under the selection dock and one near the bottom
+        // slides under the timeline rail.
+        const tw = tooltipEl.offsetWidth  || 220;
+        const th = tooltipEl.offsetHeight || 120;
+        const p  = viewport.clampToRect(event.clientX + 15, event.clientY + 15,
+                                        tw, th, viewport.rect());
+        tooltipEl.style.left = p.x + 'px';
+        tooltipEl.style.top  = p.y + 'px';
     }
 
     if (boardPlane && hoverReticle) {
@@ -1950,7 +2450,11 @@ export function onMouseMove(event, deps) {
             const mercY  = -(pt.z / (MAP_HEIGHT / 2.0)) * Math.PI;
             const lat    = (2.0 * Math.atan(Math.exp(mercY)) - Math.PI / 2.0) * (180.0 / Math.PI);
             const hM     = getTrueElevation(pt.x, pt.z);
-            const depStr = hM < 0 ? Math.floor(hM) : '0';
+            // Report LAND height as well as depth. The old readout showed '0'
+            // for anything above sea level, which made the entire land surface
+            // of the map read as flat — the one case where an elevation number
+            // is most useful ("zoomed in looking at land").
+            const depStr = Number.isFinite(hM) ? Math.round(hM).toLocaleString() : '—';
 
             document.getElementById('coord-lat').innerText = lat.toFixed(4);
             document.getElementById('coord-lon').innerText = lon.toFixed(4);
@@ -2117,22 +2621,24 @@ export function onClick(event, deps) {
             const ttId = document.getElementById('tt-id');
             if (ttId) ttId.innerText = '[LOCKED] ' + stateRef.hoveredShip.userData.id;
 
-            if (stateRef.lockedShip.userData?.isRealFlight) {
-                // Aircraft: fly to an overhead angle at a comfortable altitude.
-                // y=50 keeps the plane visible without diving to terrain level.
-                stateRef.flightTargetPos.set(
-                    stateRef.lockedShip.position.x,
-                    50,
-                    stateRef.lockedShip.position.z + 20
-                );
-            } else {
-                // Ships / satellites: keep existing approach-from-current-direction logic.
-                const dir = new THREE.Vector3()
-                    .subVectors(camera.position, stateRef.lockedShip.position).normalize();
-                stateRef.flightTargetPos
-                    .copy(stateRef.lockedShip.position).add(dir.multiplyScalar(35));
-                if (stateRef.flightTargetPos.y < 5) stateRef.flightTargetPos.y = 5;
-            }
+            // Side view on select (2026-07-24, Jamal): close in to a horizontal /
+            // side-on angle BESIDE the asset instead of dropping in overhead. Keep
+            // the current horizontal look-direction so the camera just moves in from
+            // where you already are (minimal swing), and sit only slightly above the
+            // asset's own height for a gentle side-on angle. Ships and aircraft alike;
+            // the follow pivot (main.js) sits on the asset so it stays centred.
+            const _asset = stateRef.lockedShip.position;
+            const SIDE_DIST = 10;   // horizontal distance from the asset (scene units)
+            const SIDE_LIFT = 3;    // camera height above the asset → slight downward side angle
+            let _hx = camera.position.x - _asset.x;
+            let _hz = camera.position.z - _asset.z;
+            let _hlen = Math.hypot(_hx, _hz);
+            if (_hlen < 1e-3) { _hx = 0; _hz = 1; _hlen = 1; }   // was directly overhead → pick a side
+            stateRef.flightTargetPos.set(
+                _asset.x + (_hx / _hlen) * SIDE_DIST,
+                _asset.y + SIDE_LIFT,
+                _asset.z + (_hz / _hlen) * SIDE_DIST
+            );
             stateRef.isFlyingToTarget = true;
         }
     } else {
@@ -2290,8 +2796,12 @@ export function tickRaycasting(deps) {
     }
 
     // ── Stage 1: Screen-space proximity / snap-to ─────────────────────────────
-    const W  = window.innerWidth;
-    const H  = window.innerHeight;
+    // Canvas pixels — the comment below was already correct, the maths just
+    // happened to agree while the canvas filled the window. Under the bezel it
+    // does not: a window-sized W inflates every projected distance, so HIT_RADIUS_PX
+    // no longer means the pixel radius the operator actually sees.
+    const W  = viewport.width();
+    const H  = viewport.height();
     // Convert NDC mouse (-1..1) to canvas pixels
     const mx = (mouse.x + 1) * 0.5 * W;
     const my = (1 - mouse.y) * 0.5 * H;   // Y is flipped in NDC
@@ -2679,8 +3189,7 @@ export function setupSectorSearch(camera, controls, stateRef) {
 
 // ── Fleet Intelligence Panel ──────────────────────────────────────────────────
 // Populates #fleet-intel every UPDATE_INTERVAL ms with live airline + vessel
-// counts drawn from window.aisShips (shared array set up by main.js).
-// No imports needed — reads global window refs like every other panel here.
+// counts drawn from entityStore (the owning module for live entities).
 
 const _FI_INTERVAL = 5000; // ms between refreshes
 
@@ -2697,12 +3206,24 @@ function _renderFleetIntelRows(containerEl, entries, maxCount) {
 }
 
 function _updateFleetIntel() {
-    const ships = window.aisShips || [];
+    const ships = entityStore.all();
 
     // ── Air traffic ──────────────────────────────────────────────────────────
-    const aircraft = ships.filter(o => o.userData?.isRealFlight);
+    // Stale-feed flag (2026-07-22 — collection-lead walkthrough finding): this
+    // count reads entityStore directly, which can still hold the last
+    // batch of aircraft objects for a while after the feed itself has gone
+    // offline — the count alone can't tell a collection lead that. Mirrors the
+    // same #flight-status text the bottom status bar already reads, so both
+    // surfaces agree instead of silently disagreeing.
+    const aircraft   = ships.filter(o => o.userData?.isRealFlight);
+    const airLive    = (document.getElementById('flight-status')?.textContent || '').startsWith('LIVE');
     const airTotalEl = document.getElementById('fi-air-total');
-    if (airTotalEl) airTotalEl.textContent = `${aircraft.length} aircraft`;
+    if (airTotalEl) {
+        airTotalEl.innerHTML = airLive
+            ? `${aircraft.length} aircraft`
+            : `${aircraft.length} aircraft <span class="fi-stale-tag">(feed offline — last known)</span>`;
+        airTotalEl.classList.toggle('fi-stale', !airLive);
+    }
 
     const opCount = {};
     aircraft.forEach(a => {
