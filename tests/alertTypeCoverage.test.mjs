@@ -79,17 +79,27 @@ test('the monitor never claims a severity TYPE_META disagrees with', () => {
     }
 });
 
-console.log('the known pre-existing gap is still recorded, not silently fixed');
-test('ZONE_BREACH remains the documented counter-example', () => {
-    // Not our bug to fix here, but if someone ever wires it up this test should
-    // fail so the comment in alertsManager stops being wrong.
-    if (META.has('ZONE_BREACH') && !RULES.has('ZONE_BREACH')) {
-        console.log('      (ZONE_BREACH still has metadata but no rule — unchanged, as expected)');
-    } else {
-        assert.ok(RULES.has('ZONE_BREACH'),
-            'ZONE_BREACH now has a rule — update the comments that cite it as the ' +
-            'cautionary example of a half-wired alert type');
-    }
+console.log('ZONE_BREACH — wired 2026-07-29, previously the counter-example');
+test('ZONE_BREACH now has BOTH metadata and a rule', () => {
+    assert.ok(META.has('ZONE_BREACH'), 'missing TYPE_META entry');
+    assert.ok(RULES.has('ZONE_BREACH'),
+        'missing DEFAULT_RULES entry — it would be unraisable again');
+});
+test('and it has a real raise site, not just configuration', () => {
+    // The failure this whole file exists to prevent is configuration that looks
+    // wired. Both halves present but nothing calling addAlert is the same bug
+    // one layer up.
+    const ui = readFileSync(new URL('../uiController.js', import.meta.url), 'utf8');
+    assert.match(ui, /type:\s*'ZONE_BREACH'/, 'no ZONE_BREACH raise site in uiController');
+    assert.match(ui, /zoneBreachTracker\.evaluate/, 'the detector is never evaluated');
+    assert.match(ui, /zoneBreachTracker\.seed/,
+        'no seeding — placing a zone over traffic would alarm on every vessel');
+});
+test('the comment citing it as unraisable was updated', () => {
+    assert.ok(!/ZONE_BREACH above is the cautionary example/.test(src),
+        'alertsManager still describes ZONE_BREACH as having no rule, which is ' +
+        'now false — a stale comment about wiring is how the next person ' +
+        'reintroduces the bug');
 });
 
 console.log(`\nalertTypeCoverage.test: ${passed} checks passed`);

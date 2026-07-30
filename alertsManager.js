@@ -35,8 +35,8 @@ const TYPE_META = {
     AIRCRAFT_CONFLICT:   { label: 'AERIAL CONFLICT',      severity: 'CRITICAL', icon: '✈', color: '#ff1744' },
     // ── STM Enhanced Monitoring (enhancedMonitor.js, 2026-07-29) ─────────────
     // Every one of these needs a DEFAULT_RULES entry below as well as an entry
-    // here. ZONE_BREACH above is the cautionary example: it has metadata but no
-    // rule, so _isEnabled() returns false and it can never actually be raised.
+    // here. ZONE_BREACH was the cautionary example of exactly that — metadata
+    // with no rule, unraisable — until it was wired up on 2026-07-29.
     ROUTE_DEVIATION:       { label: 'ROUTE DEVIATION',       severity: 'WARNING',  icon: '⤳', color: '#ff8c00' },
     SCHEDULE_SLIP:         { label: 'SCHEDULE SLIP',         severity: 'WARNING',  icon: '◷', color: '#ff8c00' },
     // Named for what it actually is. This compares the ship's DECLARED draught
@@ -68,6 +68,10 @@ const DEFAULT_RULES = [
     // enhancedMonitor.js already throttles at source (STM.ALARM_COOLDOWN_MS per
     // mmsi+type), so these are safe to have on by default — they cannot flood
     // the log the way an untuned per-tick raise would.
+    // Raised by zoneBreach.js via uiController.tickAlertZone. Until 2026-07-29
+    // this type had metadata here and NO rule, so _isEnabled() was false and it
+    // could never fire — it is now wired end to end.
+    { id: 'zone_breach',          name: 'ZONE BREACH',           type: 'ZONE_BREACH',           enabled: true, params: {} },
     { id: 'route_deviation',      name: 'ROUTE DEVIATION',       type: 'ROUTE_DEVIATION',       enabled: true, params: {} },
     { id: 'schedule_slip',        name: 'SCHEDULE SLIP',         type: 'SCHEDULE_SLIP',         enabled: true, params: {} },
     { id: 'safety_depth',         name: 'SAFETY DEPTH CONFLICT', type: 'SAFETY_DEPTH_CONFLICT', enabled: true, params: {} },

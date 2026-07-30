@@ -3,6 +3,8 @@ import * as THREE from 'three';
 import { entityStore } from './entityStore.js';   // live entity collection (was window.aisShips)
 import { MAP_WIDTH, MAP_HEIGHT, FLIGHT } from './config.js';
 import { pairSeparation } from './conflictMath.js';   // nearest-traffic / CPA readout on the aircraft card
+import { zoneBreachTracker } from './zoneBreach.js';
+import { ZONE } from './config.js';
 
 // ── Scene ↔ lat/lon helpers (inverse of lonLatToScene in aisManager.js) ────────
 function _scenePosToLonLat(x, z) {
@@ -56,6 +58,7 @@ function _inferProbableCargo(shipClass, portType) {
 let _searchQuery  = '';
 let _detailShip   = null;   // ship currently shown in vessel-detail panel
 let _alertZone    = null;   // { mesh, ringMesh, center: Vector3, radius: number }
+let _zoneEvalAt   = 0;      // sim time of the last breach evaluation (ZONE.EVAL_MS gate)
 let _zoneWaiting  = false;  // true while waiting for user click to place zone
 let _mapPickCb    = null;   // one-shot map-pick callback (requestMapPick)
 
@@ -229,6 +232,7 @@ function _clearZoneMeshes(scene) {
         _alertZone.ringMesh.geometry.dispose();
         _alertZone = null;
     }
+    zoneBreachTracker.reset();
     const badge = document.getElementById('alert-zone-badge');
     if (badge) badge.innerText = '';
 }
@@ -236,10 +240,35 @@ function _clearZoneMeshes(scene) {
 export function tickAlertZone(aisShips) {
     if (!_alertZone) return;
     let alertCount = 0;
+    const measured = [];
     aisShips.forEach(s => {
         const dist = s.position.distanceTo(_alertZone.center);
         if (dist < _alertZone.radius) alertCount++;
+        const mmsi = s.userData?.mmsi;
+        if (mmsi != null) measured.push({ mmsi, dist });
     });
+
+    // ── breach detection ─────────────────────────────────────────────────────
+    // This function runs PER FRAME. The count above is cheap; entry/exit state
+    // is not, and an alert raised sixty times a second is not an alert. Gated on
+    // ZONE.EVAL_MS here, with hysteresis and a per-vessel cooldown inside
+    // zoneBreach on top of it.
+    const zNow = simClock.now();
+    if (zNow - _zoneEvalAt >= ZONE.EVAL_MS) {
+        _zoneEvalAt = zNow;
+        const { entered } = zoneBreachTracker.evaluate(measured, _alertZone.radius, zNow);
+        for (const mmsi of entered) {
+            const ship = aisShips.find(o => String(o.userData?.mmsi) === mmsi);
+            const name = ship?.userData?.name ?? mmsi;
+            window.alertsManager?.addAlert?.({
+                type: 'ZONE_BREACH',
+                mmsi,
+                message: name + ' entered the alert zone',
+                extra: { mmsi, zoneRadius: _alertZone.radius, simTime: zNow,
+                         insideCount: zoneBreachTracker.insideCount },
+            });
+        }
+    }
     const badge = document.getElementById('alert-zone-badge');
     if (badge) {
         badge.innerText  = alertCount > 0 ? `⚠ ${alertCount} IN ZONE` : '';
@@ -2565,6 +2594,21 @@ export function onClick(event, deps) {
             scene.add(ring);
 
             _alertZone   = { mesh: disk, ringMesh: ring, center, radius };
+            // Adopt whatever is ALREADY inside, silently. A zone dropped on a
+            // busy strait would otherwise fire one CRITICAL alert per vessel for
+            // traffic that crossed nothing — see zoneBreach.js for why that is
+            // the difference between a useful alert type and a useless one.
+            {
+                const already = entityStore.ships().map(o => ({
+                    mmsi: o.userData?.mmsi,
+                    dist: o.position.distanceTo(center),
+                }));
+                const seeded = zoneBreachTracker.seed(already, radius);
+                if (seeded) {
+                    console.info('[alertZone] ' + seeded + ' vessel(s) already inside at' +
+                                 ' placement — adopted, not reported as breaches');
+                }
+            }
             _zoneWaiting = false;
             contextCards.show('ALERT_ZONE');
 

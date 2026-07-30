@@ -560,6 +560,23 @@ export const STM = {
     ORG_MRN_PREFIX: 'urn:mrn:stm:voyage:id:vanguard1',
 };
 
+// ── Alert zone breach detection (zoneBreach.js) ──────────────────────────────
+// The user-placed alert zone (uiController's `_alertZone`) has always counted
+// vessels inside it for the badge. These drive the ENTRY event that makes
+// alertsManager's ZONE_BREACH type actually fire.
+export const ZONE = {
+    // tickAlertZone runs per frame (main.js animation loop). The badge count is
+    // cheap enough to stay there; breach evaluation is gated on this.
+    EVAL_MS: 2000,
+    // Leaving must be harder than entering. At exactly the radius, ordinary
+    // position jitter flips a vessel in and out every tick — so exit requires
+    // clearing radius x (1 + this). Same shape as STM.DEVIATION_CLEAR_MS.
+    EXIT_HYSTERESIS: 0.08,
+    // Per-vessel backstop for a ship genuinely oscillating across the boundary
+    // faster than an operator could act on it.
+    ALARM_COOLDOWN_MS: 5 * 60 * 1000,
+};
+
 // ── Zone recorder (zoneRecorder.js) ──────────────────────────────────────────
 export const ZONE_REC = {
     TICK_MS:           500,    // real-ms cadence of the arm/auto-stop state machine
@@ -1146,14 +1163,4 @@ function mulberry32(a) {
         return ((t ^ t >>> 14) >>> 0) / 4294967296;
     };
 }
-// lightningManager constants
-export const LIGHTNING = {
-    ENABLED:        true,
-    OPACITY:        0.8,
-    UPDATE_INTERVAL_MS: 30_000,   // how often to refresh data
-    MAX_OBJECTS:    500,          // instanced mesh budget
-    FADE_START:     200,          // camera.y above which layer fades out
-    FADE_END:       220,          // camera.y above which layer is fully hidden
-};
-
 export const prng = mulberry32(12345);
