@@ -3552,6 +3552,14 @@
                 Port Markers
                 <span class="lp-dot on" id="dot-ports"></span>
             </div>
+            <!-- STM declared route plans + their XTD corridors (routeLayer.js).
+                 Default ON, but the layer is empty until a vessel actually shares
+                 a plan — which essentially no live AIS vessel does. Load the demo
+                 with vg1STM.demo() in the console. -->
+            <div class="lp-row" data-layer="routes">
+                Route Plans (STM)
+                <span class="lp-dot on" id="dot-routes"></span>
+            </div>
             <div class="lp-row" data-layer="sea-state">
                 Sea State (Waves)
                 <span class="lp-dot" id="dot-sea-state"></span>

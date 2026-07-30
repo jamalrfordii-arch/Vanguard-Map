@@ -388,6 +388,178 @@ export const SIM = {
     RECORDER_MAX:   200000,  // max captured AIS messages before recorder stops
 };
 
+// ── IMF PortWatch — port & chokepoint activity (portActivityManager.js) ──────
+//
+// RECONSTRUCTED 2026-07-29, and the reconstruction is the point of this comment.
+// This namespace was lost when config.js was overwritten by a copy staged before
+// the portwatch work existed. It is not recoverable from git (it was never
+// committed) nor from config.js.pre-portwatch.bak (that snapshot predates it), so
+// the values below are derived from how portActivityManager.js and
+// portActivity.js actually USE them — they are not the originals.
+//
+// Every number matches the corresponding default in portActivity.js own
+// function signatures — matchPorts({maxKm = 50, warnKm = 25}) and
+// seriesStats({recentDays = 7, baselineDays = 90}) — which is the most
+// defensible basis available, since those defaults were written alongside the
+// consumer that reads this namespace.
+//
+// PORT_OVERRIDES CANNOT BE RECOVERED. It is the hand-corrected map of Vanguard1
+// port name to PortWatch portid, and whatever was in it is gone. It is empty
+// below, so affected ports fall back to spatial matching. portActivityManager
+// already prints "[portActivity] unmatched:" and "[portActivity] weak matches
+// (check these):" on init — read those to find which ports need one re-added.
+export const PORTWATCH = {
+    ENABLED: true,
+
+    // flight-proxy.js serves /portwatch on PORT = 8787 (see its PORTWATCH_HOST /
+    // PORTWATCH_CACHE_DIR block). Same origin the copilot and cable feed use.
+    PROXY: "http://localhost:8787",
+
+    // Spatial port matching. MATCH_MAX_KM is a hard cap — beyond it a port is
+    // reported UNMATCHED rather than matched badly. MATCH_WARN_KM only flags a
+    // match as weak so it can be eyeballed. Both mirror matchPorts own defaults.
+    MATCH_MAX_KM:  50,
+    MATCH_WARN_KM: 25,
+
+    // "OUR PORT NAME": "portNNNN" — hand corrections, which win outright over
+    // spatial matching. EMPTY BECAUSE THE ORIGINAL CONTENTS WERE LOST, not
+    // because none were needed. See the note above.
+    PORT_OVERRIDES: {},
+
+    // Daily series windows. seriesStats compares the most recent RECENT_DAYS
+    // against the BASELINE_DAYS immediately preceding them, so WINDOW_DAYS must
+    // cover both (7 + 90 = 97) with headroom for PortWatch publication lag —
+    // the feed trails real time by several days, which is what staleDays()
+    // exists to surface.
+    RECENT_DAYS:   7,
+    BASELINE_DAYS: 90,
+    WINDOW_DAYS:   120,
+};
+
+// ── Sea Traffic Management: route plans + Enhanced Monitoring ────────────────
+// (routeGeometry.js, rtzCodec.js, voyagePlanStore.js, enhancedMonitor.js)
+// Full design: docs/STM_ROUTE_SPEC.md
+//
+// READ THIS BEFORE CHANGING ANY THRESHOLD BELOW.
+//
+// Enhanced Monitoring's real deviation criteria are NOT constants. They are
+// per-leg values the ship itself declares in its shared RTZ route:
+// `leg/@portsideXTD` and `@starboardXTD` for cross-track, `scheduleElement/@eta`
+// with `@etaWindowBefore`/`@etaWindowAfter` for schedule, `leg/@safetyDepth` for
+// draught. No primary STM source specifies a numeric threshold — the STM
+// Validation shore-side implementation (D2.9/D2.11) defines every alarm purely
+// in terms of the RTZ values.
+//
+// The DEFAULT_* values here are therefore OUR INVENTION, used only when a plan
+// omits the field. Any alarm raised on one carries `usedDefault: true` and the
+// UI must say so. A system that silently substitutes its own threshold for the
+// ship's declared one is manufacturing authority it does not have.
+export const STM = {
+    TICK_MS: 5000,          // deviation evaluation cadence — timer-driven, not per-frame
+
+    // ── Fallbacks. Not standard values. See the note above. ──────────────────
+    DEFAULT_XTD_NM: 0.5,
+    DEFAULT_SCHEDULE_TOLERANCE_MS: 30 * 60 * 1000,
+
+    // ── Hysteresis ───────────────────────────────────────────────────────────
+    // A ship cutting a corner inside a waypoint's turn radius momentarily
+    // exceeds XTD. That is normal navigation, not a deviation, so a breach must
+    // persist before it confirms and must clear for longer before it releases.
+    DEVIATION_CONFIRM_MS: 60_000,
+    DEVIATION_CLEAR_MS:  120_000,
+    // alertsManager has no dedup — it only collapses consecutive same-type rows
+    // visually at render time. At TICK_MS=5s an unthrottled deviation would
+    // raise 12 identical alerts a minute, so the monitor throttles at source,
+    // per (mmsi, alarmType).
+    ALARM_COOLDOWN_MS: 15 * 60 * 1000,
+
+    // ── Gating ───────────────────────────────────────────────────────────────
+    MONITOR_ONLY_STATUS_7: true,   // routeStatus 7 = "used for monitoring" (loaded in ECDIS)
+    MIN_SOG_FOR_SCHEDULE_KTS: 0.5, // below this a projected ETA is division by ~zero
+    // Navigational statuses where a stopped or wandering ship is behaving
+    // correctly and a deviation alarm would be noise: 1 at anchor, 2 not under
+    // command, 3 restricted manoeuvrability, 5 moored, 6 aground.
+    SUPPRESS_ON_NAV_STATUS: [1, 2, 3, 5, 6],
+    // How far outside the widest declared corridor counts as having abandoned
+    // the route entirely (multiple of that corridor).
+    ABANDON_XTD_MULTIPLE: 5,
+    // Within this distance of the END of the route, the voyage is over and
+    // schedule evaluation stops. Without it, distanceToNextWpNm goes to ~0 at
+    // the final waypoint, the projected ETA collapses to "now", and the measured
+    // slip grows one minute per minute forever on a vessel that arrived exactly
+    // on time. Found by the full-voyage integration harness, not by unit tests.
+    ARRIVAL_RADIUS_NM: 0.5,
+
+    // ── Geometry ─────────────────────────────────────────────────────────────
+    ORTHODROME_TESSELLATION_NM: 25,  // great-circle legs only; rhumb legs are straight in Mercator
+    ROUTE_CORRIDOR_HINT_NM: 5,       // how far off-axis a leg hint stays plausible
+    // XTD above this is read as METRES, below as NAUTICAL MILES. RTZ Annex S
+    // specifies 0.0-10.0 nm; several STM documents describe the same attribute
+    // in metres, and both appear in real files. The inferred branch is recorded
+    // in the parse report and surfaced — a silent factor-of-1852 error in a
+    // monitoring threshold is not something to guess at quietly.
+    XTD_UNIT_THRESHOLD: 10,
+
+    // ── Store ────────────────────────────────────────────────────────────────
+    // Byte cap matters more than the entry count here: an ocean-passage RTZ can
+    // run to hundreds of waypoints, and plans retain their original XML verbatim
+    // so vendor <extension> nodes survive a round trip.
+    MAX_PLANS: 200,
+    MAX_PLAN_BYTES: 4 * 1024 * 1024,
+    PLAN_FLUSH_MS: 4000,
+    STORAGE_KEY: 'vg1_voyage_plans',
+
+    // ── Route rendering (routeRibbon.js / routeLayer.js) ─────────────────────
+    // A TRUE-SCALE CORRIDOR IS INVISIBLE, and the fix is the one vesselScale.js
+    // already established for hulls: state the constraint in pixels rather than
+    // as a magic multiplier. MAP_WIDTH=300 spans the equatorial circumference,
+    // so one scene unit is 72.1 nm and a typical 0.2 nm corridor is 0.0028 units
+    // — roughly a ten-thousandth of the map width.
+    //
+    // CORRIDOR_MIN_PX is the on-screen half-width the WIDER side is grown to
+    // meet. One factor is applied to BOTH sides, so the port/starboard ratio
+    // stays exact — a route declaring 0.15/0.30 always draws twice as wide to
+    // starboard, at every zoom. As the camera descends the factor falls to 1 and
+    // the ribbon becomes geometrically true, which is the same guarantee
+    // vesselScale gives in reverse.
+    CORRIDOR_MIN_PX: 7,
+    // Y lift above the sea plane. Enough to clear z-fighting with the Gerstner
+    // water, small enough that the route still reads as lying ON the sea.
+    ROUTE_Y_OFFSET: 0.06,
+    // Route materials must stay BELOW the bloom threshold (0.95, sceneSetup.js).
+    // These are unlit colours with opacity, never emissive — CLAUDE.md calls the
+    // bloom threshold a hairpin, and a full-length glowing ribbon is exactly the
+    // kind of thing that would tip it.
+    ROUTE_COLORS: {
+        CENTRELINE:   '#6fb7d8',
+        CORRIDOR:     '#4a90b8',
+        CORRIDOR_RIM: '#7fc4e0',
+        WAYPOINT:     '#9fd8ee',
+        DEVIATING:    '#d8894a',   // set by enhancedMonitor in 1.6
+        SYNTHETIC:    '#8a8f98',   // a plan WE generated, never one a ship shared
+    },
+    CORRIDOR_OPACITY: 0.16,
+    CENTRELINE_OPACITY: 0.75,
+    // Waypoint pip size in PIXELS, not scene units. A waypoint has a position
+    // and a turn radius but no extent, so any scene-space size for its marker is
+    // a fiction — and a badly chosen one is actively misleading. The first
+    // version of this used 0.18 scene units, which is 13 NAUTICAL MILES across:
+    // at full zoom the pip was 23× wider than the corridor it annotated and hid
+    // it entirely. A constant pixel size claims nothing about size.
+    WAYPOINT_PIP_PX: 6,
+    // A corridor drawn from OUR default rather than the ship's declared XTD is
+    // rendered fainter, so "we assumed this" is visible and not merely logged.
+    DEFAULTED_OPACITY_SCALE: 0.5,
+
+    // ── Interop (Phase 3) ────────────────────────────────────────────────────
+    // SECOM mandates mutual TLS with X.509 client certificates and ECDSA payload
+    // signing. A browser cannot present a client certificate programmatically,
+    // so the exchange layer lives in a Node sidecar (stm-proxy.js) and the
+    // browser talks plain localhost HTTP to it. Same shape as flight-proxy.js.
+    PROXY_URL: 'http://localhost:8788',
+    ORG_MRN_PREFIX: 'urn:mrn:stm:voyage:id:vanguard1',
+};
+
 // ── Zone recorder (zoneRecorder.js) ──────────────────────────────────────────
 export const ZONE_REC = {
     TICK_MS:           500,    // real-ms cadence of the arm/auto-stop state machine

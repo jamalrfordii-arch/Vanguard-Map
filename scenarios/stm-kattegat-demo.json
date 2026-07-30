@@ -1,0 +1,92 @@
+{
+  "name": "STM Enhanced Monitoring — Kattegat/Skagerrak",
+  "_comment": [
+    "Demonstrates the three states Enhanced Monitoring must be able to tell apart.",
+    "Load with vg1Scenario.load('./scenarios/stm-kattegat-demo.json'), then push the",
+    "declared plans into the store with scenarioRoute.loadScenarioPlans().",
+    "",
+    "  NORDIC TRADER  — shares a plan and follows it.        ON_TRACK",
+    "  BALTIC CARRIER — shares a plan and drifts off it.     DEVIATING",
+    "  KATTEGAT STAR  — shares NO plan at all.               UNMONITORED",
+    "",
+    "That third vessel is the important one. It is not compliant and it is not",
+    "deviating — it is unknown, which is the true state of essentially all live",
+    "AIS traffic. A demo that shows only the first two teaches an operator to read",
+    "'no route drawn' as 'fine'. See docs/STM_ROUTE_SPEC.md section 5.8.",
+    "",
+    "Geography is the Gothenburg approaches out through the Skagerrak, which is",
+    "where the STM Validation project's own published test data lives."
+  ],
+  "startTime": "2026-07-29T06:00:00Z",
+  "entities": [
+    {
+      "mmsi": "265177000",
+      "name": "NORDIC TRADER",
+      "shipType": 70,
+      "speedKts": 12.4,
+      "loop": false,
+      "navStatus": 0,
+      "waypoints": [
+        { "lon": 11.65, "lat": 57.60, "name": "GOTHENBURG PILOT" },
+        { "lon": 11.50, "lat": 57.63, "name": "VINGA" },
+        { "lon": 10.60, "lat": 57.72, "name": "SKAGEN" },
+        { "lon": 8.60,  "lat": 57.40, "name": "HANSTHOLM APPROACH" }
+      ],
+      "stmRoute": {
+        "routeName": "GOTHENBURG - HANSTHOLM",
+        "portsideXtdNm": 0.15,
+        "starboardXtdNm": 0.30,
+        "safetyDepth": 15,
+        "speedMin": 8,
+        "speedMax": 14,
+        "geometryType": "Loxodrome",
+        "routeStatus": 7,
+        "waypointRadiusNm": 0.5,
+        "etaWindowBeforeMs": 900000,
+        "etaWindowAfterMs": 2700000
+      }
+    },
+    {
+      "mmsi": "219000450",
+      "name": "BALTIC CARRIER",
+      "shipType": 80,
+      "speedKts": 11.0,
+      "loop": false,
+      "navStatus": 0,
+      "waypoints": [
+        { "lon": 11.62, "lat": 57.55, "name": "DEPARTURE" },
+        { "lon": 11.40, "lat": 57.58, "name": "TURN NORTH" },
+        { "lon": 10.55, "lat": 57.66, "name": "SKAGEN W" },
+        { "lon": 8.80,  "lat": 57.32, "name": "OUTBOUND" }
+      ],
+      "stmRoute": {
+        "routeName": "BALTIC CARRIER OUTBOUND",
+        "xtdNm": 0.2,
+        "safetyDepth": 18,
+        "speedMin": 7,
+        "speedMax": 13,
+        "routeStatus": 7,
+        "waypointRadiusNm": 0.5,
+        "deviate": {
+          "fromWpIndex": 2,
+          "offsetNm": 0.9,
+          "rampNm": 3,
+          "side": "starboard"
+        }
+      }
+    },
+    {
+      "mmsi": "265999111",
+      "name": "KATTEGAT STAR",
+      "shipType": 60,
+      "speedKts": 16.0,
+      "loop": false,
+      "navStatus": 0,
+      "waypoints": [
+        { "lon": 11.20, "lat": 57.40 },
+        { "lon": 10.90, "lat": 57.80 },
+        { "lon": 10.40, "lat": 58.10 }
+      ]
+    }
+  ]
+}

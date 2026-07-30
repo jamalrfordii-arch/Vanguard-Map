@@ -742,3 +742,103 @@ mechanisms, peeled in order:
 Meta-lesson, again: the wedges predated the evening's tile work and were
 initially misattributed to it. Screenshot archaeology (the artifact appears in
 the FIRST screenshot of the session) is the fastest innocence proof there is.
+
+
+## Vessel model pipeline (2026-07-29)
+
+**`children.forEach` vs `traverse` when harvesting a template.** shipInstancer's
+harvest read `template.children` and filtered `isMesh`. That is correct for
+entityBuilder's flat Groups and finds EXACTLY ZERO meshes in a glTF scene, which
+nests Scene > Node > Mesh. The failure is silent — an empty part list produces an
+empty set, no error, no vessels. Any code that accepts "a Group of meshes" from
+more than one producer has to traverse.
+
+**Measuring a hull's beam by histogramming vertices.** The first version of the
+baker's bow-at-+Z check binned vertex |x| by Z band and demanded the forward band
+be narrower. It rejected all 21 subtypes as "facing the wrong way". Cause: a
+plan-form extrusion has vertices only where the outline CHANGES DIRECTION, so an
+extruded hull has no vertices at all amidships — the mid-band half-beam measured
+0.00. Fix: intersect triangle EDGES with station planes (the ship-lines-plan
+construction), which is correct for any tessellation. Generalises: never sample a
+shape's cross-section from its vertex cloud.
+
+**A box hull cannot prove its own orientation.** BARGE's plan-form is nearly
+fore-aft symmetric, so the taper check is structurally incapable of catching a
+reversed barge. Rather than loosen the threshold for all 21 (which would have
+quietly weakened a check that works), `boxHull: true` switches it to a weaker
+test and records "orientation declared, not proven" in the manifest. When a
+check cannot work, say so in the artifact instead of relaxing it everywhere.
+
+**Build at the origin, rotate, THEN translate.** `box(w,h,l,x,y,z).rotateX(a)`
+reads like it tilts the part in place. It rotates the already-offset geometry
+about the WORLD origin and throws it off the ship. Cost two rounds: deck cranes
+ended up below the waterline, sails detached from the mast.
+
+**A freshly allocated instance slot is not empty.** When a vessel migrates from
+its procedural set to a model set, the new slot holds whatever the buffer holds —
+read back as an identity matrix, i.e. scale 1, i.e. a 3.4-unit (~450 km) hull for
+one frame, on every vessel, on every migration. `_adoptModel` now replays the
+vessel's last transform into the new slot instead of waiting for the next update
+sweep. Caught by reading matrices back mid-test rather than by looking at it.
+
+**Resolving a vessel's appearance once, at spawn.** Everything the mesh resolver
+needs — length (AIS Dimension A+B) and name — rides the type-5 STATIC message,
+which can trail the position report that created the vessel by minutes. Resolve
+once at spawn and `lengthM` is always null, so the length ladders never fire:
+every CARGO renders as a coaster, every TANKER as a product tanker, and it looks
+exactly like the ladder thresholds are mis-tuned rather than never reached.
+aisManager's reclassify hook does NOT cover it — it fires only on a CLASS change,
+it assigns `existing.class` ~25 lines before `existing.lengthM`, and a vessel
+typed from typeCache never fires it at all. `shipInstancer.resubtype()` runs on
+the per-report update path instead, guarded by a class|length|name signature.
+Rule of thumb: for anything derived from AIS statics, ask "what is null the
+instant this vessel first appears?" — usually the answer is most of it.
+
+**Releasing a slot before securing its replacement.** `_migrate` allocates in the
+destination set FIRST, then releases. The natural order (release, then alloc)
+loses the vessel entirely if the destination is at capacity — its old slot is
+already back on the free list and there is nothing to restore.
+
+**2026-07-29 — A STALE STAGED COPY IS A DELETE. Overwriting a file from a copy
+read minutes earlier destroys everything added in between, and a missing named
+export takes the whole app down, not just its feature.** `config.js` was written
+from a snapshot taken before the PortWatch work existed, which silently removed
+`export const PORTWATCH`. Vanguard1 then would not load at all — not "portwatch
+is broken" but a blank app — because ES modules resolve named imports at load
+time, so `import { PORTWATCH } from './config.js'` in portActivityManager.js
+fails the ENTIRE graph. All 109 modules, gone, on one absent constant.
+
+Three things made this worse than it needed to be.
+
+**(a) The tell for this class of failure is "nothing loads" alongside a CLEAN
+syntax check.** `node --check` passes on every file, every import points at a
+file that exists, and the whole test suite passes — because the suite imports
+modules individually and never exercises the graph as one unit. The check that
+actually finds it is: for every `import { X } from './y.js'`, is X really
+exported by y.js? Worth keeping as a one-liner; it located this in seconds after
+a long detour through scopes and load order.
+
+**(b) It was unrecoverable, because it was uncommitted-vs-uncommitted and git
+had nothing to say.** Not in HEAD (never committed), and
+`config.js.pre-portwatch.bak` predates the feature. The values were
+reconstructed from how the consumers use them: every number matches the
+corresponding default in the signatures inside portActivity.js —
+matchPorts({maxKm = 50, warnKm = 25}) and seriesStats({recentDays = 7,
+baselineDays = 90}) — which is the best available basis precisely because those
+defaults were written next to the code that reads the namespace.
+`PORT_OVERRIDES` (hand-corrected port name to PortWatch portid) could not be
+reconstructed at all and is now empty; the `[portActivity] unmatched:` line on
+init is the only way to discover what belonged in it.
+
+**(c) config.js is the highest-risk file in this repo to overwrite.** 64 exports,
+imported by roughly 60 modules, and it is where every new feature adds its
+namespace — so it is simultaneously the file most likely to have changed under
+you and the one whose loss is most total. Write it IN PLACE (read, splice one
+namespace, write) rather than replacing it wholesale. The same applies to any
+file with many independent consumers.
+
+**Rule: never write a file from a copy you did not just read.** Re-read
+immediately before writing and diff, or patch in place. A modification-time
+guard catches this and costs nothing — the failure here was applying one to
+main.js and index.html but not to config.js, the file rewritten most often
+across batches.

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<!--
+  tests/browser/rtzBrowserParity.html — run the STM modules in a REAL browser.
+
+  Everything else in the suite runs in Node against tests/_stubs/xmlDom.mjs.
+  That stub exists because Node has no DOMParser and Vanguard1 has no
+  dependencies — but production uses the browser's NATIVE DOMParser, and a stub
+  that quietly disagrees with the real thing is worse than no stub at all.
+
+  This harness loads rtzCodec / voyagePlanStore / routeGeometry as real ES
+  modules in headless Chromium and re-runs the load-bearing assertions against:
+    · the native DOMParser (namespaces, localName, <parsererror> reporting)
+    · real localStorage (quota, string coercion, persistence round trip)
+    · real CustomEvent dispatch on window
+
+  Driven by tests/browser/run.mjs. Results land on window.__RESULTS__.
+-->
+<meta charset="utf-8">
+<title>VANGUARD1 — STM browser parity</title>
+<body><pre id="out">running…</pre></body>
+<script type="module">
+import { parse, serialise, activeSchedule, scheduleElementFor, isMonitoring } from '../../rtzCodec.js';
+import { voyagePlanStore, planKey, isMonitored } from '../../voyagePlanStore.js';
+import { projectOntoRoute, crossTrackNm, rhumbCrossTrackNm, gcCrossTrackNm } from '../../routeGeometry.js';
+
+const results = [];
+function test(name, fn) {
+    try { fn(); results.push({ name, ok: true }); }
+    catch (e) { results.push({ name, ok: false, error: String(e && e.message || e) }); }
+}
+const assert = (c, m) => { if (!c) throw new Error(m || 'assertion failed'); };
+const near = (a, b, tol, m) => assert(Math.abs(a - b) <= tol,
+    `${m ?? ''} expected ${b} ±${tol}, got ${a}`);
+
+// Same fixture as tests/rtzCodec.test.mjs, so any divergence is attributable to
+// the parser rather than to the input.
+const GOTHENBURG = `<?xml version="1.0" encoding="UTF-8"?>
+<route version="1.1" xmlns="http://www.cirm.org/RTZ/1/1">
+  <routeInfo routeName="GOTHENBURG - ROTTERDAM"
+             routeAuthor="MASTER"
+             routeStatus="7"
+             vesselName="NORDIC TRADER"
+             vesselMMSI="265177000"
+             vesselIMO="9123456"
+             vesselVoyage="urn:mrn:stm:voyage:id:acme:b6d7b492-ab3c-42f2-8afd-116c3d872f0c"
+             validityPeriodStart="2026-07-29T06:00:00Z"
+             validityPeriodStop="2026-08-01T18:00:00Z"/>
+  <waypoints>
+    <defaultWaypoint>
+      <leg geometryType="Loxodrome" portsideXTD="0.25" starboardXTD="0.25" safetyDepth="15"/>
+    </defaultWaypoint>
+    <waypoint id="1" revision="0" name="GOTHENBURG PILOT" radius="0.5">
+      <position lat="57.6000" lon="11.6000"/>
+    </waypoint>
+    <waypoint id="2" revision="0" name="VINGA" radius="0.4">
+      <position lat="57.6300" lon="11.6000"/>
+      <leg geometryType="Loxodrome" portsideXTD="0.15" starboardXTD="0.30"
+           safetyDepth="18" speedMin="8" speedMax="14" legNote1="TSS INBOUND LANE"/>
+    </waypoint>
+    <waypoint id="3" revision="0" name="SKAGEN" radius="1.0">
+      <position lat="57.7000" lon="10.5000"/>
+      <leg geometryType="Orthodrome" speedMax="16"/>
+    </waypoint>
+  </waypoints>
+  <schedules>
+    <schedule id="1" name="MONITORING">
+      <manual>
+        <scheduleElement waypointId="1" etd="2026-07-29T06:00:00Z" speed="10"/>
+        <scheduleElement waypointId="2" eta="2026-07-29T06:30:00Z"
+                         etaWindowBefore="00:15" etaWindowAfter="00:45" speed="12" speedWindow="1.5"/>
+        <scheduleElement waypointId="3" eta="2026-07-29T10:00:00Z" stay="00.02.30"/>
+      </manual>
+      <calculated>
+        <scheduleElement waypointId="2" eta="2026-07-29T06:35:00Z"/>
+      </calculated>
+    </schedule>
+  </schedules>
+  <extensions>
+    <extension manufacturer="ACME" name="AcmeRouteExt" version="2.0">
+      <acmeThing value="keep me"/>
+    </extension>
+  </extensions>
+</route>`;
+
+const PREFIXED = `<?xml version="1.0"?>
+<rtz:route xmlns:rtz="http://www.cirm.org/RTZ/1/1" version="1.1">
+  <rtz:routeInfo routeName="PREFIXED" vesselMMSI="111111111" routeStatus="7"/>
+  <rtz:waypoints>
+    <rtz:waypoint id="1"><rtz:position lat="0" lon="0"/></rtz:waypoint>
+    <rtz:waypoint id="2"><rtz:position lat="0" lon="1"/></rtz:waypoint>
+  </rtz:waypoints>
+</rtz:route>`;
+
+const NO_NS = `<?xml version="1.0"?>
+<route version="1.0">
+  <routeInfo routeName="NO NAMESPACE"/>
+  <waypoints>
+    <waypoint id="1"><position lat="0" lon="0"/></waypoint>
+    <waypoint id="2"><position lat="0" lon="1"/></waypoint>
+  </waypoints>
+</route>`;
+
+// ── native DOMParser: the whole reason this file exists ──────────────────────
+test('native DOMParser is what the codec actually uses here', () => {
+    assert(typeof DOMParser !== 'undefined', 'no DOMParser');
+    assert(!('installDOMParser' in globalThis), 'stub must not be installed in the browser run');
+});
+
+test('parses the default-namespaced document', () => {
+    const { plan, report } = parse(GOTHENBURG);
+    assert(report.ok, JSON.stringify(report.warnings));
+    assert(plan.routeName === 'GOTHENBURG - ROTTERDAM', plan.routeName);
+    assert(plan.waypoints.length === 3, `${plan.waypoints.length} waypoints`);
+    assert(plan.mmsi === '265177000');
+    assert(plan.routeStatus === 7);
+});
+
+test('localName works under a default namespace (the stub fallback is not masking this)', () => {
+    // If the codec's localName() helper were relying on the stub's nodeName
+    // split, a real namespaced document would parse to zero waypoints here.
+    const { plan } = parse(GOTHENBURG);
+    assert(plan.waypoints.length === 3, 'namespaced children were found by local name');
+});
+
+test('parses a PREFIXED document (rtz:route) — real namespace resolution', () => {
+    const { plan, report } = parse(PREFIXED);
+    assert(report.ok, JSON.stringify(report.warnings));
+    assert(plan.routeName === 'PREFIXED', plan.routeName);
+    assert(plan.waypoints.length === 2);
+});
+
+test('parses a document with no namespace at all', () => {
+    const { plan, report } = parse(NO_NS);
+    assert(report.ok, JSON.stringify(report.warnings));
+    assert(plan.waypoints.length === 2);
+});
+
+test('native <parsererror> is detected — malformed XML never yields a half plan', () => {
+    // Browsers do NOT throw on malformed XML; they return a document containing
+    // a <parsererror> element. Missing that check is how garbage parses
+    // "successfully" in production while passing every Node test.
+    const { plan, report } = parse('<route><waypoints><waypoint></route>');
+    assert(plan === null, 'plan must be null');
+    assert(report.warnings.some(w => w.code === 'XML_PARSE_ERROR'),
+        `expected XML_PARSE_ERROR, got ${JSON.stringify(report.warnings)}`);
+});
+
+test('a non-route root is rejected', () => {
+    const { plan, report } = parse('<?xml version="1.0"?><notARoute/>');
+    assert(plan === null);
+    assert(report.warnings.some(w => w.code === 'NOT_AN_RTZ_ROUTE'));
+});
+
+test('empty and whitespace input are rejected without throwing', () => {
+    assert(parse('').plan === null);
+    assert(parse('   ').plan === null);
+});
+
+// ── the parse details that carry the monitoring logic ────────────────────────
+test('defaultWaypoint inheritance survives the native parser', () => {
+    const { plan } = parse(GOTHENBURG);
+    near(plan.waypoints[2].leg.portsideXTD, 0.25, 1e-9, 'inherited XTD');
+    near(plan.waypoints[2].leg.safetyDepth, 15, 1e-9, 'inherited safetyDepth');
+    near(plan.waypoints[2].leg.speedMax, 16, 1e-9, 'own speedMax wins');
+    assert(plan.waypoints[2].leg.geometryType === 'Orthodrome');
+});
+
+test('asymmetric XTD survives', () => {
+    const { plan } = parse(GOTHENBURG);
+    near(plan.waypoints[1].leg.portsideXTD, 0.15, 1e-9);
+    near(plan.waypoints[1].leg.starboardXTD, 0.30, 1e-9);
+});
+
+test('schedule windows parse as durations', () => {
+    const { plan } = parse(GOTHENBURG);
+    const e = scheduleElementFor(plan, 2);
+    assert(e.eta === Date.parse('2026-07-29T06:30:00Z'));
+    assert(e.etaWindowBefore === 15 * 60000, `${e.etaWindowBefore}`);
+    assert(e.etaWindowAfter === 45 * 60000);
+    assert(scheduleElementFor(plan, 3).stay === (2 * 60 + 30) * 60000);
+    assert(activeSchedule(plan).kind === 'manual');
+    assert(isMonitoring(plan) === true);
+});
+
+test('XTD unit inference behaves identically in the browser', () => {
+    const { plan, report } = parse(GOTHENBURG.replace('starboardXTD="0.30"', 'starboardXTD="556"'));
+    assert(report.xtdUnitInferred === 'M', report.xtdUnitInferred);
+    near(plan.waypoints[1].leg.starboardXTD, 556 / 1852, 1e-6);
+    assert(report.warnings.some(w => w.code === 'XTD_UNIT_INFERRED'));
+});
+
+test('XML entities decode via the native parser', () => {
+    const { plan } = parse(NO_NS.replace('routeName="NO NAMESPACE"', 'routeName="A &amp; B &lt;1&gt;"'));
+    assert(plan.routeName === 'A & B <1>', plan.routeName);
+});
+
+// ── round trip through the native parser ─────────────────────────────────────
+function stripVolatile(p) {
+    const { raw, parseReport, sourceOrigin, receivedAt, ...rest } = p;
+    return rest;
+}
+test('ROUND TRIP: parse(serialise(parse(x))) === parse(x), natively', () => {
+    const a = parse(GOTHENBURG).plan;
+    const b = parse(serialise(a)).plan;
+    assert(JSON.stringify(stripVolatile(b)) === JSON.stringify(stripVolatile(a)),
+        'round trip diverged in the browser');
+});
+test('the serialised document is accepted by the native parser', () => {
+    const { report } = parse(serialise(parse(GOTHENBURG).plan));
+    assert(report.ok, JSON.stringify(report.warnings));
+});
+test('serialised output emits no empty attributes', () => {
+    const xml = serialise(parse(NO_NS).plan);
+    assert(!/=""/.test(xml), xml);
+});
+
+// ── real localStorage ────────────────────────────────────────────────────────
+test('store round-trips through REAL localStorage', () => {
+    localStorage.clear();
+    voyagePlanStore.clear();
+
+    const p = voyagePlanStore.add(parse(GOTHENBURG).plan);
+    assert(p, 'plan added');
+    voyagePlanStore.flushNow();
+
+    const rawStored = localStorage.getItem('vg1_voyage_plans');
+    assert(typeof rawStored === 'string' && rawStored.length > 0, 'nothing was written');
+
+    voyagePlanStore.clear();
+    assert(voyagePlanStore.count() === 0);
+
+    const res = voyagePlanStore.load(parse);
+    assert(res.loaded === 1, JSON.stringify(res));
+    const back = voyagePlanStore.byMmsi('265177000');
+    assert(back, 'plan not recoverable by MMSI');
+    assert(back.routeStatus === 7);
+    assert(back.restoredFromStorage === true);
+    near(back.waypoints[1].leg.starboardXTD, 0.30, 1e-9, 'XTD survived storage');
+});
+
+test('byMmsi returns null for an unmonitored vessel — UNMONITORED, not compliant', () => {
+    voyagePlanStore.clear();
+    voyagePlanStore.add(parse(GOTHENBURG).plan);
+    assert(voyagePlanStore.byMmsi('999999999') === null);
+});
+
+test('supersede-not-duplicate holds in the browser', () => {
+    voyagePlanStore.clear();
+    voyagePlanStore.add(parse(GOTHENBURG).plan);
+    voyagePlanStore.add(parse(GOTHENBURG.replace('GOTHENBURG - ROTTERDAM', 'UPDATED')).plan);
+    assert(voyagePlanStore.count() === 1, `${voyagePlanStore.count()} plans`);
+    assert(voyagePlanStore.all()[0].routeName === 'UPDATED');
+});
+
+// ── real CustomEvent dispatch ────────────────────────────────────────────────
+test('vg1:voyagePlanReceived and vg1:voyagePlanActivated fire on window', () => {
+    const seen = [];
+    const h1 = (e) => seen.push(['received', e.detail]);
+    const h2 = (e) => seen.push(['activated', e.detail]);
+    window.addEventListener('vg1:voyagePlanReceived', h1);
+    window.addEventListener('vg1:voyagePlanActivated', h2);
+    try {
+        voyagePlanStore.clear();
+        voyagePlanStore.add(parse(GOTHENBURG).plan);
+    } finally {
+        window.removeEventListener('vg1:voyagePlanReceived', h1);
+        window.removeEventListener('vg1:voyagePlanActivated', h2);
+    }
+    assert(seen.some(s => s[0] === 'received'), 'no received event');
+    assert(seen.some(s => s[0] === 'activated'), 'no activated event (status 7 plan)');
+    const rec = seen.find(s => s[0] === 'received')[1];
+    assert(rec.mmsi === '265177000' && rec.routeStatus === 7, JSON.stringify(rec));
+});
+
+// ── geometry against a real parsed plan ──────────────────────────────────────
+test('projectOntoRoute works on a natively parsed plan', () => {
+    const { plan } = parse(GOTHENBURG);
+    // A point just off the first leg (Gothenburg Pilot → Vinga, due north).
+    const r = projectOntoRoute(57.615, 11.605, plan, 0);
+    assert(r.legIndex === 0, `legIndex ${r.legIndex}`);
+    assert(Number.isFinite(r.crossTrackNm), 'cross-track is finite');
+    assert(r.crossTrackNm > 0, 'east of a northbound leg is starboard');
+    assert(Number.isFinite(r.distanceToEndNm) && r.distanceToEndNm > 0);
+});
+
+test('the XTD breach decision uses the SIDE and LEG the ship is on', () => {
+    // Leg 1 is Gothenburg Pilot (57.60, 11.60) → Vinga (57.63, 11.60): due
+    // north, with an ASYMMETRIC corridor — 0.15 nm to port, 0.30 nm to
+    // starboard. East of a northbound leg is starboard, so the 0.30 nm limit
+    // applies. The same displacement to the WEST would breach at half the
+    // distance, and getting the side wrong inverts that.
+    const { plan } = parse(GOTHENBURG);
+    const check = (lat, lon) => {
+        const r = projectOntoRoute(lat, lon, plan, 0);
+        assert(r.legIndex === 0, `legIndex ${r.legIndex}`);
+        const leg = plan.waypoints[r.legIndex + 1].leg;
+        const limit = r.crossTrackNm >= 0 ? leg.starboardXTD : leg.portsideXTD;
+        return { xt: r.crossTrackNm, limit, breach: Math.abs(r.crossTrackNm) > limit };
+    };
+
+    const inside = check(57.615, 11.605);          // 0.161 nm to starboard
+    near(inside.limit, 0.30, 1e-9, 'starboard limit');
+    assert(inside.xt > 0, 'east of a northbound leg is starboard');
+    assert(!inside.breach, `0.161 nm is inside the 0.30 nm corridor, got breach=${inside.breach}`);
+
+    const outside = check(57.615, 11.61);          // 0.322 nm to starboard
+    assert(outside.breach, `0.322 nm should breach the 0.30 nm corridor`);
+
+    // The asymmetry is the point: mirror it to port and it breaches at 0.161 nm,
+    // where the starboard side did not.
+    const port = check(57.615, 11.595);
+    assert(port.xt < 0, 'west of a northbound leg is port');
+    near(port.limit, 0.15, 1e-9, 'port limit is half the starboard one');
+    assert(port.breach,
+        'the SAME displacement breaches to port and not to starboard — this is why side matters');
+});
+
+test('rhumb vs great-circle divergence reproduces in the browser', () => {
+    const rh = Math.abs(rhumbCrossTrackNm(60, 0, 60, -10, 60, 10));
+    const gc = Math.abs(gcCrossTrackNm(60, 0, 60, -10, 60, 10));
+    near(rh, 0, 0.05, 'on the rhumb line');
+    assert(gc > 2, `great circle reads ${gc.toFixed(2)} nm off`);
+});
+
+test('debug handles are exposed but are not the data path', () => {
+    assert(window.vg1Rtz && window.vg1Plans && window.vg1RouteGeom, 'debug handles missing');
+    assert(window.vg1Plans === voyagePlanStore, 'store handle is the same object');
+});
+
+// ── publish ──────────────────────────────────────────────────────────────────
+window.__RESULTS__ = results;
+document.getElementById('out').textContent =
+    results.map(r => `${r.ok ? '✓' : '✗'} ${r.name}${r.ok ? '' : '\n    ' + r.error}`).join('\n');
+window.__DONE__ = true;
+</script>

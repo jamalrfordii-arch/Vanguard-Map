@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<!--
+  tests/browser/stmPanelDom.html — the panel's DOM and drag-drop behaviour.
+
+  Formatting logic is covered in Node (tests/stmPanel.test.mjs). This covers what
+  only a browser can: that the badge appears when it should and STAYS HIDDEN when
+  there is nothing to say, that a real File drop reaches the codec and lands in
+  the store, and that the counted dragenter/dragleave does not flicker — a naive
+  hide-on-dragleave flashes the overlay continuously as the cursor crosses child
+  elements, which looks broken and makes the drop target feel unreliable.
+-->
+<meta charset="utf-8">
+<title>VANGUARD1 — STM panel DOM</title>
+<style>body{margin:0;background:#05080d;color:#9fd8ee;font:11px/1.6 monospace}#out{padding:10px;white-space:pre}</style>
+<body><pre id="out">running…</pre>
+<div id="child" style="position:fixed;left:0;top:0;width:40px;height:40px"></div>
+<script type="module">
+import { StmPanel, formatCoverage } from '../../stmPanel.js';
+import { voyagePlanStore } from '../../voyagePlanStore.js';
+import { EnhancedMonitor, MONITOR_STATE } from '../../enhancedMonitor.js';
+import { parse as parseRtz } from '../../rtzCodec.js';
+import { loadScenarioPlans } from '../../scenarioRoute.js';
+
+const results = [];
+async function test(name, fn) {
+    try { await fn(); results.push({ name, ok: true }); }
+    catch (e) { results.push({ name, ok: false, error: String(e && e.message || e) }); }
+}
+const assert = (c, m) => { if (!c) throw new Error(m || 'assertion failed'); };
+
+const monitor = new EnhancedMonitor({ store: voyagePlanStore, alerts: { addAlert(){} } });
+let panel;
+function fresh() {
+    panel?.dispose();
+    voyagePlanStore.clear();
+    monitor.clear();
+    panel = new StmPanel({ store: voyagePlanStore, monitor, parse: parseRtz }).init();
+    return panel;
+}
+const badge = () => document.getElementById('stm-coverage');
+const toast = () => document.getElementById('stm-toast');
+const overlay = () => document.getElementById('stm-drop');
+const visible = (el) => el && el.style.display !== 'none';
+
+const RTZ = `<?xml version="1.0"?>
+<route version="1.1" xmlns="http://www.cirm.org/RTZ/1/1">
+  <routeInfo routeName="IMPORTED ROUTE" vesselMMSI="265177000" routeStatus="7" routeAuthor="MASTER"/>
+  <waypoints>
+    <waypoint id="1"><position lat="57.6" lon="11.6"/></waypoint>
+    <waypoint id="2"><position lat="57.7" lon="11.4"/>
+      <leg portsideXTD="0.15" starboardXTD="0.30" safetyDepth="18"/></waypoint>
+  </waypoints>
+</route>`;
+
+const RTZ_METRES = RTZ.replace('starboardXTD="0.30"', 'starboardXTD="556"');
+const RTZ_STATUS4 = RTZ.replace('routeStatus="7"', 'routeStatus="4"');
+const mkFile = (text, name) => new File([text], name, { type: 'application/xml' });
+
+// ── the badge ───────────────────────────────────────────────────────────────
+await test('the panel injects its own DOM (no index.html markup needed)', () => {
+    fresh();
+    assert(badge(), '#stm-coverage missing');
+    assert(toast(), '#stm-toast missing');
+    assert(overlay(), '#stm-drop missing');
+});
+await test('the badge STAYS HIDDEN when no plan is held', () => {
+    // "0 of 431 monitored" on a map with no STM data at all is noise, not
+    // honesty. The count must appear the moment one plan exists, not before.
+    fresh();
+    monitor.tick([{ mmsi: '1', latDeg: 0, lonDeg: 0, speedKts: 5, navStatus: 0, isDark: false }]);
+    panel.render();
+    assert(!visible(badge()), 'badge shown with zero plans');
+});
+await test('the badge APPEARS as soon as one plan is held', async () => {
+    fresh();
+    const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+    loadScenarioPlans(demo, voyagePlanStore);
+    panel.render();
+    assert(visible(badge()), 'badge hidden despite plans being held');
+    assert(/MONITORED/.test(badge().textContent), badge().textContent);
+});
+await test('the badge shows the UNKNOWN count in the DOM, not just the model', async () => {
+    fresh();
+    const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+    loadScenarioPlans(demo, voyagePlanStore);
+    monitor.tick([
+        { mmsi: '265177000', latDeg: 57.60, lonDeg: 11.65, speedKts: 12, navStatus: 0, isDark: false },
+        { mmsi: '999', latDeg: 10, lonDeg: 10, speedKts: 9, navStatus: 0, isDark: false },
+        { mmsi: '998', latDeg: 11, lonDeg: 11, speedKts: 9, navStatus: 0, isDark: false },
+    ]);
+    panel.render();
+    const t = badge().textContent;
+    assert(/UNKNOWN/.test(t), `no UNKNOWN row: ${t}`);
+    assert(/\b2\b/.test(t), `expected 2 unknown in: ${t}`);
+});
+await test('the badge never renders an all-clear word', async () => {
+    fresh();
+    const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+    loadScenarioPlans(demo, voyagePlanStore);
+    monitor.tick([{ mmsi: '265177000', latDeg: 57.60, lonDeg: 11.65, speedKts: 12, navStatus: 0, isDark: false }]);
+    panel.render();
+    assert(!/\bOK\b|ALL CLEAR|NOMINAL/i.test(badge().textContent), badge().textContent);
+});
+await test('an all-synthetic plan set says so in the DOM', async () => {
+    fresh();
+    const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+    loadScenarioPlans(demo, voyagePlanStore);
+    panel.render();
+    assert(/all synthetic/i.test(badge().textContent),
+        `a demo must not look like real shared plans: ${badge().textContent}`);
+});
+await test('setVisible(false) hides the badge', async () => {
+    fresh();
+    const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+    loadScenarioPlans(demo, voyagePlanStore);
+    panel.render();
+    assert(visible(badge()));
+    panel.setVisible(false);
+    assert(!visible(badge()));
+});
+
+// ── import ──────────────────────────────────────────────────────────────────
+await test('a dropped RTZ File reaches the codec and lands in the store', async () => {
+    fresh();
+    const out = await panel.importFiles([mkFile(RTZ, 'route.rtz')]);
+    assert(out.length === 1 && out[0].plan, JSON.stringify(out[0]?.report?.warnings));
+    const plan = voyagePlanStore.byMmsi('265177000');
+    assert(plan, 'not retrievable from the store');
+    assert(plan.routeName === 'IMPORTED ROUTE', plan.routeName);
+    assert(plan.sourceOrigin === 'file', `origin ${plan.sourceOrigin}`);
+    assert(Math.abs(plan.waypoints[1].leg.starboardXTD - 0.30) < 1e-9);
+});
+await test('an imported real plan is NOT flagged synthetic', async () => {
+    fresh();
+    await panel.importFiles([mkFile(RTZ, 'route.rtz')]);
+    panel.render();
+    assert(!/synthetic/i.test(badge().textContent), badge().textContent);
+});
+await test('the toast reports the import, with route name and XTD', async () => {
+    fresh();
+    await panel.importFiles([mkFile(RTZ, 'route.rtz')]);
+    assert(visible(toast()), 'no toast shown');
+    const t = toast().textContent;
+    assert(/IMPORTED 1 ROUTE PLAN/.test(t), t);
+    assert(/IMPORTED ROUTE/.test(t) && /265177000/.test(t), t);
+    assert(/status 7 — MONITORED/.test(t), t);
+});
+await test('THE XTD UNIT INFERENCE IS SHOWN TO THE OPERATOR', async () => {
+    // A factor of 1852 on a monitoring threshold. Console-only is not enough.
+    fresh();
+    await panel.importFiles([mkFile(RTZ_METRES, 'metres.rtz')]);
+    const t = toast().textContent;
+    assert(/XTD_UNIT_INFERRED/.test(t), t);
+    assert(/metres/i.test(t), t);
+});
+await test('a status-4 plan is imported but flagged as monitoring nothing', async () => {
+    fresh();
+    await panel.importFiles([mkFile(RTZ_STATUS4, 'draft.rtz')]);
+    const t = toast().textContent;
+    assert(/status 4 — not monitored/.test(t), t);
+    assert(/nothing will be monitored against it/.test(t), t);
+});
+await test('a malformed file is REJECTED loudly, not silently skipped', async () => {
+    fresh();
+    const out = await panel.importFiles([mkFile('<route><broken>', 'bad.rtz')]);
+    assert(out[0].plan === null);
+    assert(/REJECTED bad\.rtz/.test(toast().textContent), toast().textContent);
+    assert(voyagePlanStore.count() === 0, 'a broken file must not enter the store');
+});
+await test('non-route files are reported as ignored, with the expected extensions', async () => {
+    fresh();
+    await panel.importFiles([mkFile('{}', 'data.json')]);
+    const t = toast().textContent;
+    assert(/IGNORED 1 non-route file/.test(t), t);
+    assert(/\.rtz/.test(t), 'the message must say what IS accepted');
+});
+await test('several files import in one drop', async () => {
+    fresh();
+    const out = await panel.importFiles([
+        mkFile(RTZ, 'a.rtz'),
+        mkFile(RTZ.replace('265177000', '219000450').replace('IMPORTED ROUTE', 'SECOND'), 'b.rtz'),
+    ]);
+    assert(out.filter(o => o.plan).length === 2, JSON.stringify(out.map(o => !!o.plan)));
+    assert(voyagePlanStore.count() === 2, `${voyagePlanStore.count()} plans`);
+});
+await test('an empty drop does nothing rather than throwing', async () => {
+    fresh();
+    assert(await panel.importFiles([]) === null);
+    assert(await panel.importFiles(null) === null);
+});
+
+// ── drag overlay: the flicker bug ───────────────────────────────────────────
+function dragEvent(type, withFiles = true) {
+    const e = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(e, 'dataTransfer', {
+        value: { types: withFiles ? ['Files'] : ['text/plain'], files: [] },
+    });
+    return e;
+}
+await test('the overlay appears on a file dragenter', () => {
+    fresh();
+    assert(!visible(overlay()), 'overlay starts hidden');
+    window.dispatchEvent(dragEvent('dragenter'));
+    assert(visible(overlay()), 'overlay did not appear');
+});
+await test('a NON-file drag is ignored (text selection must not arm it)', () => {
+    fresh();
+    window.dispatchEvent(dragEvent('dragenter', false));
+    assert(!visible(overlay()), 'overlay armed by a non-file drag');
+});
+await test('crossing into a CHILD element does not flicker the overlay', () => {
+    // The real bug this guards: dragleave fires when the pointer enters a child,
+    // so hide-on-any-dragleave blinks the overlay continuously as the cursor
+    // moves. The counted depth is what makes it stable.
+    fresh();
+    window.dispatchEvent(dragEvent('dragenter'));      // page
+    window.dispatchEvent(dragEvent('dragenter'));      // into a child
+    window.dispatchEvent(dragEvent('dragleave'));      // leaving the child
+    assert(visible(overlay()), 'overlay hidden while still dragging over the page');
+    window.dispatchEvent(dragEvent('dragleave'));      // leaving the page
+    assert(!visible(overlay()), 'overlay still shown after leaving entirely');
+});
+await test('the overlay hides on drop', () => {
+    fresh();
+    window.dispatchEvent(dragEvent('dragenter'));
+    window.dispatchEvent(dragEvent('drop'));
+    assert(!visible(overlay()), 'overlay left up after a drop');
+});
+
+// ── teardown ────────────────────────────────────────────────────────────────
+await test('dispose removes the DOM and detaches listeners', () => {
+    fresh();
+    panel.dispose();
+    assert(!document.getElementById('stm-coverage'), 'badge left in the DOM');
+    assert(!document.getElementById('stm-drop'), 'overlay left in the DOM');
+    // A leaked dragenter listener would still fire and recreate nothing, but it
+    // would throw on a null element.
+    assert.doesNotThrow === undefined;
+    window.dispatchEvent(dragEvent('dragenter'));
+});
+
+document.getElementById('out').textContent =
+    'STM PANEL DOM\n\n' + results.map(r => `  ${r.ok ? '✓' : '✗'} ${r.name}${r.ok ? '' : '\n      ' + r.error}`).join('\n');
+window.__RESULTS__ = results;
+window.__DONE__ = true;
+</script>

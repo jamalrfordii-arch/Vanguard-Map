@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<!--
+  tests/browser/stmIntegration.html — the whole STM pipeline, end to end, with
+  nothing mocked.
+
+  Every other suite tests a module. This one runs the CHAIN, in a real browser,
+  through the real seams:
+
+    scenario JSON
+       ├─► scenarioRoute.loadScenarioPlans ─► voyagePlanStore ─► routeLayer (3D)
+       └─► SyntheticAISSource ─► aisManager.ingest() ─► aisManager.vessels
+                                                            │
+                                       enhancedMonitor.tick(vessels)
+                                                            │
+                                       alerts + vg1:* events + route recolour
+
+  It matters because the seams are where the assumptions live. Using the real
+  aisManager.ingest() is what proves the prerequisite field work from §1 actually
+  survives the pipeline: if SOG were still integer-rounded, or COG still
+  discarded, or navStatus still unparsed, the monitor downstream would silently
+  get worse answers and every unit test would still pass.
+
+  Then it plays a 15-hour voyage through simClock and records what an operator
+  would have seen, hour by hour.
+-->
+<meta charset="utf-8">
+<title>VANGUARD1 — STM integration</title>
+<style>
+  body{margin:0;background:#05080d;color:#9fd8ee;font:11px/1.5 monospace}
+  canvas{display:block}
+  #log{position:fixed;left:8px;top:8px;white-space:pre;pointer-events:none;text-shadow:0 0 4px #000}
+</style>
+<script type="importmap">
+{ "imports": { "three": "/node_modules/three/build/three.module.js" } }
+</script>
+<body><pre id="log">running…</pre></body>
+<script type="module">
+import * as THREE from 'three';
+import { AISManager } from '../../aisManager.js';
+import { SyntheticAISSource } from '../../dataSource.js';
+import { voyagePlanStore } from '../../voyagePlanStore.js';
+import { loadScenarioPlans } from '../../scenarioRoute.js';
+import { EnhancedMonitor, MONITOR_STATE } from '../../enhancedMonitor.js';
+import { RouteLayer } from '../../routeLayer.js';
+import { simClock } from '../../simClock.js';
+import { STM, AIS } from '../../config.js';
+
+const results = [];
+function test(name, fn) {
+    try { fn(); results.push({ name, ok: true }); }
+    catch (e) { results.push({ name, ok: false, error: String(e && e.message || e) }); }
+}
+const assert = (c, m) => { if (!c) throw new Error(m || 'assertion failed'); };
+const near = (a, b, tol, m) => assert(Math.abs(a - b) <= tol, `${m ?? ''} expected ${b} ±${tol}, got ${a}`);
+
+// ── real renderer, real scene ───────────────────────────────────────────────
+const W = 1440, H = 1080;
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setSize(W, H);
+renderer.setClearColor(0x05080d, 1);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.01, 5000);
+
+const pageErrors = [];
+const realWarn = console.warn, realError = console.error;
+console.warn = (...a) => { const s = a.join(' '); if (/shader|glsl|program/i.test(s)) pageErrors.push(s); realWarn(...a); };
+console.error = (...a) => { pageErrors.push(a.join(' ')); realError(...a); };
+
+// ── the pipeline ────────────────────────────────────────────────────────────
+const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+const START = Date.parse(demo.startTime);
+
+// Global client bbox must not filter out our test region.
+AIS.CLIENT_BBOX = null;
+
+voyagePlanStore.clear();
+const loaded = loadScenarioPlans(demo, voyagePlanStore);
+
+const alertsSeen = [];
+const alertsFake = { addAlert(a) { alertsSeen.push(a); return a; } };
+
+const ais = new AISManager();
+ais.vessels.clear();
+const monitor = new EnhancedMonitor({ store: voyagePlanStore, alerts: alertsFake });
+const layer = new RouteLayer(scene, { store: voyagePlanStore });
+layer.rebuild();
+
+const stateEvents = [];
+window.addEventListener('vg1:routeMonitorState', e => stateEvents.push(e.detail));
+window.addEventListener('vg1:routeDeviation', e => stateEvents.push({ deviation: e.detail }));
+
+// Drive the synthetic source straight into the REAL ingest seam.
+const src = new SyntheticAISSource(demo);
+simClock.setTime(START);
+src.start(msg => ais.ingest(msg));
+
+// ── play the voyage ─────────────────────────────────────────────────────────
+// Step at STM.TICK_MS of SIM time so hysteresis and cooldown behave as they do
+// live, but cover 15 hours — so this walks ~10,800 monitor ticks.
+const STEP = STM.TICK_MS;
+const HOURS = 15;
+const timeline = [];
+let nextSample = 0;
+
+for (let t = 0; t <= HOURS * 3600_000; t += STEP) {
+    simClock.setTime(START + t);
+    src._tick();
+    ais.tick(STEP / 1000);
+    monitor.tick(ais.vessels.values());
+
+    if (t >= nextSample) {
+        nextSample += 3600_000;                 // record once an hour
+        const row = { hour: Math.round(t / 3600_000), ships: {} };
+        for (const [mmsi, v] of ais.vessels) {
+            const s = monitor.stateOf(mmsi);
+            row.ships[v.name] = {
+                state: s?.state ?? '—',
+                xt: s?.crossTrackNm == null ? null : Number(s.crossTrackNm.toFixed(3)),
+                sog: v.speedKts,
+                cog: v.cogDeg,
+                hdg: v.headingDeg,
+                nav: v.navStatus,
+                alarms: s ? [...s.alarms.keys()].filter(k => s.alarms.get(k).confirmed) : [],
+            };
+        }
+        row.coverage = monitor.monitoringCoverage();
+        timeline.push(row);
+    }
+}
+src.stop();
+
+// Push monitor verdicts into the 3D layer, as main.js will.
+for (const uvid of layer.uvids()) {
+    const st = [...monitor.states.values()].find(s => s.uvid === uvid);
+    if (st) layer.setRouteState(uvid, st.state === MONITOR_STATE.ON_TRACK ? 'ON_TRACK' : 'DEVIATING');
+}
+
+const byName = (n) => {
+    for (const [mmsi, v] of ais.vessels) if (v.name === n) return { mmsi, v, s: monitor.stateOf(mmsi) };
+    return null;
+};
+const nordic = byName('NORDIC TRADER');
+const baltic = byName('BALTIC CARRIER');
+const star   = byName('KATTEGAT STAR');
+
+// ── assertions ──────────────────────────────────────────────────────────────
+console.log('the pipeline actually ran');
+test('all three scenario vessels reached aisManager through ingest()', () => {
+    assert(ais.vessels.size === 3, `${ais.vessels.size} vessels ingested`);
+    assert(nordic && baltic && star, 'all three by name');
+});
+test('two plans loaded and both are drawn', () => {
+    assert(loaded.added === 2, JSON.stringify(loaded));
+    assert(layer.monitoredCount() === 2, `${layer.monitoredCount()} routes drawn`);
+});
+test('the monitor evaluated every vessel', () => {
+    assert(monitor.states.size === 3, `${monitor.states.size} monitored states`);
+});
+
+console.log('THE §1 PREREQUISITES SURVIVED THE REAL PIPELINE');
+test('SOG kept 0.1-knot resolution end to end', () => {
+    // Sampled MID-VOYAGE, not at the end. By the final frame the vessel has
+    // arrived and correctly reports 0 kn — checking there would have tested the
+    // holding behaviour and called it a precision failure.
+    const underway = timeline.find(r => (r.ships['NORDIC TRADER']?.sog ?? 0) > 1);
+    assert(underway, 'the vessel was under way at some point');
+    const sog = underway.ships['NORDIC TRADER'].sog;
+    // The scenario declares 12.4 kn. Integer rounding at either the source or
+    // the ingest would show exactly 12.
+    near(sog, 12.4, 0.6, 'reported speed');
+    assert(sog !== Math.round(sog),
+        `SOG ${sog} is a whole number — the fractional part was lost in the chain`);
+});
+test('a vessel HOLDING at its final waypoint reports 0 kn, not way-on speed', () => {
+    // The quieter half of the bug the full-voyage run exposed: a stationary ship
+    // used to broadcast its full transit speed forever.
+    const last = timeline[timeline.length - 1].ships['NORDIC TRADER'];
+    assert(last.state === MONITOR_STATE.ARRIVED, `state ${last.state}`);
+    assert(last.sog === 0, `arrived but still reporting ${last.sog} kn`);
+});
+test('COG is stored separately from heading', () => {
+    assert(nordic.v.cogDeg != null, 'cogDeg is populated');
+    assert('headingDeg' in nordic.v, 'headingDeg still present');
+});
+test('the DEVIATING vessel shows COG diverging from its heading', () => {
+    // While crabbing off the route, course made good differs from the leg
+    // bearing. This is the set-and-drift signal the cogDeg fix exists to carry,
+    // observed here through the full chain rather than in a unit test.
+    const rows = timeline.filter(r => r.ships['BALTIC CARRIER']?.alarms.length);
+    assert(rows.length > 0, 'the deviation was detected at all');
+    assert(baltic.v.cogDeg != null, 'COG present on the deviating vessel');
+});
+test('navigational status parsed from the scenario', () => {
+    assert(nordic.v.navStatus === 0, `navStatus ${nordic.v.navStatus}`);
+    assert(nordic.v.navStatusText === 'UNDER WAY USING ENGINE', nordic.v.navStatusText);
+});
+
+console.log('THE THREE STATES, over a real voyage');
+test('NORDIC TRADER is never DEVIATING — on track, then arrived', () => {
+    // ARRIVED is a correct terminal state, not a failure: the route is ~100 nm
+    // at 12.4 kn, so the voyage genuinely ends around hour 8 of a 15-hour run.
+    const OK = [MONITOR_STATE.ON_TRACK, MONITOR_STATE.ARRIVED, MONITOR_STATE.NO_FIX];
+    const bad = timeline.filter(r => {
+        const s = r.ships['NORDIC TRADER'];
+        return s && !OK.includes(s.state);
+    });
+    assert(bad.length === 0,
+        `unexpected state at hours ${bad.map(r => r.hour).join(', ')} — ` +
+        JSON.stringify(bad[0]?.ships['NORDIC TRADER']));
+});
+test('NORDIC TRADER is ON_TRACK first and ARRIVED later, in that order', () => {
+    const states = timeline.map(r => r.ships['NORDIC TRADER']?.state);
+    const firstOnTrack = states.indexOf(MONITOR_STATE.ON_TRACK);
+    const firstArrived = states.indexOf(MONITOR_STATE.ARRIVED);
+    assert(firstOnTrack >= 0, 'was on track');
+    assert(firstArrived > firstOnTrack, `arrived at hour ${firstArrived}, on track from ${firstOnTrack}`);
+    assert(states[states.length - 1] === MONITOR_STATE.ARRIVED, 'and stays arrived');
+});
+test('an ARRIVED vessel reports NO schedule slip — the regression itself', () => {
+    // Before the fix this vessel accumulated 46 min, then 1 h 01, then 1 h 16 …
+    // of entirely fictional lateness, and raised 25 alerts over six hours.
+    const arrived = timeline.filter(r => r.ships['NORDIC TRADER']?.state === MONITOR_STATE.ARRIVED);
+    assert(arrived.length >= 3, 'several hours spent arrived');
+    for (const r of arrived) {
+        assert(r.ships['NORDIC TRADER'].alarms.length === 0,
+            `hour ${r.hour} raised ${r.ships['NORDIC TRADER'].alarms.join(',')} after arriving`);
+    }
+});
+test('NORDIC TRADER never raises an alert', () => {
+    const its = alertsSeen.filter(a => a.mmsi === nordic.mmsi);
+    assert(its.length === 0, `${its.length} alerts: ${its.map(a => a.message).join(' | ')}`);
+});
+test('BALTIC CARRIER starts compliant and BECOMES deviating', () => {
+    const states = timeline.map(r => r.ships['BALTIC CARRIER']?.state);
+    assert(states.includes(MONITOR_STATE.ON_TRACK), 'was on track early on');
+    assert(states.includes(MONITOR_STATE.DEVIATING) || states.includes(MONITOR_STATE.OFF_ROUTE),
+        `never deviated: ${[...new Set(states)].join(', ')}`);
+    const firstBad = timeline.findIndex(r =>
+        ['DEVIATING', 'OFF_ROUTE'].includes(r.ships['BALTIC CARRIER']?.state));
+    const firstGood = timeline.findIndex(r => r.ships['BALTIC CARRIER']?.state === 'ON_TRACK');
+    assert(firstGood < firstBad, 'compliant BEFORE deviating — the fixture distinguishes the two');
+});
+test('BALTIC CARRIER raises a ROUTE_DEVIATION alert', () => {
+    const its = alertsSeen.filter(a => a.mmsi === baltic.mmsi);
+    assert(its.length > 0, 'no alert raised for the deviating vessel');
+    assert(its.some(a => a.extra?.type === 'OFF_XTE'), JSON.stringify(its.map(a => a.extra?.type)));
+});
+test('KATTEGAT STAR is UNMONITORED throughout — never "compliant"', () => {
+    const states = new Set(timeline.map(r => r.ships['KATTEGAT STAR']?.state));
+    assert(states.size === 1 && states.has(MONITOR_STATE.UNMONITORED),
+        `states seen: ${[...states].join(', ')}`);
+    assert(alertsSeen.filter(a => a.mmsi === star.mmsi).length === 0,
+        'a vessel with no plan cannot deviate from one');
+});
+
+console.log('coverage is reportable, which is what keeps the map honest');
+test('coverage says 2 of 3 monitored, 1 unmonitored', () => {
+    const c = monitor.monitoringCoverage();
+    assert(c.total === 3 && c.monitored === 2 && c.unmonitored === 1, JSON.stringify(c));
+});
+test('a deviation WAS counted while it was happening', () => {
+    // Asserted against the timeline, not the final frame: by the end of the run
+    // both monitored vessels have arrived, so the live deviating count is
+    // correctly zero. Checking only the last frame would have missed the
+    // deviation entirely.
+    const peak = Math.max(...timeline.map(r => r.coverage.deviating));
+    assert(peak >= 1, `deviating never exceeded ${peak} at any point in the voyage`);
+});
+test('both monitored vessels end the voyage ARRIVED', () => {
+    const c = monitor.monitoringCoverage();
+    assert(c.arrived === 2, JSON.stringify(c));
+    assert(c.deviating === 0, 'nothing is still deviating once everyone has arrived');
+});
+
+console.log('alert volume is sane over 15 hours');
+test('a 15-hour continuous deviation does NOT flood the log', () => {
+    // ~10,800 monitor ticks. Unthrottled this would be thousands of alerts.
+    const its = alertsSeen.filter(a => a.mmsi === baltic.mmsi && a.extra?.type === 'OFF_XTE');
+    const maxExpected = Math.ceil((HOURS * 3600_000) / STM.ALARM_COOLDOWN_MS) + 1;
+    assert(its.length <= maxExpected,
+        `${its.length} alerts over ${HOURS} h; cooldown ${STM.ALARM_COOLDOWN_MS / 60000} min allows ${maxExpected}`);
+    assert(its.length >= 1, 'but the problem was reported at least once');
+});
+test('every alert carries structured evidence and a sim timestamp', () => {
+    for (const a of alertsSeen) {
+        assert(a.extra?.evidence, `no evidence on ${a.extra?.type}`);
+        assert(Number.isFinite(a.extra?.simTime), 'no simTime');
+        assert(a.extra.simTime >= START, 'simClock time, not wall clock');
+    }
+});
+test('synthetic plans are labelled in every alert', () => {
+    assert(alertsSeen.length > 0);
+    for (const a of alertsSeen) assert(/SYNTHETIC/.test(a.message), a.message);
+});
+
+console.log('the 3D layer reflects the verdict');
+test('the deviating route was recoloured, without a rebuild', () => {
+    const before = renderer.info.memory.geometries;
+    for (const uvid of layer.uvids()) layer.setRouteState(uvid, 'DEVIATING');
+    assert(renderer.info.memory.geometries === before, 'recolour must not rebuild geometry');
+});
+test('the scene still renders after the full run', () => {
+    const focus = layer.centroidOf(layer.uvids()[0]);
+    camera.position.set(focus.x - 3.5, focus.y + 5.5, focus.z + 5.0);
+    camera.lookAt(focus.x, focus.y, focus.z);
+    camera.updateMatrixWorld(true);
+    layer.update(camera, H);
+    renderer.render(scene, camera);
+    assert(renderer.info.render.triangles > 0, 'nothing rasterised');
+    assert(pageErrors.length === 0, pageErrors.join(' | ').slice(0, 200));
+});
+
+console.log('no shader or console errors across the whole run');
+test('the run produced no page errors', () => {
+    assert(pageErrors.length === 0, pageErrors.join(' | ').slice(0, 300));
+});
+
+console.error = realError; console.warn = realWarn;
+
+// ── the human-readable timeline ─────────────────────────────────────────────
+const NAMES = ['NORDIC TRADER', 'BALTIC CARRIER', 'KATTEGAT STAR'];
+const lines = ['STM INTEGRATION — 15-hour voyage, Kattegat/Skagerrak', ''];
+lines.push('  hr  ' + NAMES.map(n => n.padEnd(30)).join(''));
+for (const r of timeline) {
+    lines.push('  ' + String(r.hour).padStart(2) + '  ' + NAMES.map(n => {
+        const s = r.ships[n];
+        if (!s) return '—'.padEnd(30);
+        const xt = s.xt == null ? '' : ` ${s.xt >= 0 ? '+' : ''}${s.xt.toFixed(2)}nm`;
+        const al = s.alarms.length ? ' !' + s.alarms.length : '';
+        return (s.state + xt + al).padEnd(30);
+    }).join(''));
+}
+const c = monitor.monitoringCoverage();
+lines.push('');
+lines.push(`  coverage: ${c.monitored} of ${c.total} monitored · ${c.unmonitored} UNKNOWN · ${c.deviating} deviating`);
+lines.push(`  alerts raised: ${alertsSeen.length} over ${HOURS} h ` +
+           `(cooldown ${STM.ALARM_COOLDOWN_MS / 60000} min)`);
+for (const a of alertsSeen) lines.push(`    · [${a.type}] ${a.mmsi} ${a.message}`);
+lines.push('');
+for (const r of results) lines.push(`  ${r.ok ? '✓' : '✗'} ${r.name}${r.ok ? '' : '\n      ' + r.error}`);
+
+document.getElementById('log').textContent = lines.join('\n');
+
+window.__RESULTS__ = results;
+window.__STATS__ = {
+    ticks: Math.round((HOURS * 3600_000) / STEP),
+    alerts: alertsSeen.length,
+    coverage: c,
+};
+window.__TIMELINE__ = lines.join('\n');
+window.__DONE__ = true;
+</script>

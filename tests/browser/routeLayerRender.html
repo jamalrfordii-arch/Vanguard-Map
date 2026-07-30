@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<!--
+  tests/browser/routeLayerRender.html — render the STM route layer for real.
+
+  routeRibbon.js is fully covered in Node, but routeLayer.js is the first STM
+  module that touches the scene, and the things that go wrong there do not show
+  up in arithmetic: a shader that never compiles (CLAUDE.md records exactly that
+  happening to waterManager for months), geometry that is built but invisible,
+  a uniform that is written but not bound, a material bright enough to tip the
+  bloom threshold.
+
+  So this builds a real WebGL context, a real THREE scene and a real RouteLayer,
+  renders it, and reports what actually reached the screen. Driven by
+  tests/browser/run.mjs; results on window.__RESULTS__, plus a screenshot the
+  harness saves for eyeballing.
+
+  THREE is served from node_modules by the harness's static server (the app's
+  import map points at a CDN, which is not reachable from this sandbox).
+-->
+<meta charset="utf-8">
+<title>VANGUARD1 — route layer render</title>
+<style>body{margin:0;background:#05080d}canvas{display:block}#out{position:fixed;right:8px;bottom:8px;color:#9fd8ee;font:11px monospace;white-space:pre;pointer-events:none}</style>
+<script type="importmap">
+{ "imports": { "three": "/node_modules/three/build/three.module.js" } }
+</script>
+<body><pre id="out">running…</pre></body>
+<script type="module">
+import * as THREE from 'three';
+import { RouteLayer } from '../../routeLayer.js';
+import { voyagePlanStore } from '../../voyagePlanStore.js';
+import { loadScenarioPlans } from '../../scenarioRoute.js';
+import { buildRouteRibbon } from '../../routeRibbon.js';
+import { STM } from '../../config.js';
+
+const results = [];
+function test(name, fn) {
+    try { fn(); results.push({ name, ok: true }); }
+    catch (e) { results.push({ name, ok: false, error: String(e && e.message || e) }); }
+}
+const assert = (c, m) => { if (!c) throw new Error(m || 'assertion failed'); };
+const near = (a, b, tol, m) => assert(Math.abs(a - b) <= tol, `${m ?? ''} expected ${b} ±${tol}, got ${a}`);
+
+// ── a real renderer ─────────────────────────────────────────────────────────
+// 1440×1080 on purpose, not a token thumbnail: the corridor's exaggeration is a
+// PIXEL criterion, so the viewport height is an input to the behaviour under
+// test. At 1080 px the corridor reaches exact true scale at the app's minimum
+// camera distance; at 600 px it bottoms out around 1.6×. Testing at a toy size
+// would assert the wrong thing.
+const W = 1440, H = 1080;
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setSize(W, H);
+renderer.setClearColor(0x05080d, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.01, 5000);
+
+// Shader compile errors surface as console warnings, not exceptions — capture
+// them so a silently-never-compiled shader cannot pass as success.
+const shaderErrors = [];
+const realError = console.error, realWarn = console.warn;
+console.error = (...a) => { shaderErrors.push(a.join(' ')); realError(...a); };
+console.warn = (...a) => { const s = a.join(' '); if (/shader|glsl|program/i.test(s)) shaderErrors.push(s); realWarn(...a); };
+
+// ── the shipped demo scenario ───────────────────────────────────────────────
+const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+voyagePlanStore.clear();
+const loaded = loadScenarioPlans(demo, voyagePlanStore);
+
+const layer = new RouteLayer(scene, { store: voyagePlanStore });
+const built = layer.rebuild();
+
+test('WebGL2 context is real', () => {
+    assert(renderer.getContext() instanceof WebGL2RenderingContext, 'not a WebGL2 context');
+});
+test('the demo loaded two monitored plans', () => {
+    assert(loaded.added === 2, JSON.stringify(loaded));
+    assert(voyagePlanStore.monitored().length === 2);
+});
+test('rebuild() produced one route group per monitored plan', () => {
+    assert(built === 2, `built ${built}`);
+    assert(layer.monitoredCount() === 2);
+});
+test('the layer only draws MONITORED plans', () => {
+    // KATTEGAT STAR shares no plan; nothing may be drawn for it.
+    assert(layer.group.children.filter(c => c.name.startsWith('route:')).length === 2);
+});
+
+// ── frame on the route's ACTUAL centroid ────────────────────────────────────
+// Not a hand-guessed position. The Kattegat sits at roughly x=8.8, z=-59 in
+// scene space; the first version of this harness pointed the camera at z=-46 and
+// rendered a completely empty frame while every geometry assertion below still
+// passed. That is exactly the failure this file exists to catch, and it is
+// invisible to arithmetic tests.
+const uvids = layer.uvids();
+const focus = layer.centroidOf(uvids[0]);
+
+test('the layer reports a usable centroid to frame on', () => {
+    assert(focus && Number.isFinite(focus.x) && Number.isFinite(focus.z), 'no centroid');
+});
+
+function frameOn(target, height) {
+    camera.position.set(target.x, target.y + height, target.z + height * 0.35);
+    camera.lookAt(target.x, target.y, target.z);
+    camera.updateMatrixWorld(true);
+    layer.update(camera, H);
+}
+
+// ── the thing that silently fails: shader compilation ───────────────────────
+frameOn(focus, 3.0);
+renderer.render(scene, camera);
+
+test('the corridor shader COMPILED — no program errors', () => {
+    assert(shaderErrors.length === 0, shaderErrors.join(' | ').slice(0, 300));
+    assert(renderer.info.programs.length > 0, 'no programs built at all');
+});
+test('geometry actually reached the GPU', () => {
+    assert(renderer.info.render.calls > 0, 'zero draw calls');
+    assert(renderer.info.render.triangles > 0, 'zero triangles rasterised');
+});
+test('draw-call count is proportional to routes, not to waypoints', () => {
+    // 4 objects per route segment + 1 shared instanced waypoint mesh.
+    assert(renderer.info.render.calls < 20,
+        `${renderer.info.render.calls} draw calls for 2 routes — should be ~9`);
+});
+test('waypoints are ONE Points object, sized in PIXELS not scene units', () => {
+    const pts = layer.group.children.filter(c => c.isPoints);
+    assert(pts.length === 1, `${pts.length} points objects, expected 1`);
+    // Both MONITORED vessels declare 4 waypoints. KATTEGAT STAR's 3 waypoints
+    // contribute nothing because it shares no plan.
+    const n = pts[0].geometry.getAttribute('position').count;
+    assert(n === 8, `${n} waypoint pips, expected 8`);
+    assert(pts[0].material.sizeAttenuation === false,
+        'a scene-sized pip is a fiction — 0.18 units is 13 nautical miles across, ' +
+        'which hid the very corridor it was annotating');
+});
+test('a waypoint pip never dwarfs the corridor it annotates', () => {
+    // The regression that motivated the switch: at full zoom the corridor is
+    // true scale (~0.008 units), so ANY scene-space pip large enough to see at
+    // world view is enormous next to it. In pixels, both are bounded.
+    const pipPx = STM.WAYPOINT_PIP_PX;
+    assert(pipPx > 0 && pipPx <= 3 * STM.CORRIDOR_MIN_PX,
+        `pip ${pipPx}px vs corridor floor ${STM.CORRIDOR_MIN_PX}px half-width`);
+});
+
+// ── did anything appear on screen? ──────────────────────────────────────────
+function litPixelFraction() {
+    const gl = renderer.getContext();
+    const px = new Uint8Array(W * H * 4);
+    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let lit = 0, maxLum = 0;
+    for (let i = 0; i < px.length; i += 4) {
+        const lum = (px[i] * 0.2126 + px[i + 1] * 0.7152 + px[i + 2] * 0.0722) / 255;
+        if (lum > 0.10) lit++;                 // clear colour is ~0.03
+        if (lum > maxLum) maxLum = lum;
+    }
+    return { fraction: lit / (W * H), maxLum };
+}
+const shot = litPixelFraction();
+
+test('the route is VISIBLE — pixels changed from the clear colour', () => {
+    assert(shot.fraction > 0.0005,
+        `only ${(shot.fraction * 100).toFixed(4)}% of pixels lit — geometry built but invisible`);
+});
+test('nothing is bright enough to tip the bloom threshold (0.95)', () => {
+    // CLAUDE.md calls bloomPass.threshold a hairpin. Unlit translucent materials
+    // must stay under it by construction; this proves it rather than assuming.
+    assert(shot.maxLum < 0.95,
+        `peak luminance ${shot.maxLum.toFixed(3)} would bloom — route materials must stay unlit`);
+});
+
+// ── the exaggeration actually moves ─────────────────────────────────────────
+const uvid = uvids[0];
+test('exaggeration falls monotonically as the camera descends', () => {
+    let prev = Infinity;
+    for (const h of [200, 100, 40, 12, 4, 2, 1.15]) {
+        frameOn(focus, h);
+        const f = layer.exaggerationFor(uvid);
+        assert(f <= prev + 1e-9, `factor rose from ${prev} to ${f} while descending`);
+        prev = f;
+    }
+    assert(prev >= 1, 'never shrinks a corridor below true scale');
+});
+test('world view needs real exaggeration to be legible at all', () => {
+    frameOn(focus, 200);
+    assert(layer.exaggerationFor(uvid) > 20,
+        'a true-scale 0.3 nm corridor is ~1/10,000 of the map — invisible without this');
+});
+test('at 1080p the corridor reaches EXACT true scale at full zoom', () => {
+    // The crossover is a pixel criterion, so it depends on viewport height:
+    //   600 px  → bottoms out at 1.61×
+    //   800 px  → 1.21×
+    //   1080 px → 1.00×   ← exact, at the app's minimum camera distance (~1.15)
+    // Documented in config.js STM.CORRIDOR_MIN_PX. On a small window the
+    // corridor stays slightly exaggerated, and the readout says so rather than
+    // pretending otherwise.
+    frameOn(focus, 1.15);
+    near(layer.exaggerationFor(uvid), 1, 1e-9, 'geometrically true at full zoom, 1080p');
+});
+test('changing zoom does NOT rebuild geometry', () => {
+    // The whole reason the width lives in a shader uniform.
+    const before = renderer.info.memory.geometries;
+    for (let h = 1; h < 100; h += 7) frameOn(focus, h);
+    assert(renderer.info.memory.geometries === before,
+        `geometry count changed ${before} → ${renderer.info.memory.geometries} while only zooming`);
+});
+
+// ── state colouring, which enhancedMonitor will drive in 1.6 ────────────────
+test('setRouteState recolours without rebuilding', () => {
+
+    const before = renderer.info.memory.geometries;
+    layer.setRouteState(uvid, 'DEVIATING');
+    assert(renderer.info.memory.geometries === before, 'recolour must not rebuild');
+    const r = layer.group.children.find(c => c.name.includes(uvid));
+    assert(r, 'route group still present');
+});
+
+// ── the corridor asymmetry is really on screen ──────────────────────────────
+test('the drawn rims are asymmetric where the plan is asymmetric', () => {
+    const plan = voyagePlanStore.monitored().find(p => p.mmsi === '265177000');
+    assert(plan, 'NORDIC TRADER plan');
+    const b = buildRouteRibbon(plan);
+    const s = b.segments[0];
+    near(s.stbdW[1] / s.portW[1], 2, 1e-6,
+        'declared 0.15 port / 0.30 starboard must draw 1:2, at every zoom');
+});
+test('a defaulted corridor is drawn FAINTER than a declared one', () => {
+    assert(STM.DEFAULTED_OPACITY_SCALE < 1,
+        '"we assumed this" has to be visible, not just logged');
+});
+
+// ── teardown ────────────────────────────────────────────────────────────────
+test('dispose() releases geometry and detaches listeners', () => {
+    const before = renderer.info.memory.geometries;
+    layer.dispose();
+    renderer.render(scene, camera);
+    assert(renderer.info.memory.geometries < before,
+        `geometries not released: ${before} → ${renderer.info.memory.geometries}`);
+    assert(typeof window.vg1RouteLayer === 'undefined', 'debug handle not cleaned up');
+});
+
+console.error = realError; console.warn = realWarn;
+
+// ── leave a meaningful frame behind for the saved screenshot ────────────────
+// The last test disposes the layer, so without this the PNG is an empty canvas
+// and the 3% lit-pixel reading above would be the only evidence anything drew.
+// A picture a human can actually look at is worth the extra rebuild.
+{
+    const shown = new RouteLayer(scene, { store: voyagePlanStore });
+    shown.rebuild();
+    // Colour one route as deviating so the screenshot shows both states at once.
+    const ids = shown.uvids();
+    if (ids[1]) shown.setRouteState(ids[1], 'DEVIATING');
+    // Mid zoom on purpose: at full zoom the corridor is TRUE scale and therefore
+    // sub-pixel, which is correct behaviour but a useless picture. Here the
+    // ribbon is exaggerated enough to read as a corridor.
+    camera.position.set(focus.x - 3.5, focus.y + 5.5, focus.z + 5.0);
+    camera.lookAt(focus.x, focus.y, focus.z);
+    camera.updateMatrixWorld(true);
+    shown.update(camera, H);
+    renderer.render(scene, camera);
+    window.__FINAL__ = {
+        routes: shown.monitoredCount(),
+        exaggeration: shown.exaggerationFor(ids[0]),
+        drawCalls: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
+    };
+}
+
+window.__RESULTS__ = results;
+window.__STATS__ = { litFraction: shot.fraction, maxLum: shot.maxLum };
+document.getElementById('out').textContent =
+    results.map(r => `${r.ok ? '✓' : '✗'} ${r.name}${r.ok ? '' : '\n    ' + r.error}`).join('\n');
+window.__DONE__ = true;
+</script>

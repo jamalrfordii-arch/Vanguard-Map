@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<!--
+  tests/browser/stmWiring.html — does the INTEGRATION into main.js/index.html
+  actually work?
+
+  The modules are covered elsewhere. What this checks is the four small edits
+  that connect them to the app, because those are exactly the kind of change that
+  looks obviously right and silently does nothing:
+
+    · the layer row's data-layer value must match the switch case string, or the
+      toggle is a dead control that reports success
+    · setRouteState must accept the states enhancedMonitor actually emits, not a
+      parallel vocabulary that happens to overlap
+    · the STM.TICK_MS interval must not be in the animation loop
+    · window.innerHeight must be the viewport-height convention used elsewhere
+
+  It replicates the exact wiring rather than booting the whole app (which needs
+  Cesium tokens, GEBCO tiles and a CDN this sandbox cannot reach), and it reads
+  the REAL index.html to confirm the toggle string matches.
+-->
+<meta charset="utf-8">
+<title>VANGUARD1 — STM wiring</title>
+<style>body{margin:0;background:#05080d;color:#9fd8ee;font:11px/1.5 monospace}#out{padding:10px;white-space:pre}</style>
+<script type="importmap">
+{ "imports": { "three": "/node_modules/three/build/three.module.js" } }
+</script>
+<body><pre id="out">running…</pre></body>
+<script type="module">
+import * as THREE from 'three';
+import { RouteLayer } from '../../routeLayer.js';
+import { enhancedMonitor, MONITOR_STATE } from '../../enhancedMonitor.js';
+import { voyagePlanStore } from '../../voyagePlanStore.js';
+import { loadScenarioPlans } from '../../scenarioRoute.js';
+import { parse as parseRtz } from '../../rtzCodec.js';
+import { STM } from '../../config.js';
+
+const results = [];
+function test(name, fn) {
+    try { fn(); results.push({ name, ok: true }); }
+    catch (e) { results.push({ name, ok: false, error: String(e && e.message || e) }); }
+}
+const assert = (c, m) => { if (!c) throw new Error(m || 'assertion failed'); };
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(800, 600);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, 800 / 600, 0.01, 5000);
+
+// ── replicate main.js's wiring, verbatim in shape ───────────────────────────
+const routeLayer = new RouteLayer(scene);
+
+// the layerToggle switch case from main.js
+window.addEventListener('layerToggle', e => {
+    const { layer, on } = e.detail;
+    switch (layer) {
+        case 'routes': routeLayer.setVisible(on); break;
+    }
+});
+
+// ── 1. the toggle string must match what index.html dispatches ──────────────
+// Read the REAL sources. A wiring test that reasons about its own copy of the
+// integration proves nothing about the app.
+const indexHtml = await (await fetch('/index.html')).text();
+const mainJs    = await (await fetch('/main.js')).text();
+
+test('index.html declares a .lp-row with data-layer="routes"', () => {
+    assert(/<div class="lp-row" data-layer="routes">/.test(indexHtml),
+        'no routes row found in the layer panel');
+});
+test('the row has a status dot with the id the panel convention expects', () => {
+    assert(/id="dot-routes"/.test(indexHtml), 'no #dot-routes span');
+});
+test('the data-layer value EXACTLY matches the switch case string', () => {
+    // A mismatch here — 'route' vs 'routes', 'stm-routes' vs 'routes' — produces
+    // a toggle that flips its dot and does nothing. Nothing errors.
+    const m = /<div class="lp-row" data-layer="([^"]+)">\s*Route Plans/.exec(indexHtml);
+    assert(m, 'could not read the routes row');
+    assert(m[1] === 'routes', `panel dispatches '${m[1]}' but main.js switches on 'routes'`);
+});
+test('main.js has exactly one routes case, in the layerToggle switch', () => {
+    // Guards against the row existing while the case was never added.
+    assert(/case 'routes':\s*routeLayer\.setVisible\(on\)/.test(mainJs),
+        "no `case 'routes': routeLayer.setVisible(on)` found in main.js");
+});
+
+// ── 2. the toggle actually toggles ──────────────────────────────────────────
+test('dispatching layerToggle hides and shows the layer', () => {
+    assert(routeLayer.visible === true, 'starts visible');
+    window.dispatchEvent(new CustomEvent('layerToggle', { detail: { layer: 'routes', on: false } }));
+    assert(routeLayer.visible === false, 'toggle off had no effect');
+    assert(routeLayer.group.visible === false, 'the THREE group is still visible');
+    window.dispatchEvent(new CustomEvent('layerToggle', { detail: { layer: 'routes', on: true } }));
+    assert(routeLayer.visible === true, 'toggle back on had no effect');
+});
+
+// ── 3. the monitor→layer handoff speaks one vocabulary ──────────────────────
+const demo = await (await fetch('/scenarios/stm-kattegat-demo.json')).json();
+voyagePlanStore.clear();
+loadScenarioPlans(demo, voyagePlanStore);
+routeLayer.rebuild();
+
+test('every MONITOR_STATE is accepted by setRouteState without throwing', () => {
+    // main.js pipes monitor states straight into the layer. If the layer only
+    // understood a subset, the others would silently leave the route coloured
+    // as though nothing were wrong.
+    const uvid = routeLayer.uvids()[0];
+    assert(uvid, 'a route to colour');
+    for (const state of Object.values(MONITOR_STATE)) {
+        routeLayer.setRouteState(uvid, state);
+    }
+    // And DEVIATING must produce a visibly different colour from ON_TRACK.
+    routeLayer.setRouteState(uvid, MONITOR_STATE.ON_TRACK);
+    const calm = currentColour(uvid);
+    routeLayer.setRouteState(uvid, MONITOR_STATE.DEVIATING);
+    const hot = currentColour(uvid);
+    assert(calm !== hot, `DEVIATING renders identically to ON_TRACK (${hot})`);
+});
+
+function currentColour(uvid) {
+    const root = routeLayer.group.children.find(c => c.name.includes(uvid));
+    const line = root?.children.find(c => c.isLine && c.material.color);
+    return line ? line.material.color.getHexString() : null;
+}
+
+test('the uvid the monitor reports is the uvid the layer keys on', () => {
+    // The join between the two subsystems. If the monitor emitted the MMSI while
+    // the layer keyed on the UVID, setRouteState would be a silent no-op forever.
+    const v = { mmsi: '265177000', latDeg: 57.60, lonDeg: 11.65, speedKts: 12,
+                cogDeg: 300, navStatus: 0, draughtM: null, isDark: false };
+    enhancedMonitor.clear();
+    enhancedMonitor.tick([v]);
+    const st = enhancedMonitor.stateOf('265177000');
+    assert(st, 'monitored');
+    assert(st.uvid, 'the monitor reports a uvid');
+    assert(routeLayer.uvids().includes(st.uvid),
+        `monitor uvid ${st.uvid} is not among the layer's ${JSON.stringify(routeLayer.uvids())}`);
+});
+
+// ── 4. main.js source-level checks ──────────────────────────────────────────
+test('the monitor tick is on a TIMER, not in the animation loop', () => {
+    assert(/setInterval\(\(\) => \{\s*\n\s*enhancedMonitor\.tick/.test(mainJs) ||
+           /setInterval\([\s\S]{0,200}enhancedMonitor\.tick/.test(mainJs),
+        'enhancedMonitor.tick is not inside a setInterval');
+    // And it must NOT appear in the per-frame animate() body.
+    const animate = /function animate\(\)[\s\S]*$/.exec(mainJs)?.[0] ?? mainJs;
+    assert(!/enhancedMonitor\.tick/.test(animate.slice(0, 40000)) ||
+           mainJs.indexOf('enhancedMonitor.tick') < mainJs.indexOf('function animate'),
+        'enhancedMonitor.tick appears inside the animation loop');
+});
+test('routeLayer.update IS called per frame, with window.innerHeight', () => {
+    assert(/routeLayer\.update\(camera, window\.innerHeight\)/.test(mainJs),
+        'routeLayer.update(camera, window.innerHeight) not found');
+});
+test('STM is imported from config.js', () => {
+    assert(/CARGO, STM,|STM,[\s\S]{0,80}\} from '\.\/config\.js'/.test(mainJs),
+        'STM missing from the config import list');
+});
+test('the console API is exposed', () => {
+    assert(/window\.vg1STM = \{/.test(mainJs), 'window.vg1STM not defined');
+    for (const fn of ['demo', 'plans', 'coverage', 'states', 'importRtz']) {
+        assert(new RegExp(`\\b${fn}\\b`).test(mainJs), `vg1STM.${fn} missing`);
+    }
+});
+test('plan restore uses the injected codec', () => {
+    assert(/voyagePlanStore\.load\(parseRtz\)/.test(mainJs),
+        'voyagePlanStore.load(parseRtz) not found — plans would not survive a reload');
+});
+
+// ── 5. it renders after the wiring ──────────────────────────────────────────
+test('the wired layer renders', () => {
+    const focus = routeLayer.centroidOf(routeLayer.uvids()[0]);
+    camera.position.set(focus.x - 3.5, focus.y + 5.5, focus.z + 5);
+    camera.lookAt(focus.x, focus.y, focus.z);
+    camera.updateMatrixWorld(true);
+    routeLayer.update(camera, window.innerHeight);
+    renderer.render(scene, camera);
+    assert(renderer.info.render.triangles > 0, 'nothing rasterised after wiring');
+});
+
+document.getElementById('out').textContent =
+    'STM WIRING\n\n' + results.map(r => `  ${r.ok ? '✓' : '✗'} ${r.name}${r.ok ? '' : '\n      ' + r.error}`).join('\n');
+window.__RESULTS__ = results;
+window.__DONE__ = true;
+</script>

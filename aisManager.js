@@ -50,6 +50,56 @@ function aisTypeToClass(t) {
     return 'OTHER';                                                   // 20-29 WIG, 35 military, 55 law enf., 90-99 other, unknown
 }
 
+// ── AIS navigational status (ITU-R M.1371 msg types 1/2/3, 4-bit field) ──────
+// Added 2026-07-29 as an STM prerequisite (docs/STM_ROUTE_SPEC.md §1.3). Without
+// it a vessel legitimately at anchor is indistinguishable from one under way, so
+// Enhanced Monitoring would raise schedule alarms on ships that are correctly
+// stopped, and portCallManager cannot tell an anchorage from a berth.
+//
+// 9, 10, 13 are reserved codes with no useful plain meaning; 14 (AIS-SART / MOB /
+// EPIRB) and 15 (undefined) are kept verbatim rather than folded into "unknown",
+// because a SART transmission is a real signal, not an absence of one.
+export const NAV_STATUS_TEXT = {
+    0:  'UNDER WAY USING ENGINE',
+    1:  'AT ANCHOR',
+    2:  'NOT UNDER COMMAND',
+    3:  'RESTRICTED MANOEUVRABILITY',
+    4:  'CONSTRAINED BY DRAUGHT',
+    5:  'MOORED',
+    6:  'AGROUND',
+    7:  'ENGAGED IN FISHING',
+    8:  'UNDER WAY SAILING',
+    9:  'RESERVED (HSC)',
+    10: 'RESERVED (WIG)',
+    11: 'TOWING ASTERN',
+    12: 'PUSHING AHEAD / TOWING ALONGSIDE',
+    13: 'RESERVED',
+    14: 'AIS-SART / MOB / EPIRB',
+    15: 'UNDEFINED',
+};
+
+// Returns { navStatus, navStatusText } — both null when absent or out of range.
+// 15 ("undefined") is a real transmitted value meaning "the crew did not set it",
+// so it is preserved rather than nulled: "they told us nothing" and "we heard
+// nothing" are different facts and the UI should be able to say which.
+export function parseNavStatus(raw) {
+    if (raw == null) return { navStatus: null, navStatusText: null };
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0 || n > 15) return { navStatus: null, navStatusText: null };
+    return { navStatus: n, navStatusText: NAV_STATUS_TEXT[n] ?? null };
+}
+
+// ── SOG precision (STM prerequisite, docs/STM_ROUTE_SPEC.md §1.1) ────────────
+// AIS transmits SOG in 0.1-knot steps. This used to be Math.round(), which threw
+// away a factor of ten: at 12 kn a ±0.5 kn error is ±4%, and over a 6-hour leg
+// that is a ±14 minute ETA error — larger than any schedule tolerance worth
+// alarming on. Every projected-ETA computation inherits this, so it is rounded
+// to the transmitted resolution and no further.
+function normaliseSog(sog) {
+    if (sog == null || !Number.isFinite(sog)) return null;
+    return Math.round(sog * 10) / 10;
+}
+
 // ── Cargo intelligence, Phase 1: draft-based load estimate ───────────────────
 // (research/vanguard1-cargo-intel-spec-2026-07-23.md). Pure derived computation —
 // no port-call detection or cargo labeling yet, just draughtM → loadFactor →
@@ -493,6 +543,23 @@ export class AISManager {
         const heading  = (rawHdg != null && rawHdg < 511) ? rawHdg : cog;
         const shipType = meta.ShipType ?? 0;
 
+        // ── COG vs heading: two different facts (STM_ROUTE_SPEC.md §1.2) ──────
+        // Heading is where the bow points; COG is where the ship is actually
+        // going. In a beam current or strong wind they differ by the drift angle
+        // — routinely 5-15° for a laden vessel in a cross-set — and that
+        // difference IS the signal for a set-and-drift excursion off a planned
+        // route. `heading` above still falls back to COG so the 3D model always
+        // points somewhere sensible; `cogDeg` below preserves the real COG so
+        // cross-track drift stays distinguishable from a deliberate turn.
+        //
+        // cogDeg is null (not 0) when the field is absent. 0 is due north, a real
+        // bearing — using it as a missing-value sentinel would put every silent
+        // vessel on a northbound course.
+        const cogDeg = (report.Cog != null && Number.isFinite(report.Cog) &&
+                        report.Cog >= 0 && report.Cog < 360) ? report.Cog : null;
+        const { navStatus, navStatusText } = parseNavStatus(report.NavigationalStatus);
+        const sogKts = normaliseSog(sog) ?? 0;
+
         // ── Dual timestamps: when it happened vs when we heard about it ──────
         // tEvent comes from the message itself (AISStream time_utc / ISO from
         // synthetic+recorded sources); tArrival is sim time now. Never conflate.
@@ -522,10 +589,19 @@ export class AISManager {
             existing.prevPos.copy(existing.targetPos);
             existing.targetPos.copy(scenePos);
             existing.lerpAlpha  = 0;
-            existing.speedKts   = Math.round(sog);
+            existing.speedKts   = sogKts;
             existing.headingDeg = heading;
+            existing.cogDeg     = cogDeg;
             existing.latDeg     = lat;
             existing.lonDeg     = lon;
+            // navStatus is per-report, but absent from many reports. Keep the
+            // last known value rather than blanking it — "we last heard AT
+            // ANCHOR" beats "we know nothing" when the field simply wasn't sent.
+            if (navStatus != null) {
+                existing.navStatus     = navStatus;
+                existing.navStatusText = navStatusText;
+                existing.navStatusAt   = tEvent;
+            }
             existing.lastSeen      = tArrival;
             existing.lastEventTime = tEvent;
 
@@ -548,8 +624,15 @@ export class AISManager {
                 // renders typed immediately instead of grey until its next static msg.
                 class:       typeCache.get(mmsi) || aisTypeToClass(shipType),
                 country:     mmsiToCountry(mmsi),
-                speedKts:    Math.round(sog),
+                speedKts:    sogKts,
                 headingDeg:  heading,
+                // COG and navigational status — kept separate from headingDeg on
+                // purpose. See the comment at the extraction site above and
+                // docs/STM_ROUTE_SPEC.md §1.2/§1.3. Null when never transmitted.
+                cogDeg:        cogDeg,
+                navStatus:     navStatus,
+                navStatusText: navStatusText,
+                navStatusAt:   navStatus != null ? tEvent : null,
                 latDeg:      lat,
                 lonDeg:      lon,
                 destination: null,
@@ -578,7 +661,15 @@ export class AISManager {
                 flagCount:     violations.length,
                 lastFlag:      violations.length ? violations[violations.length - 1].type : null,
                 threeObject: null,
-                history:     [],
+                // NO `history` field. It was declared here and never written for
+                // months, which reads as "track history lives on the vessel" and
+                // sends anyone looking for it to the wrong place. Real positional
+                // history is owned by rollingRecorder.js (decimated to ~1 sample
+                // / 30 s, read via rollingRecorder._byMmsi — see
+                // vesselInstruments._drawTrace). The userData.history seen in
+                // main.js belongs to the old spline-driven synthetic ships and is
+                // a different object entirely: entityBuilder builds a fresh
+                // userData literal rather than aliasing this record.
                 isDark:      false,
                 darkSince:   null
             };

@@ -8,6 +8,11 @@
 //   • Manages the unread badge on the ALERTS tab button
 //   • Click-to-focus: clicking an alert pans camera + shows selection ring
 
+// The only import this module has. Alert times MUST come from sim time, not
+// the wall clock, or a scrubbed/paused replay stamps every alert with the
+// moment you happened to be watching rather than when it happened.
+import { simClock } from './simClock.js';
+
 const LS_LOG   = 'vg1_alerts_log';
 const LS_RULES = 'vg1_alerts_rules';
 const MAX_LOG  = 200;
@@ -28,6 +33,19 @@ const TYPE_META = {
     AIRCRAFT_LANDED:     { label: 'AIRCRAFT LANDED',      severity: 'INFO',     icon: '◎', color: '#00e87a' },
     AIRCRAFT_LOST_SIGNAL:{ label: 'AIRCRAFT LOST SIGNAL', severity: 'WARNING',  icon: '⚡', color: '#ff8c00' },
     AIRCRAFT_CONFLICT:   { label: 'AERIAL CONFLICT',      severity: 'CRITICAL', icon: '✈', color: '#ff1744' },
+    // ── STM Enhanced Monitoring (enhancedMonitor.js, 2026-07-29) ─────────────
+    // Every one of these needs a DEFAULT_RULES entry below as well as an entry
+    // here. ZONE_BREACH above is the cautionary example: it has metadata but no
+    // rule, so _isEnabled() returns false and it can never actually be raised.
+    ROUTE_DEVIATION:       { label: 'ROUTE DEVIATION',       severity: 'WARNING',  icon: '⤳', color: '#ff8c00' },
+    SCHEDULE_SLIP:         { label: 'SCHEDULE SLIP',         severity: 'WARNING',  icon: '◷', color: '#ff8c00' },
+    // Named for what it actually is. This compares the ship's DECLARED draught
+    // against its own DECLARED safety depth — a plan-consistency check. It is
+    // NOT an under-keel clearance calculation; real UKC needs bathymetry, tide
+    // and squat, none of which exist in this codebase yet.
+    SAFETY_DEPTH_CONFLICT: { label: 'SAFETY DEPTH CONFLICT', severity: 'CRITICAL', icon: '⏚', color: '#ff1744' },
+    NON_ARRIVAL:           { label: 'NON-ARRIVAL',           severity: 'CRITICAL', icon: '⌖', color: '#ff1744' },
+    ROUTE_RECEIVED:        { label: 'ROUTE RECEIVED',        severity: 'INFO',     icon: '⇲', color: '#40c4ff' },
 };
 
 // ── Default rule set ──────────────────────────────────────────────────────────
@@ -46,6 +64,17 @@ const DEFAULT_RULES = [
     { id: 'aircraft_landed',      name: 'AIRCRAFT LANDED',       type: 'AIRCRAFT_LANDED',      enabled: true, params: {} },
     { id: 'aircraft_lost_signal', name: 'AIRCRAFT LOST SIGNAL',  type: 'AIRCRAFT_LOST_SIGNAL', enabled: true, params: {} },
     { id: 'aircraft_conflict',    name: 'AERIAL CONFLICT',       type: 'AIRCRAFT_CONFLICT',    enabled: true, params: {} },
+    // ── STM Enhanced Monitoring ──────────────────────────────────────────────
+    // enhancedMonitor.js already throttles at source (STM.ALARM_COOLDOWN_MS per
+    // mmsi+type), so these are safe to have on by default — they cannot flood
+    // the log the way an untuned per-tick raise would.
+    { id: 'route_deviation',      name: 'ROUTE DEVIATION',       type: 'ROUTE_DEVIATION',       enabled: true, params: {} },
+    { id: 'schedule_slip',        name: 'SCHEDULE SLIP',         type: 'SCHEDULE_SLIP',         enabled: true, params: {} },
+    { id: 'safety_depth',         name: 'SAFETY DEPTH CONFLICT', type: 'SAFETY_DEPTH_CONFLICT', enabled: true, params: {} },
+    { id: 'non_arrival',          name: 'NON-ARRIVAL',           type: 'NON_ARRIVAL',           enabled: true, params: {} },
+    // Off by default: informational, and a busy VIS subscription would make it
+    // the most frequent entry in the log without telling anyone anything.
+    { id: 'route_received',       name: 'ROUTE RECEIVED',        type: 'ROUTE_RECEIVED',        enabled: false, params: {} },
 ];
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
@@ -73,13 +102,18 @@ function _esc(s) {
 
 // ── Relative time formatter ───────────────────────────────────────────────────
 function _relTime(ts) {
-    const d = Math.floor((Date.now() - ts) / 1000);
+    // Same clock the timestamp came from — mixing the two makes every replayed
+    // alert read as hours old, or in the future.
+    const d = Math.floor((simClock.now() - ts) / 1000);
     if (d < 60)  return d + 's ago';
     if (d < 3600) return Math.floor(d / 60) + 'm ago';
     return Math.floor(d / 3600) + 'h ago';
 }
 
 // ── Unique ID generator ───────────────────────────────────────────────────────
+// Deliberately Date.now(), unlike the timestamps above: this is only a monotonic
+// id seed, and sim time can run BACKWARDS when the clock is scrubbed, which would
+// hand out colliding ids.
 let _idSeq = Date.now();
 function _uid() { return ++_idSeq; }
 
@@ -146,7 +180,10 @@ export function initAlertsManager(aiCopilot, aisManager, discoveryManager) {
             vesselName: vesselName || mmsi || '—',
             message:    message || '',
             extra:      extra || null,
-            timestamp:  Date.now(),
+            // simClock, NOT Date.now(): STM alarms are raised from a timer that
+            // already runs on sim time (enhancedMonitor), so a wall-clock stamp
+            // here disagreed with the evidence carried in the same alert.
+            timestamp:  simClock.now(),
             read:       _tabOpen,   // auto-read if tab is open
             dismissed:  false,
         };
