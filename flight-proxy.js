@@ -14,11 +14,20 @@ import https from 'https';
 import url from 'url';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import equasis from './equasis-lookup.js';   // vessel dossier (Equasis)
 import memoryStore from './memoryStore.js';  // persistent ground-truth/findings log (Discovery AI)
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ── IMF PortWatch (port & chokepoint activity) ───────────────────────────────
+// Public ArcGIS feature services, no API key. Upstream refreshes WEEKLY
+// (Tuesdays 09:00 ET), so a 12h disk cache costs nothing and makes reloads
+// instant. Cache lives beside the other local artefacts and is gitignored.
+const PORTWATCH_HOST      = 'https://services9.arcgis.com/weJ1QsnbMYJlCHdG/ArcGIS/rest/services';
+const PORTWATCH_CACHE_DIR = path.join(__dirname, '.cache', 'portwatch');
+const PORTWATCH_TTL_MS    = 12 * 60 * 60 * 1000;
 
 // Load .env (EQUASIS_USER / EQUASIS_PASS, ANTHROPIC_API_KEY) if present —
 // no dependency; tiny KEY=VALUE parser.
@@ -992,6 +1001,111 @@ const server = http.createServer((req, res) => {
     }
 
     // ── /cables — Telegeography submarine cable GeoJSON ──────────────────────
+    // ── /portwatch — IMF PortWatch port & chokepoint activity ────────────────
+    //
+    // WHY THIS GOES THROUGH THE PROXY AT ALL. The ArcGIS services are public and
+    // need no key, so the browser could in principle call them directly. Three
+    // reasons not to:
+    //   1. CORS is not ours to rely on. If IMF/Esri ever tighten it the map layer
+    //      dies with an opaque browser error and no server-side place to fix it.
+    //   2. Caching. The upstream refreshes WEEKLY (Tuesdays 09:00 ET). Re-pulling
+    //      2,065 port positions on every page load is rude to a free public
+    //      service and slow for us; a disk cache makes reloads instant.
+    //   3. One place to fail. Same shape as /cables and /vessel.
+    //
+    // Deliberately a THIN passthrough: `where`/`outFields`/paging are forwarded
+    // as given rather than re-modelled here, so query shape stays in
+    // portActivityManager.js where it can be read alongside the code that uses it.
+    if (pathname === '/portwatch') {
+        // parsed.query, not `q`. The /vessel handler above declares its own
+        // block-scoped `const q = parsed.query`, and this route was written
+        // against that name as if it were in outer scope — so every request here
+        // threw ReferenceError: q is not defined at runtime. Nothing catches it
+        // at load time, and the route is only exercised when PortWatch is used.
+        const q = parsed.query;
+        const LAYERS = {
+            'ports-ref':   'PortWatch_ports/FeatureServer/1/query',
+            'ports':       'Daily_Ports_Data/FeatureServer/0/query',
+            'chokepoints': 'Daily_Chokepoints_Data/FeatureServer/0/query',
+        };
+        const layer = LAYERS[q.layer];
+        if (!layer) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `unknown layer "${q.layer}"`, have: Object.keys(LAYERS) }));
+            return;
+        }
+
+        // Allowlisted passthrough params. An allowlist rather than forwarding the
+        // whole query string: this endpoint is an open relay to a third party, and
+        // "forward whatever the client sent" is how a convenience proxy becomes
+        // someone else's problem.
+        const PASS = ['where', 'outFields', 'orderByFields', 'resultOffset',
+                      'resultRecordCount', 'returnDistinctValues', 'returnCountOnly'];
+        const params = new URLSearchParams({ f: 'json', returnGeometry: 'false' });
+        for (const k of PASS) if (q[k] != null && q[k] !== '') params.set(k, String(q[k]));
+        if (!params.has('where')) params.set('where', '1=1');
+        if (!params.has('outFields')) params.set('outFields', '*');
+
+        const target = `${PORTWATCH_HOST}/${layer}?${params.toString()}`;
+        const key = crypto.createHash('sha1').update(target).digest('hex').slice(0, 16);
+        const file = path.join(PORTWATCH_CACHE_DIR, `${key}.json`);
+
+        // Cache-first. TTL is 12h against a weekly upstream — short enough that a
+        // Tuesday refresh lands the same day, long enough that a session costs
+        // nothing.
+        try {
+            const st = fs.statSync(file);
+            if (Date.now() - st.mtimeMs < PORTWATCH_TTL_MS) {
+                res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'HIT' });
+                res.end(fs.readFileSync(file));
+                return;
+            }
+        } catch (_) { /* no cache entry — fall through */ }
+
+        console.log(`[proxy] → portwatch ${q.layer} ${params.get('where')}`);
+        https.get(target, upstream => {
+            if (upstream.statusCode !== 200) {
+                upstream.resume();
+                // Serve a stale cache entry rather than nothing: week-old port
+                // activity is still useful, an empty layer is not.
+                if (fs.existsSync(file)) {
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'STALE' });
+                    res.end(fs.readFileSync(file));
+                    return;
+                }
+                res.writeHead(502, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: `PortWatch returned ${upstream.statusCode}` }));
+                return;
+            }
+            let body = '';
+            upstream.on('data', c => { body += c; });
+            upstream.on('end', () => {
+                // ArcGIS reports failures as HTTP 200 with an {error:{code}} body
+                // (a token-required response looks exactly like a success to any
+                // status-code check). Never cache one of those as if it were data.
+                let ok = false;
+                try { const j = JSON.parse(body); ok = !j.error && Array.isArray(j.features); } catch (_) { ok = false; }
+                if (ok) {
+                    try {
+                        fs.mkdirSync(PORTWATCH_CACHE_DIR, { recursive: true });
+                        fs.writeFileSync(file, body);
+                    } catch (e) { console.warn(`[proxy] portwatch cache write failed: ${e.message}`); }
+                }
+                res.writeHead(ok ? 200 : 502, { 'Content-Type': 'application/json', 'X-Cache': 'MISS' });
+                res.end(ok ? body : JSON.stringify({ error: 'PortWatch returned an error payload', body: body.slice(0, 400) }));
+            });
+        }).on('error', err => {
+            if (fs.existsSync(file)) {
+                res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'STALE' });
+                res.end(fs.readFileSync(file));
+                return;
+            }
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+        });
+        return;
+    }
+
     if (pathname === '/cables') {
         console.log('[proxy] → Telegeography cable GeoJSON');
 

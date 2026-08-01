@@ -218,7 +218,9 @@ export function tickSearchVisibility(aisShips) {
     aisShips.forEach(s => {
         if (s.userData._searchHidden !== undefined) {
             s.visible = !s.userData._searchHidden;
-            if (s.userData.trail) s.userData.trail.visible = s.visible;
+            // AND has points — a trail that follows its ship's visibility alone
+            // is a draw call for an empty geometry (see entityBuilder.js).
+            if (s.userData.trail) s.userData.trail.visible = s.visible && (s.userData.trail.geometry?.attributes?.position?.count ?? 0) > 1;
         }
     });
 }
@@ -1712,7 +1714,7 @@ export function setupUI(deps) {
         if (aisShipsRef) aisShipsRef.forEach(s => {
             if (s.userData.isRealSatellite) {
                 s.visible = v;
-                if (s.userData.trail) s.userData.trail.visible = v;
+                if (s.userData.trail) s.userData.trail.visible = v && (s.userData.trail.geometry?.attributes?.position?.count ?? 0) > 1;
             }
         });
     });

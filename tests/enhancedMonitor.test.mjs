@@ -17,7 +17,7 @@ import './_stubs/domEnv.mjs';
 import assert from 'node:assert/strict';
 import { EnhancedMonitor, MONITOR_STATE, ALARMS } from '../enhancedMonitor.js';
 import { voyagePlanStore } from '../voyagePlanStore.js';
-import { scheduleElementFor } from '../rtzCodec.js';
+import { scheduleElementFor } from '../voyagePlan.js';
 import { planFromScenarioEntity } from '../scenarioRoute.js';
 import { haversineNm } from '../dataSource.js';
 import { simClock } from '../simClock.js';

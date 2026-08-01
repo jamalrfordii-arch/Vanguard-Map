@@ -74,6 +74,30 @@ export const SPLAT_FADE_TILES_START = 24;  // 13→24 (2026-07-18): hand the bas
 export const SPLAT_FADE_TILES_END   = 14;  // 7→14 (2026-07-18): base fully gone by this altitude so tiles own the mid/close view. Original note: base fully gone once tile points solidly cover —
                                            // stops the sparse zoomed-out dots cluttering close detail.
 
+// ── Sea plane altitude gate (2026-07-31, WATER_DEFINITION_SPEC §2.4) ────────
+// The sea plane has been globally hidden since 2026-07-24 (waterManager.js:396),
+// which is why nothing paints water at harbour zoom: the base cloud calls bays
+// "land" from a 19.5 km DEM, the ocean-floor mesh discards on the same DEM, and
+// the tile points are carved off water on purpose. Four authors, all declining.
+//
+// These two live HERE, immediately under SPLAT_FADE_TILES_*, because they are one
+// SEAM GROUP with them and must never be moved alone:
+//
+//   camera.y   37        26      24         20        18        14
+//              |         |       |          |         |         |
+//   base cloud  fully opaque ────┤ fade begins (SPLAT_FADE_TILES_START = 24)
+//                                                     └ gone (_END = 14)
+//   sea plane            └ fade in ──┴ full
+//
+// The plane must be FULLY ON before the base cloud starts leaving, or there is an
+// altitude window with neither and the hole comes back at a different height.
+// FULL_ALT sits 4 units inside START; SHOW_ALT gives the fade 2 units of headroom
+// above that. Change one of the four and you must re-check the other three.
+export const WATER = {
+    SHOW_ALT: 26,   // sea plane starts fading IN below this; above it, visible = false
+    FULL_ALT: 20,   // fully opaque (at the material's own 0.82) below this
+};
+
 // ── Cesium tile stream rendering style (2026-07-12) ─────────────────────────
 export const TILESTREAM = {
     // 'points'    → sample Cesium DEM tiles into dense splat-style points: the
@@ -388,54 +412,6 @@ export const SIM = {
     RECORDER_MAX:   200000,  // max captured AIS messages before recorder stops
 };
 
-// ── IMF PortWatch — port & chokepoint activity (portActivityManager.js) ──────
-//
-// RECONSTRUCTED 2026-07-29, and the reconstruction is the point of this comment.
-// This namespace was lost when config.js was overwritten by a copy staged before
-// the portwatch work existed. It is not recoverable from git (it was never
-// committed) nor from config.js.pre-portwatch.bak (that snapshot predates it), so
-// the values below are derived from how portActivityManager.js and
-// portActivity.js actually USE them — they are not the originals.
-//
-// Every number matches the corresponding default in portActivity.js own
-// function signatures — matchPorts({maxKm = 50, warnKm = 25}) and
-// seriesStats({recentDays = 7, baselineDays = 90}) — which is the most
-// defensible basis available, since those defaults were written alongside the
-// consumer that reads this namespace.
-//
-// PORT_OVERRIDES CANNOT BE RECOVERED. It is the hand-corrected map of Vanguard1
-// port name to PortWatch portid, and whatever was in it is gone. It is empty
-// below, so affected ports fall back to spatial matching. portActivityManager
-// already prints "[portActivity] unmatched:" and "[portActivity] weak matches
-// (check these):" on init — read those to find which ports need one re-added.
-export const PORTWATCH = {
-    ENABLED: true,
-
-    // flight-proxy.js serves /portwatch on PORT = 8787 (see its PORTWATCH_HOST /
-    // PORTWATCH_CACHE_DIR block). Same origin the copilot and cable feed use.
-    PROXY: "http://localhost:8787",
-
-    // Spatial port matching. MATCH_MAX_KM is a hard cap — beyond it a port is
-    // reported UNMATCHED rather than matched badly. MATCH_WARN_KM only flags a
-    // match as weak so it can be eyeballed. Both mirror matchPorts own defaults.
-    MATCH_MAX_KM:  50,
-    MATCH_WARN_KM: 25,
-
-    // "OUR PORT NAME": "portNNNN" — hand corrections, which win outright over
-    // spatial matching. EMPTY BECAUSE THE ORIGINAL CONTENTS WERE LOST, not
-    // because none were needed. See the note above.
-    PORT_OVERRIDES: {},
-
-    // Daily series windows. seriesStats compares the most recent RECENT_DAYS
-    // against the BASELINE_DAYS immediately preceding them, so WINDOW_DAYS must
-    // cover both (7 + 90 = 97) with headroom for PortWatch publication lag —
-    // the feed trails real time by several days, which is what staleDays()
-    // exists to surface.
-    RECENT_DAYS:   7,
-    BASELINE_DAYS: 90,
-    WINDOW_DAYS:   120,
-};
-
 // ── Sea Traffic Management: route plans + Enhanced Monitoring ────────────────
 // (routeGeometry.js, rtzCodec.js, voyagePlanStore.js, enhancedMonitor.js)
 // Full design: docs/STM_ROUTE_SPEC.md
@@ -483,16 +459,79 @@ export const STM = {
     // How far outside the widest declared corridor counts as having abandoned
     // the route entirely (multiple of that corridor).
     ABANDON_XTD_MULTIPLE: 5,
-    // Within this distance of the END of the route, the voyage is over and
-    // schedule evaluation stops. Without it, distanceToNextWpNm goes to ~0 at
-    // the final waypoint, the projected ETA collapses to "now", and the measured
-    // slip grows one minute per minute forever on a vessel that arrived exactly
-    // on time. Found by the full-voyage integration harness, not by unit tests.
-    ARRIVAL_RADIUS_NM: 0.5,
 
     // ── Geometry ─────────────────────────────────────────────────────────────
     ORTHODROME_TESSELLATION_NM: 25,  // great-circle legs only; rhumb legs are straight in Mercator
     ROUTE_CORRIDOR_HINT_NM: 5,       // how far off-axis a leg hint stays plausible
+
+    // ── Arrival (enhancedMonitor.js) ─────────────────────────────────────────
+    // ADDED 2026-07-31 — was referenced and never defined, so `Math.max(radius,
+    // undefined)` returned NaN, every distance comparison against it was false,
+    // and a ship at its destination stayed "late" forever with a slip that grew
+    // without bound. Four enhancedMonitor tests were failing on exactly this.
+    // Used as a FLOOR under the final waypoint's own radius, not a replacement:
+    // `Math.max(finalWp?.radius ?? 0, STM.ARRIVAL_RADIUS_NM)`. 0.5 nm matches
+    // DEFAULT_XTD_NM above — a berth is reached well inside it, and a route whose
+    // final waypoint declares a larger radius keeps its own.
+    ARRIVAL_RADIUS_NM: 0.5,
+
+    // ── Route rendering (routeLayer.js, routeRibbon.js) ──────────────────────
+    // ADDED 2026-07-31. Same failure as ARRIVAL_RADIUS_NM and worse: these are
+    // read UNGUARDED, so `STM.ROUTE_COLORS.DEVIATING` threw "Cannot read
+    // properties of undefined" the moment a route was drawn, and seaLevelY()
+    // returned NaN for every vertex. Neither had a default to fall back to.
+    //
+    // Colours follow the palette already in this file (see AIRSPACE_BANDS and
+    // RIBBON_*_COLOR): cyan for the plan, warm for trouble, grey for inferred.
+    ROUTE_COLORS: {
+        CENTRELINE:   0x36d6ff,   // the declared route line — the primary read
+        CORRIDOR:     0x1f7fa8,   // XTD corridor fill, dimmer so the line stays on top
+        CORRIDOR_RIM: 0x4fb3d9,   // corridor edge; drawn at a fixed 0.45 × opacityScale
+        WAYPOINT:     0x9fe8ff,   // waypoint pips, lighter than the centreline
+        DEVIATING:    0xff7043,   // matches RIBBON_DESCENT_COLOR — the file's "trouble" orange
+        SYNTHETIC:    0x9aa4ad,   // inferred, NOT declared by the ship. Deliberately
+                                  // desaturated: a guessed route must never look as
+                                  // authoritative as a received one.
+    },
+    CENTRELINE_OPACITY:      0.90,  // the line is the thing you follow — nearly solid
+    CORRIDOR_OPACITY:        0.18,  // a wash, not a slab; ships and coast read through it
+    // Applied to BOTH corridor and rim when the corridor width came from
+    // DEFAULT_XTD_NM rather than the route file. Halved is a visible but not
+    // alarming "this width is our guess" signal.
+    DEFAULTED_OPACITY_SCALE: 0.5,
+    // Floor, in SCREEN PIXELS, on the wider side of a corridor. corridorExaggeration
+    // only ever grows a corridor and decays to 1 as you descend, so the ribbon
+    // becomes geometrically true up close — the same guarantee vesselScale makes
+    // in reverse. Below ~2px a corridor aliases into a dotted line.
+    CORRIDOR_MIN_PX:         3,
+    WAYPOINT_PIP_PX:         7,     // sizeAttenuation off — this is a screen-space size
+    // ZEROED 2026-08-01. Was 0.05, which I picked by reasoning about z-fighting
+    // WITHOUT ever seeing a route drawn. It was wrong by a wide margin, and the
+    // arithmetic is worth keeping so nobody re-derives it the same way:
+    //
+    //   flat mode is y = hM / 2000, times TERRAIN_VSCALE_LAND (0.20)
+    //     -> 0.0001 scene units per metre, i.e. 1 SCENE UNIT = 10 km VERTICALLY
+    //     -> 0.05 was a +500 m lift, not the few metres intended
+    //
+    // But the magnitude was the smaller half of the problem. routeRibbon.seaLevelY
+    // returns -dist² × 20.0 + offset, reproducing terrainBuilder's globe curvature,
+    // while the sea plane is a FLAT PlaneGeometry at y = -0.2 with no curvature term
+    // at all (waterManager.js). Two different datums. At Rotterdam the curvature
+    // term alone is -0.577, so the route sits ~0.33 units (~3.3 km) BELOW the water
+    // surface no matter what this constant is set to.
+    //
+    // 0 is therefore the honest value: no lift, pending a decision on WHICH surface
+    // routes belong to. Any non-zero number here pretends we know which one we are
+    // clearing. If routes z-fight against the ocean floor once that is settled,
+    // ~0.001 (10 m) is the right order for the TERRAIN datum.
+    //
+    // Do NOT delete this key: seaLevelY takes it as a default parameter, so its
+    // absence makes `offset` undefined and every route vertex NaN - which is exactly
+    // the failure that had routeRibbon.test.mjs red before this namespace existed.
+    //
+    // The mismatch is not new; it was invisible while the sea plane was globally
+    // hidden. Switching the plane on (2026-07-31) is what exposed it.
+    ROUTE_Y_OFFSET:          0,
     // XTD above this is read as METRES, below as NAUTICAL MILES. RTZ Annex S
     // specifies 0.0-10.0 nm; several STM documents describe the same attribute
     // in metres, and both appear in real files. The inferred branch is recorded
@@ -509,48 +548,6 @@ export const STM = {
     PLAN_FLUSH_MS: 4000,
     STORAGE_KEY: 'vg1_voyage_plans',
 
-    // ── Route rendering (routeRibbon.js / routeLayer.js) ─────────────────────
-    // A TRUE-SCALE CORRIDOR IS INVISIBLE, and the fix is the one vesselScale.js
-    // already established for hulls: state the constraint in pixels rather than
-    // as a magic multiplier. MAP_WIDTH=300 spans the equatorial circumference,
-    // so one scene unit is 72.1 nm and a typical 0.2 nm corridor is 0.0028 units
-    // — roughly a ten-thousandth of the map width.
-    //
-    // CORRIDOR_MIN_PX is the on-screen half-width the WIDER side is grown to
-    // meet. One factor is applied to BOTH sides, so the port/starboard ratio
-    // stays exact — a route declaring 0.15/0.30 always draws twice as wide to
-    // starboard, at every zoom. As the camera descends the factor falls to 1 and
-    // the ribbon becomes geometrically true, which is the same guarantee
-    // vesselScale gives in reverse.
-    CORRIDOR_MIN_PX: 7,
-    // Y lift above the sea plane. Enough to clear z-fighting with the Gerstner
-    // water, small enough that the route still reads as lying ON the sea.
-    ROUTE_Y_OFFSET: 0.06,
-    // Route materials must stay BELOW the bloom threshold (0.95, sceneSetup.js).
-    // These are unlit colours with opacity, never emissive — CLAUDE.md calls the
-    // bloom threshold a hairpin, and a full-length glowing ribbon is exactly the
-    // kind of thing that would tip it.
-    ROUTE_COLORS: {
-        CENTRELINE:   '#6fb7d8',
-        CORRIDOR:     '#4a90b8',
-        CORRIDOR_RIM: '#7fc4e0',
-        WAYPOINT:     '#9fd8ee',
-        DEVIATING:    '#d8894a',   // set by enhancedMonitor in 1.6
-        SYNTHETIC:    '#8a8f98',   // a plan WE generated, never one a ship shared
-    },
-    CORRIDOR_OPACITY: 0.16,
-    CENTRELINE_OPACITY: 0.75,
-    // Waypoint pip size in PIXELS, not scene units. A waypoint has a position
-    // and a turn radius but no extent, so any scene-space size for its marker is
-    // a fiction — and a badly chosen one is actively misleading. The first
-    // version of this used 0.18 scene units, which is 13 NAUTICAL MILES across:
-    // at full zoom the pip was 23× wider than the corridor it annotated and hid
-    // it entirely. A constant pixel size claims nothing about size.
-    WAYPOINT_PIP_PX: 6,
-    // A corridor drawn from OUR default rather than the ship's declared XTD is
-    // rendered fainter, so "we assumed this" is visible and not merely logged.
-    DEFAULTED_OPACITY_SCALE: 0.5,
-
     // ── Interop (Phase 3) ────────────────────────────────────────────────────
     // SECOM mandates mutual TLS with X.509 client certificates and ECDSA payload
     // signing. A browser cannot present a client certificate programmatically,
@@ -560,21 +557,91 @@ export const STM = {
     ORG_MRN_PREFIX: 'urn:mrn:stm:voyage:id:vanguard1',
 };
 
-// ── Alert zone breach detection (zoneBreach.js) ──────────────────────────────
-// The user-placed alert zone (uiController's `_alertZone`) has always counted
-// vessels inside it for the badge. These drive the ENTRY event that makes
-// alertsManager's ZONE_BREACH type actually fire.
+// ── IMF PortWatch activity (portActivityManager.js + portActivity.js) ────────
+//
+// RESTORED 2026-07-30. portActivityManager.js:23 imports { PORTWATCH } from here,
+// and this block was absent — lost when config.js was rewritten for the STM /
+// enhancedMonitor batch (it is in neither the current file nor
+// config.js.pre-portwatch.bak). It is currently harmless ONLY because nothing
+// imports portActivityManager yet: a missing named export is an ES-module
+// INSTANTIATION failure, so the moment it is wired in, no module in the graph
+// executes at all. start() never runs, so main.js's try/catch never fires, so
+// there is no "RESOURCES BLOCKED" and no window.__bootError — just the initial
+// loading screen, forever. Wire the manager in and this would have been the
+// second boot hang of the day with the same silent signature.
+//
+// The three windowing constants are ONE fact, not three:
+//   seriesStats() slices rows[0 .. RECENT_DAYS] as "recent" and
+//   rows[RECENT_DAYS .. RECENT_DAYS + BASELINE_DAYS] as "baseline", so the fetch
+//   window must be exactly their sum. Too small silently truncates the baseline
+//   — which biases every pct the layer reports, with no symptom — and too large
+//   buys nothing. WINDOW_DAYS is therefore DERIVED, not typed in. Its value also
+//   has to stay under 100: the eager chokepoint load is 10 mapped ids x
+//   WINDOW_DAYS rows against portActivityManager's PAGE of 1000, and 970 fits in
+//   one request. At 100+ it starts paginating for no benefit.
+const PW_RECENT_DAYS   = 7;    // "recent" window, days. Mirrors seriesStats()'s default.
+const PW_BASELINE_DAYS = 90;   // comparison baseline, days. Mirrors seriesStats()'s default.
+
+export const PORTWATCH = {
+    ENABLED: true,
+    // flight-proxy.js serves /portwatch (see its pathname === '/portwatch'
+    // branch). BASE only — the manager appends the path. Not STM's 8788 sidecar.
+    PROXY: 'http://localhost:8787',
+
+    RECENT_DAYS:   PW_RECENT_DAYS,
+    BASELINE_DAYS: PW_BASELINE_DAYS,
+    WINDOW_DAYS:   PW_RECENT_DAYS + PW_BASELINE_DAYS,   // 97 — derived, see above
+
+    // Spatial binding of portManager.PORTS to PortWatch's 2,065 reference ports.
+    // These duplicate matchPorts()'s own parameter defaults (maxKm 50, warnKm 25)
+    // because portActivity.js is pure and has to work standalone in its tests.
+    // They must agree — a knob declared in two places and changed in one is the
+    // single most repeated defect in this codebase (POINT_SATURATION fixed three
+    // times, HULL_UNITS declared in four). Change both or neither.
+    MATCH_MAX_KM:  50,   // beyond this, report the port as unmatched rather than guess
+    MATCH_WARN_KM: 25,   // matched but logged as weak — proximity may have picked wrong
+
+    // Manual { '<our port name>': '<portwatch portid>' } bindings, for the cases
+    // where nearest-neighbour picks the wrong basin. Find the id with
+    // window.vg1PortActivity.matchReport() in DevTools. An override naming an id
+    // PortWatch no longer publishes falls back to spatial matching and is logged
+    // — deliberately, since a stale override is worse than none.
+    PORT_OVERRIDES: {},
+};
+
+// ── Zone breach detection (zoneBreach.js, uiController.js) ──────────────────
+// ADDED 2026-07-31. `zoneBreach.js` and `uiController.js` both did
+// `import { ZONE } from './config.js'` and this namespace did not exist. A
+// dangling NAMED import is a link-time failure in ES modules — the graph never
+// instantiates — so anything reaching zoneBreach.js died at the loading screen
+// with no error and no window.__bootError. alertsManager.js and uiController.js
+// both import it, so that was everything. Caught by tests/moduleGraph.test.mjs;
+// run it before trusting a boot.
+//
+// Do not confuse this with ZONE_REC directly below. Different subsystem: this is
+// the breach DETECTOR, that is the zone RECORDER. The names are close enough to
+// be a trap, which is why they sit together rather than apart.
+//
+// Values chosen to satisfy the intent documented in zoneBreach.js's header and
+// the shape tests/zoneBreach.test.mjs asserts. They are tunable and should be
+// tuned against real traffic — the tests pin behaviour, not these numbers.
 export const ZONE = {
-    // tickAlertZone runs per frame (main.js animation loop). The badge count is
-    // cheap enough to stay there; breach evaluation is gated on this.
-    EVAL_MS: 2000,
-    // Leaving must be harder than entering. At exactly the radius, ordinary
-    // position jitter flips a vessel in and out every tick — so exit requires
-    // clearing radius x (1 + this). Same shape as STM.DEVIATION_CLEAR_MS.
-    EXIT_HYSTERESIS: 0.08,
-    // Per-vessel backstop for a ship genuinely oscillating across the boundary
-    // faster than an operator could act on it.
-    ALARM_COOLDOWN_MS: 5 * 60 * 1000,
+    // FRACTION of the zone radius, not an absolute distance:
+    // `exitRadius = radius * (1 + EXIT_HYSTERESIS)` (zoneBreach.js:89). Leaving is
+    // deliberately harder than entering, so a vessel parked on the boundary does
+    // not flip inside/outside on GPS jitter. At the default 100 NM zone this is
+    // 5 NM of margin. Erring high is the safe direction: a late exit is quiet, a
+    // chattering one buries the alert log and teaches the operator to ignore the
+    // type — which the header calls out as worse than not having the feature.
+    EXIT_HYSTERESIS:    0.05,
+    // Per-vessel, in SIM ms. The backstop for a vessel genuinely crossing back
+    // and forth, which hysteresis alone cannot damp. Matches the 60_000 the test
+    // passes explicitly in its cooldown cases.
+    ALARM_COOLDOWN_MS:  60_000,
+    // Sim-ms gate on breach evaluation. tickAlertZone runs from the animation
+    // loop; the badge count is cheap enough to stay per-frame but the breach pass
+    // is not (uiController.js:257). Same family as INTEGRITY.TICK_MS (4000).
+    EVAL_MS:            5000,
 };
 
 // ── Zone recorder (zoneRecorder.js) ──────────────────────────────────────────
@@ -1163,4 +1230,14 @@ function mulberry32(a) {
         return ((t ^ t >>> 14) >>> 0) / 4294967296;
     };
 }
+// lightningManager constants
+export const LIGHTNING = {
+    ENABLED:        true,
+    OPACITY:        0.8,
+    UPDATE_INTERVAL_MS: 30_000,   // how often to refresh data
+    MAX_OBJECTS:    500,          // instanced mesh budget
+    FADE_START:     200,          // camera.y above which layer fades out
+    FADE_END:       220,          // camera.y above which layer is fully hidden
+};
+
 export const prng = mulberry32(12345);

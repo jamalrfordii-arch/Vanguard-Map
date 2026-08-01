@@ -615,7 +615,29 @@ export class AISManager {
 
             if (this.onVesselUpdate) this.onVesselUpdate(mmsi, existing);
         } else {
-            if (this.vessels.size >= AIS.MAX_VESSELS) return;
+            // AT THE CAP. This used to be a bare `return` — no log, no counter,
+            // no symptom. On 2026-07-30 it silently swallowed every vessel in a
+            // loaded scenario because a live feed already held the store at
+            // exactly MAX_VESSELS, and the result was a demo that reported
+            // "2 plan(s) loaded" and monitored nothing. An hour went into
+            // finding a line that had nothing to say for itself.
+            //
+            // Still a drop — the cap exists for good reasons and raising it here
+            // would be the wrong fix. But a drop that ANNOUNCES ITSELF, throttled
+            // so a saturated feed cannot flood the console.
+            if (this.vessels.size >= AIS.MAX_VESSELS) {
+                this._capDropped = (this._capDropped ?? 0) + 1;
+                const now = Date.now();
+                if (!this._capLoggedAt || now - this._capLoggedAt > 30_000) {
+                    this._capLoggedAt = now;
+                    console.warn(
+                        `[AIS] at MAX_VESSELS (${AIS.MAX_VESSELS}) — dropped ${this._capDropped} new ` +
+                        `vessel(s) so far, most recently MMSI ${mmsi}. New traffic (including any ` +
+                        `loaded scenario) will NOT appear until vessels are cleared. ` +
+                        `Use aisManager.clearAllVessels() or raise AIS.MAX_VESSELS.`);
+                }
+                return;
+            }
 
             const v = {
                 mmsi,

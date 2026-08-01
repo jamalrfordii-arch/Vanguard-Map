@@ -28,7 +28,11 @@
 import { STM } from './config.js';
 import { voyagePlanStore } from './voyagePlanStore.js';
 import { enhancedMonitor, MONITOR_STATE } from './enhancedMonitor.js';
-import { parse as parseRtz } from './rtzCodec.js';
+// The panel does not know what formats exist. It asks the registry, which is
+// the only module allowed to import a codec — so adding S-421 changes no UI
+// code and no operator-facing string.
+import { parseAny, isRouteFile as registryIsRouteFile,
+         acceptedExtensionsText, formatsText } from './routeCodecs.js';
 import { isSynthetic } from './scenarioRoute.js';
 
 const PANEL_CSS = `position:fixed; right:14px; bottom:64px; z-index:120;
@@ -126,13 +130,22 @@ export function summariseImport(outcomes) {
                 : `status ${p.routeStatus} — not monitored`;
             lines.push(`  ${p.routeName ?? o.name} · ${p.mmsi ?? 'no MMSI'} · ` +
                        `${p.waypoints.length} wp · XTD ${xtd} · ${status}`);
+            // A plan parsed by a codec that has never seen a real document of its
+            // format must not sit in the log looking exactly like one that has.
+            // The operator is the last line of defence against a mis-mapped field,
+            // and they can only be that if they know which import to distrust.
+            if (p.provisionalCodec) {
+                lines.push(`    ⚠ parsed by a PROVISIONAL codec${p.sourceFormat ? ` (${p.sourceFormat})` : ''} — ` +
+                           'element mapping is inferred, not validated against a real document. ' +
+                           'Check the waypoints against the source before acting on this plan.');
+            }
             if (p.routeStatus !== 7) {
                 lines.push('    not at status 7, so nothing will be monitored against it');
             }
         }
     }
     for (const o of bad) {
-        lines.push(`REJECTED ${o.name}: ${o.report?.warnings?.[0]?.detail ?? 'not a usable RTZ document'}`);
+        lines.push(`REJECTED ${o.name}: ${o.report?.warnings?.[0]?.detail ?? 'not a usable route plan document'}`);
     }
     // Warnings from every outcome, deduplicated by code.
     const warned = new Map();
@@ -160,10 +173,15 @@ export function looksLikeFileDrag(dt) {
     return types.includes('Files');
 }
 
-/** True for filenames the RTZ codec should be offered. */
-export function isRouteFile(name) {
-    return /\.(rtz|rtzp|xml)$/i.test(String(name ?? ''));
-}
+/**
+ * True for filenames worth offering to the registry.
+ *
+ * Re-exported rather than reimplemented: the accepted set is a property of
+ * which codecs are registered, and a second copy of that list here is a second
+ * place to forget to update. Kept as a named export because callers and tests
+ * already import it from this module.
+ */
+export const isRouteFile = registryIsRouteFile;
 
 // ── the panel ────────────────────────────────────────────────────────────────
 
@@ -171,7 +189,7 @@ export class StmPanel {
     constructor(opts = {}) {
         this.store = opts.store ?? voyagePlanStore;
         this.monitor = opts.monitor ?? enhancedMonitor;
-        this.parse = opts.parse ?? parseRtz;
+        this.parse = opts.parse ?? parseAny;
         this._el = null;
         this._toast = null;
         this._drop = null;
@@ -198,7 +216,7 @@ export class StmPanel {
         this._drop = document.createElement('div');
         this._drop.id = 'stm-drop';
         this._drop.style.cssText = DROP_CSS;
-        this._drop.textContent = 'DROP RTZ ROUTE PLAN';
+        this._drop.textContent = `DROP ROUTE PLAN — ${formatsText()}`;
         document.body.appendChild(this._drop);
 
         // Re-render on the events that can change the answer, plus a slow tick
@@ -305,7 +323,7 @@ export class StmPanel {
             msg += (msg ? '\n' : '') +
                 `IGNORED ${ignored.length} non-route file(s): ` +
                 `${ignored.slice(0, 3).map(f => f.name).join(', ')}` +
-                (ignored.length > 3 ? ' …' : '') + '  (.rtz / .rtzp / .xml expected)';
+                (ignored.length > 3 ? ' …' : '') + `  (${acceptedExtensionsText()} expected)`;
         }
         this.toast(msg || 'NOTHING TO IMPORT');
         this.render();

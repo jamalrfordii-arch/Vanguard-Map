@@ -842,3 +842,69 @@ immediately before writing and diff, or patch in place. A modification-time
 guard catches this and costs nothing — the failure here was applying one to
 main.js and index.html but not to config.js, the file rewritten most often
 across batches.
+
+---
+
+## 2026-07-29 — "the map is broken" was a hidden browser tab
+
+Reported symptom: the map would not load. Then, on inspection through the
+remote browser: land rendering **black** while the ocean rendered correctly,
+at 6 FPS / 188 ms, later 3 FPS / 351 ms. Two plausible and completely wrong
+hypotheses were pursued for some time — a land-specific branch in the splat
+fragment shader, and a regression from the imagery/land-mask commit.
+
+The actual state of the machine:
+
+```
+document.visibilityState === 'hidden'
+document.hidden           === true
+requestAnimationFrame     — not firing at all (0 ticks over ~15 s)
+```
+
+The tab was never foreground. Chrome suspends `requestAnimationFrame`
+entirely in a hidden tab, so:
+
+* **The FPS/frame-time HUD is meaningless.** It is measuring the interval
+  between frames that are not being scheduled. 3 FPS was not a performance
+  regression, it was a stopped clock.
+* **A screenshot of a hidden tab is whatever was last composited.** The black
+  land was a stale partial frame — rendered before the terrain worker
+  delivered the colour attribute, then frozen there because no further frame
+  was ever scheduled. Once a fresh frame was forced, the map was fully
+  coloured and correct.
+* Two `Runtime.evaluate` calls that awaited `requestAnimationFrame` timed out
+  after 45 s. That timeout was the first honest signal, and it was initially
+  read as "the renderer is slow" rather than "the renderer is not running".
+
+**Rule: before believing any rendering or timing observation taken through an
+automated browser, assert `document.visibilityState === 'visible'`.** If it is
+hidden, every frame-rate number is invalid and every screenshot may be
+arbitrarily old. Check this FIRST — it costs one expression, and it is cheaper
+than reading a 1900-line shader looking for a bug that is not there.
+
+Corollary for this codebase specifically: the splat cloud's land path has a
+hard floor (`landColor = max(landColor, vec3(0.10))`) and, after the
+hue-preserving ceiling, cannot produce black. Pure black land is therefore
+*by construction* not a shader-parameter problem — it means either the colour
+attribute is absent or the frame predates it. That is a fast disqualifier for
+the whole class of hypothesis.
+
+### Resolution, 2026-07-31 — the lost PORT_OVERRIDES were not needed
+
+Recovered by not needing recovery. With flight-proxy running, the PortWatch
+reference layer lands in `.cache/portwatch/`; the matcher was run against those
+1,380 rows offline, with overrides disabled, and returned **43/43 matched, 0
+weak, 0 unmatched**. Every name disagreement was a transliteration and every
+distant match was a port complex centroid.
+
+Two things worth keeping from this:
+
+* **A cache on disk is a test fixture.** The console-log route needed a live
+  browser, a working extension and a reload. The same data was sitting in a
+  directory the whole time, and reading it turned a blocked task into a
+  deterministic script that can be re-run whenever the upstream refreshes.
+* **"Matched" is not "matched correctly."** 43/43 inside the warn radius says
+  nothing about whether each pair is the RIGHT pair. The check that mattered was
+  listing the pairs where the names disagree or the distance is large, and
+  reading them. DUBAI has two candidates 9.4 km and 27.8 km away, and only
+  looking tells you which one the map should mean.

@@ -49,3 +49,8 @@ splats/*.spz
 .claude/
 _tmp_unnamed.png
 *.tmp
+.cache/
+
+# SECOM dev PKI (tools/stm-pki.mjs). Contains UNENCRYPTED private keys —
+# including the CA key. Regenerate locally; never commit.
+.secom/

@@ -29,7 +29,7 @@
 
 import { STM } from './config.js';
 import { simClock } from './simClock.js';
-import { ROUTE_STATUS_MONITORING } from './rtzCodec.js';
+import { ROUTE_STATUS_MONITORING } from './voyagePlan.js';
 
 const _plans = [];                 // stable reference, like entityStore's array
 const _byUvid = new Map();         // uvid → plan (index, not ownership)

@@ -155,7 +155,15 @@ test('a rejected file is REPORTED, never silently skipped', () => {
 test('a rejection with no detail still produces a message', () => {
     const s = summariseImport([{ name: 'x.rtz', plan: null, report: rep({ warnings: [] }) }]);
     assert.match(s, /REJECTED x\.rtz/);
-    assert.match(s, /not a usable RTZ document/);
+    // Format-neutral ON PURPOSE (2026-07-30). The registry picks the codec, so a
+    // fallback naming one format would tell an operator who dropped a valid
+    // S-421 file that it was "not a usable RTZ document" — wrong, and misleading
+    // about why it failed. parseAny emits UNRECOGNISED_ROUTE_FORMAT naming the
+    // actual root element when it genuinely cannot place a document; this string
+    // is only the last resort when a codec rejected without saying why.
+    assert.match(s, /not a usable route plan document/);
+    assert.doesNotMatch(s, /\bRTZ\b|\bS-421\b|\bGML\b/,
+        'a generic rejection must not name one format — see routeCodecs.js');
 });
 test('dropped waypoints are counted and sampled', () => {
     const s = summariseImport([{ name: 'a.rtz', plan: okPlan(), report: rep({

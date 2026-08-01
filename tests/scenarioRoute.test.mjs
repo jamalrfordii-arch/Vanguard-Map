@@ -23,7 +23,8 @@ import {
     planFromScenarioEntity, plansFromScenario, rtzFromScenarioEntity,
     loadScenarioPlans, legTimings, isSynthetic, SYNTHETIC_AUTHOR,
 } from '../scenarioRoute.js';
-import { parse, activeSchedule, scheduleElementFor, isMonitoring } from '../rtzCodec.js';
+import { parse } from '../rtzCodec.js';
+import { activeSchedule, scheduleElementFor, isMonitoring } from '../voyagePlan.js';
 import { voyagePlanStore } from '../voyagePlanStore.js';
 import { SyntheticAISSource, haversineNm } from '../dataSource.js';
 import { projectOntoRoute } from '../routeGeometry.js';
@@ -135,7 +136,8 @@ test('the marker SURVIVES an RTZ export and re-import', () => {
     // wire, so routeAuthor is what carries the fact across the boundary.
     const xml = rtzFromScenarioEntity(entityOf(scenario()), { scenarioStartMs: START });
     const back = P(xml).plan;
-    assert.equal(back.sourceFormat, 'RTZ_1_1', 'it really did become a normal RTZ document');
+    assert.equal(back.sourceFormat, 'RTZ', 'it really did become a normal RTZ document');
+    assert.equal(back.sourceVersion, '1.1');
     assert.equal(back.routeAuthor, SYNTHETIC_AUTHOR);
     assert.equal(isSynthetic(back), true, 'still identifiable as ours after the round trip');
 });

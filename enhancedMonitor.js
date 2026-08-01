@@ -44,7 +44,7 @@ import { STM } from './config.js';
 import { simClock } from './simClock.js';
 import { voyagePlanStore } from './voyagePlanStore.js';
 import { projectOntoRoute } from './routeGeometry.js';
-import { scheduleElementFor, activeSchedule } from './rtzCodec.js';
+import { scheduleElementFor, activeSchedule } from './voyagePlan.js';
 import { isSynthetic } from './scenarioRoute.js';
 
 /** Vessel-level monitoring states. */

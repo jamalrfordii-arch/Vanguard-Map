@@ -26,27 +26,16 @@
 
 import { STM } from './config.js';
 
+// The route-status vocabulary is a VOYAGE concept, not an RTZ one — S-421
+// carries the same enumeration. It lives in voyagePlan.js so the monitor never
+// has to import a serialisation format to ask whether a plan is being steered.
+import { ROUTE_STATUS } from './voyagePlan.js';
+
 export const RTZ_NS = {
     '1.0': 'http://www.cirm.org/RTZ/1/0',
     '1.1': 'http://www.cirm.org/RTZ/1/1',
     '1.2': 'http://www.cirm.org/RTZ/1/2',
 };
-
-// ── STM routeStatus (RTZ 1.1 Guidelines v1.8 §routeStatusEnum) ───────────────
-// 7 is the one Enhanced Monitoring keys on: it means the route is loaded in the
-// ship's ECDIS and being steered. Monitoring a route at any other status is
-// monitoring an intention nobody is executing.
-export const ROUTE_STATUS = {
-    1: 'ORIGINAL',
-    2: 'PLANNED FOR VOYAGE',
-    3: 'OPTIMIZED',
-    4: 'CROSS CHECKED',
-    5: 'SAFETY CHECKED',
-    6: 'APPROVED',
-    7: 'USED FOR MONITORING',
-    8: 'INACTIVE',
-};
-export const ROUTE_STATUS_MONITORING = 7;
 
 // ── tiny XML helpers ─────────────────────────────────────────────────────────
 // Namespace-agnostic by local name. RTZ files in the wild are inconsistent about
@@ -378,7 +367,12 @@ export function parse(xmlString, opts = {}) {
         routeAuthor: attrStr(infoEl, 'routeAuthor'),
         validFrom: parseIso(attrStr(infoEl, 'validityPeriodStart')),
         validTo:   parseIso(attrStr(infoEl, 'validityPeriodStop')),
-        sourceFormat: `RTZ_${String(report.version).replace('.', '_')}`,
+        // Format and version are SEPARATE canonical fields (see voyagePlan.js).
+        // They were fused as "RTZ_1_1" until 2026-07-30, which forced anything
+        // wanting either one to parse a string, and would have produced
+        // "S421_1_0_0" the moment a second codec landed.
+        sourceFormat:  'RTZ',
+        sourceVersion: report.version == null ? null : String(report.version),
         sourceOrigin: opts.origin ?? 'file',
         receivedAt: opts.receivedAt ?? null,
         waypoints,
@@ -506,31 +500,13 @@ export function serialise(plan, opts = {}) {
 
 // ── convenience ──────────────────────────────────────────────────────────────
 
-/** True when this plan is the one the ship is actually steering. */
-export function isMonitoring(plan) {
-    return plan?.routeStatus === ROUTE_STATUS_MONITORING;
-}
-
-/**
- * The schedule Enhanced Monitoring should measure against.
- * Preference: manual (what the crew entered) over calculated (what a tool
- * produced). RTZ says only one schedule should be active at status 7; when a
- * file breaks that rule we take the first rather than merging, and say so.
- */
-export function activeSchedule(plan) {
-    const s = plan?.schedules ?? [];
-    if (!s.length) return null;
-    return s.find(x => x.kind === 'manual') ?? s[0];
-}
-
-/** Schedule element for a given waypoint id, or null. */
-export function scheduleElementFor(plan, waypointId) {
-    const sch = activeSchedule(plan);
-    if (!sch) return null;
-    return sch.elements.find(e => e.waypointId === waypointId) ?? null;
-}
+// isMonitoring / activeSchedule / scheduleElementFor MOVED to voyagePlan.js on
+// 2026-07-30. They answer questions about a voyage, not about XML, and leaving
+// them here is what made enhancedMonitor import a codec. Do not add plan-meaning
+// helpers to this file — if it does not read or write RTZ bytes, it is not a
+// codec concern.
 
 // ── Debug handle (Tier 3 — DevTools only, never the data path) ───────────────
 if (typeof window !== 'undefined') {
-    window.vg1Rtz = { parse, serialise, isMonitoring, activeSchedule, scheduleElementFor, ROUTE_STATUS };
+    window.vg1Rtz = { parse, serialise, RTZ_NS };
 }

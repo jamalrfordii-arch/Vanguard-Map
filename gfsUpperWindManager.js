@@ -31,7 +31,19 @@ import viewport from './viewport.js';   // map rect (was window.innerWidth/Heigh
 import { MAP_WIDTH, MAP_HEIGHT } from './config.js';
 
 // ── Grid / fetch tuning (matches surface manager) ───────────────────────────
-const GRID_RES_DEG       = 1;
+// 2 degrees, not 1 (2026-07-31). At 1 deg this grid is 360x181 = 65,160 points,
+// which the 100-point batcher turns into 652 requests to open-meteo's free tier on
+// every cold start — roughly 30 s of fetching, and enough volume that the API
+// answers 429. The retry logic handles that correctly (exponential backoff,
+// jitter, capped at 3), so the 429s were never a bug; the REQUEST COUNT was.
+//
+// 2 deg gives 181 x 91 = 16,471 points = 165 batches, a 4x reduction. Upper-level
+// wind at 850/250 mb is smooth at continental scale — the jet stream is thousands
+// of km long and the field is interpolated for rendering anyway — so this costs
+// far less fidelity than it saves in requests.
+//
+// Raise it back to 1 if you ever need finer structure AND have a paid API tier.
+const GRID_RES_DEG       = 2;
 const GRID_W             = Math.round(360 / GRID_RES_DEG);
 const GRID_H             = Math.round(180 / GRID_RES_DEG) + 1;
 const BATCH_SIZE         = 100;

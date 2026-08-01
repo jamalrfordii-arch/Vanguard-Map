@@ -29,7 +29,10 @@
 
 import { STM } from './config.js';
 import { haversineNm } from './dataSource.js';
-import { serialise, ROUTE_STATUS_MONITORING } from './rtzCodec.js';
+import { ROUTE_STATUS_MONITORING } from './voyagePlan.js';
+// serialise still comes from a specific codec: generating a synthetic plan means
+// choosing an output format. That choice is explicit here rather than implied.
+import { serialise } from './rtzCodec.js';
 
 /** Wire marker for a plan Vanguard1 generated rather than received. */
 export const SYNTHETIC_AUTHOR = 'VANGUARD1 SYNTHETIC';

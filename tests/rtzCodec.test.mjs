@@ -13,10 +13,14 @@
 
 import assert from 'node:assert/strict';
 import { DOMParser } from './_stubs/xmlDom.mjs';
+import { parse, serialise, RTZ_NS } from '../rtzCodec.js';
+// The plan-meaning helpers moved to voyagePlan.js (2026-07-30). This suite still
+// exercises them against parsed RTZ documents, which is the right place to check
+// that a real file produces a plan they read correctly.
 import {
-    parse, serialise, isMonitoring, activeSchedule, scheduleElementFor,
-    ROUTE_STATUS, ROUTE_STATUS_MONITORING, RTZ_NS,
-} from '../rtzCodec.js';
+    isMonitoring, activeSchedule, scheduleElementFor,
+    ROUTE_STATUS, ROUTE_STATUS_MONITORING,
+} from '../voyagePlan.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -101,7 +105,8 @@ test('parses routeInfo into the canonical plan', () => {
     assert.equal(plan.imo, '9123456');
     assert.equal(plan.routeStatus, 7);
     assert.equal(plan.uvid, 'urn:mrn:stm:voyage:id:acme:b6d7b492-ab3c-42f2-8afd-116c3d872f0c');
-    assert.equal(plan.sourceFormat, 'RTZ_1_1');
+    assert.equal(plan.sourceFormat, 'RTZ', 'the format, on its own');
+    assert.equal(plan.sourceVersion, '1.1', 'the version the DOCUMENT declared, verbatim');
 });
 test('validity period parses to epoch ms', () => {
     const { plan } = P(GOTHENBURG);

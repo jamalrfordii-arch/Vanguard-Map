@@ -1040,6 +1040,14 @@ export function createFlightObject(aircraftData, scene, laneGroup) {
     // Contrail — white, semi-transparent
     const trailMat  = new THREE.LineBasicMaterial({ color: 0xd0e8ff, transparent: true, opacity: 0.40 });
     const trailLine = new THREE.Line(new THREE.BufferGeometry(), trailMat);
+    // HIDDEN UNTIL IT HAS POINTS (2026-07-31). This geometry starts EMPTY and is
+    // only ever filled for curve-driven simulated entities — real AIS vessels
+    // never populate it. Left visible, each one is still a draw call: 614 empty
+    // Lines were measured in a frame carrying 884 draw calls total, i.e. ~70% of
+    // the frame's draw calls rendering nothing at all. An empty geometry costs
+    // the full per-object driver overhead and produces no pixels.
+    // Whoever fills it turns it on (see main.js's history writer).
+    trailLine.visible = false;
     scene.add(trailLine);
 
     // Altitude glow — small additive halo centered on the aircraft,
@@ -1155,6 +1163,14 @@ export function createAISVesselObject(vesselData, scene, laneGroup, predGroup) {
     // Trail line
     const trailMat  = new THREE.LineBasicMaterial({ color: parseInt(shipClass.hex.slice(1), 16), transparent: true, opacity: 0.38 });
     const trailLine = new THREE.Line(new THREE.BufferGeometry(), trailMat);
+    // HIDDEN UNTIL IT HAS POINTS (2026-07-31). This geometry starts EMPTY and is
+    // only ever filled for curve-driven simulated entities — real AIS vessels
+    // never populate it. Left visible, each one is still a draw call: 614 empty
+    // Lines were measured in a frame carrying 884 draw calls total, i.e. ~70% of
+    // the frame's draw calls rendering nothing at all. An empty geometry costs
+    // the full per-object driver overhead and produces no pixels.
+    // Whoever fills it turns it on (see main.js's history writer).
+    trailLine.visible = false;
     scene.add(trailLine);
 
     // Prediction line — dashed orange, projects forward along heading.

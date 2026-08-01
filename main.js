@@ -5,7 +5,7 @@ import {
     BLOOM_STRENGTH_BASE, BLOOM_THREAT_RANGE,
     AMBIENT_INTENSITY_BASE, AMBIENT_INTENSITY_BONUS,
     DIR_LIGHT_INTENSITY_MAX,
-    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY, FLIGHT_INTEGRITY, CONFLICT, CARGO,
+    CAMERA, FLIGHT, THREAT_INTENSITY, REGIONS, CLUSTER, INTEGRITY, FLIGHT_INTEGRITY, CONFLICT, CARGO, STM,
     AIRLINE_COLORS,
     AIRLINE_TAIL_COLORS,
     SHIP_RENDER,
@@ -34,7 +34,7 @@ import {
     createFlightObject, createAISVesselObject,
     createDarkVesselMarker, createVesselDot,
 } from './entityBuilder.js';
-import { PortManager } from './portManager.js';
+import { PortManager, PORTS } from './portManager.js';
 import { ClusterManager } from './clusterManager.js';
 import { integrityManager, setElevationFn as setIntegrityElevation } from './integrityManager.js';
 import { flightIntegrityManager } from './flightIntegrityManager.js';
@@ -43,6 +43,8 @@ import { WaveFieldLayer } from './waveFieldLayer.js'; // global sea-state heatma
 import { FlightManager, lonLatAltToScene, typeCodeToVisualClass, altitudeBandIndex } from './flightManager.js';
 import { aircraftInstancer } from './aircraftInstancer.js';
 import { shipInstancer, setShipViewContext } from './shipInstancer.js';
+import { portActivity } from './portActivityManager.js';
+import { VesselView } from './vesselView.js';
 import { vesselMarkerScale, pixelsPerSceneUnit, effectiveShipScale } from './vesselScale.js';
 import { countNeighborsWithin } from './spatialGrid.js';
 import { TileWarmer } from './tileWarmer.js';
@@ -84,6 +86,7 @@ import { initSitrepManager } from './sitrepManager.js';
 import { initSelectionRing } from './selectionRing.js';
 import { DayNightManager } from './dayNightManager.js';
 import { createDynamicSeaLevel, updateDynamicWater } from './waterManager.js';
+import { tileLandMask } from './tileLandMask.js';
 import { GFSWindManager }  from './gfsWindManager.js';
 import { BeaufortWarningManager } from './beaufortWarningManager.js';
 import { GFSUpperWindManager } from './gfsUpperWindManager.js';
@@ -120,6 +123,15 @@ import { initTimelineRail }       from './timelineRail.js';   // bottom bezel ra
 import { initTopRail }            from './topRail.js';        // top bezel rail
 import { initRollingRecorder }    from './rollingRecorder.js'; // always-on positional history
 import { vesselInstruments }      from './vesselInstruments.js'; // right-dock drawn readouts
+// ── Sea Traffic Management: route plans + Enhanced Monitoring ────────────────
+// docs/STM_ROUTE_SPEC.md. routeLayer draws each declared route and its XTD
+// corridor; enhancedMonitor compares every vessel against the plan it shared.
+import { RouteLayer }             from './routeLayer.js';
+import { enhancedMonitor }        from './enhancedMonitor.js';
+import { voyagePlanStore }        from './voyagePlanStore.js';
+import { loadScenarioPlans }      from './scenarioRoute.js';
+import { parseAny }               from './routeCodecs.js';
+import { initStmPanel }          from './stmPanel.js';  // coverage readout + RTZ drag-drop
 
 // ── Live entity registry ──────────────────────────────────────────────────────
 // Owned by entityStore.js. This file reads via entityStore.all()/byId/flights();
@@ -486,6 +498,13 @@ async function init(mapData) {
     const portManager      = new PortManager(scene);
     const portMarkersGroup = portManager.group;   // backward-compat ref for setupUI
     window.portManager     = portManager;         // console access
+
+    // ── STM route layer ──────────────────────────────────────────────────────
+    // Constructed here because both the layerToggle switch and the animation
+    // loop below need it. It self-subscribes to vg1:voyagePlanReceived and
+    // rebuilds on demand, so nothing has to tell it when a plan arrives.
+    const routeLayer = new RouteLayer(scene);
+    window.routeLayer = routeLayer;               // console access (debug only)
     // Port markers (diamonds + city/port name labels) disabled map-wide
     // 2026-07-15 (Jamal: "delete the little diamonds and city names now that we
     // have a country tracker"). Reversible via the ports layer toggle / setEnabled(true).
@@ -723,6 +742,46 @@ async function init(mapData) {
     // same pattern as aircraftInstancer.init() below.
     shipInstancer.init(scene);
 
+    // ── Ship's-eye harbour view (2026-07-29) ──────────────────────────────────
+    // A SECOND SCALE REGIME in metres, not a zoom level — see vesselView.js for
+    // why the world camera physically cannot reach this (minDistance 0.35 units
+    // = 46.8 km, near-plane floor = 2.67 km, and float32 quantises to ~2 m out at
+    // the map edge). Shares the renderer; owns its own scene, camera and controls.
+    const vesselView = new VesselView(renderer);
+    window.vg1VesselView = vesselView;   // console: vg1VesselView.stats()
+
+    /** Enter the harbour view on the locked vessel, or leave it. Returns the new
+     *  active state so a caller can drive a button's pressed styling. */
+    function toggleVesselView(on) {
+        const want = on ?? !vesselView.active;
+        if (!want) { vesselView.exit(); document.body.classList.remove('vessel-view'); return false; }
+
+        const locked = state.lockedShip;
+        const mmsi = locked && (locked.userData.mmsi ?? locked.userData.id);
+        const subject = mmsi != null ? aisManager.vessels.get(String(mmsi)) : null;
+        // Deliberately refuses rather than picking a vessel for you: the view is
+        // ABOUT one ship, and silently entering on an arbitrary one is worse than
+        // not entering.
+        if (!subject) { console.info('[vesselView] select a vessel first'); return false; }
+
+        const ok = vesselView.enter(subject, [...aisManager.vessels.values()]);
+        if (ok) {
+            vesselView.resize(viewport.width(), viewport.height());
+            document.body.classList.add('vessel-view');
+        }
+        return ok;
+    }
+    window.vg1ToggleVesselView = toggleVesselView;
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'v' && e.key !== 'V') return;
+        // Never steal the key from a text field — the search box lives in
+        // uiController and would otherwise lose every "v" typed into it.
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        toggleVesselView();
+    });
+
     // AIS Integrity — evaluate every report (reuses the invariant violations) and
     // run the periodic loiter/decay pass. Both are cheap; see integrityManager.js.
     setIntegrityElevation(getTrueElevation);   // inject real terrain sampler
@@ -752,6 +811,34 @@ async function init(mapData) {
     // aisManager into the new module (same "pass data in" convention conflict-
     // Manager.evaluate() already uses for flightManager.aircraft above).
     setInterval(() => portCallManager.tick(aisManager.vessels.values()), CARGO.TICK_MS);
+
+    // ── STM Enhanced Monitoring — timer-driven, same shape as above ───────────
+    // Compares every vessel against the route plan it declared. Deliberately NOT
+    // in the animation loop: it is O(vessels × route legs) and needs no more than
+    // STM.TICK_MS resolution. Reads straight off aisManager's live records, the
+    // same "pass data in" convention portCallManager uses.
+    //
+    // Vessels that have shared no plan are UNMONITORED — which is UNKNOWN, not
+    // compliant. window.vg1Monitor.monitoringCoverage() reports the split, and
+    // the route panel must show it rather than let bare water read as "fine".
+    setInterval(() => {
+        enhancedMonitor.tick(aisManager.vessels.values());
+        // Push the verdict into the 3D layer: deviating routes recolour, which is
+        // a uniform write, not a geometry rebuild.
+        for (const st of enhancedMonitor.states.values()) {
+            if (st.uvid) routeLayer.setRouteState(st.uvid, st.state);
+        }
+    }, STM.TICK_MS);
+
+    // Restore any voyage plans persisted from a previous session. Needs the codec
+    // injected because only the raw RTZ document is stored — see
+    // voyagePlanStore.load()'s comment on why it stays format-agnostic.
+    try {
+        const restored = voyagePlanStore.load(parseRtz);
+        if (restored.loaded) console.log(`[STM] restored ${restored.loaded} voyage plan(s)`);
+    } catch (e) {
+        console.warn('[STM] plan restore failed:', e?.message ?? e);
+    }
 
     // Ship type arrived via the static message → rebuild the vessel with its real
     // class (correct hull shape + colour) instead of the grey OTHER placeholder.
@@ -783,7 +870,11 @@ async function init(mapData) {
         // The hull/bridge/etc. is drawn entirely by shipInstancer.js's
         // shared InstancedMesh set; this writes the initial transform so
         // there's no one-frame flash at the origin (slots start zero-scaled).
-        obj.userData.instanceHandle = shipInstancer.spawn(vesselData.class);
+        // `vesselData` is passed for MESH SELECTION ONLY — shipInstancer reads
+        // class/lengthM/name to choose a GLB subtype and writes the result to
+        // vesselData.renderSubtype. It never touches vesselData.class. See
+        // vesselSubtypes.js's honesty note before surfacing renderSubtype anywhere.
+        obj.userData.instanceHandle = shipInstancer.spawn(vesselData.class, vesselData);
         shipInstancer.update(obj.userData.instanceHandle, obj.position, obj.visible, vesselData.headingDeg, vesselData.renderScale);
 
         // Shadow sits just above the curved splat so it reads as touching
@@ -859,6 +950,14 @@ async function init(mapData) {
         obj.rotation.y = (vesselData.headingDeg != null)
             ? Math.PI - (vesselData.headingDeg * Math.PI / 180)
             : Math.PI / 2;
+
+        // Re-check which MESH this vessel should use. Cheap (three string
+        // comparisons when nothing changed) and necessary: a vessel is created
+        // by a position report with lengthM null and name UNKNOWN, and the
+        // type-5 static message carrying both can be minutes behind — resolving
+        // only at spawn would mean the length ladders never fire in practice.
+        // Mesh selection only; vesselData.class is never touched.
+        shipInstancer.resubtype(obj.userData.instanceHandle, vesselData);
 
         // Writes the fresh position into this vessel's instanced hull slot.
         // The per-frame sync loop below also calls this every frame (to catch
@@ -1423,6 +1522,93 @@ async function init(mapData) {
     //   simClock.setTime(...) / setRate(...) / pause() / goLive()
     const aisRecorder = new AISRecorder();
 
+    // ── STM console API (Tier 3 — DevTools convenience, not a data path) ──────
+    //   vg1STM.demo()            — load the Kattegat scenario AND its route plans
+    //   vg1STM.plans()           — every plan held, with status
+    //   vg1STM.coverage()        — { total, monitored, unmonitored, deviating, … }
+    //   vg1STM.states()          — per-vessel monitor state
+    //   vg1STM.importRtz(xml)    — parse and stage a real RTZ document
+    //
+    // demo() is the fast path to seeing this work: it injects the three-vessel
+    // scenario and loads the two route plans those vessels declare, so the map
+    // shows ON_TRACK, DEVIATING and UNMONITORED side by side. The third vessel
+    // is the honest one — it shares no plan, so it has no route drawn, and that
+    // means UNKNOWN rather than compliant.
+    window.vg1STM = {
+        async demo(url = './scenarios/stm-kattegat-demo.json') {
+            // RESET THE WORLD FIRST. aisManager.js:618 drops a new vessel with a
+            // bare `return` once vessels.size hits AIS.MAX_VESSELS — no warning,
+            // no counter. With a live feed running, the store sits exactly AT the
+            // cap, so every ship in this scenario was silently discarded while the
+            // two route plans loaded fine and bound to nothing. The readout then
+            // said "500 total, 0 monitored, 500 unknown" — technically true, and
+            // indistinguishable from the demo simply not working.
+            //
+            // Same reset replay performs, and for the same reason (see
+            // aisManager.clearAllVessels): a fresh world instead of a contested one.
+            // The live socket is separate from attached sources — detaching does not
+            // silence it, and it refills to the cap within seconds. Paused, not
+            // closed, so goLive() restores it.
+            aisManager.setLivePaused(true);
+            aisManager.detachAllSources();
+            aisManager.clearAllVessels();
+
+            const scenario = await (await fetch(url)).json();
+
+            // PARK THE CLOCK AT THE SCENARIO'S EPOCH, BEFORE the source starts.
+            // SyntheticAISSource captures _t0 in start() and dead-reckons every
+            // vessel from (simClock.now() - _t0). Left live, "now" was 31.6 hours
+            // past this scenario's declared startTime, so both ships integrated
+            // ~390 nm along a 67 nm route and were ARRIVED before the first frame.
+            // ARRIVED suppresses alarms deliberately (it is what stops a ship that
+            // finished on time from raising NON_ARRIVAL forever), so the demo ran,
+            // reported "2 plan(s) loaded", raised nothing, and proved nothing.
+            if (scenario.startTime) simClock.setTime(Date.parse(scenario.startTime));
+
+            const res = loadScenarioPlans(scenario, voyagePlanStore);
+            // NOT optional-chained on purpose. vg1Scenario is assigned later in
+            // start() than vg1STM is, so `?.` here reads as defensive when it is
+            // really load-bearing — and if it were ever absent, demo() would report
+            // plans loaded and quietly show no traffic. Fail loudly instead.
+            await window.vg1Scenario.load(url);
+            console.log(`[STM] ${res.added} plan(s) loaded from ${url} — `
+                      + `world reset, ${scenario.entities?.length ?? 0} scenario vessel(s)`, res);
+            return res;
+        },
+        plans() {
+            return voyagePlanStore.all().map(p => ({
+                uvid: p.uvid, mmsi: p.mmsi, route: p.routeName,
+                status: p.routeStatus, synthetic: !!p.synthetic,
+                waypoints: p.waypoints.length,
+                xtd: p.waypoints[1]?.leg
+                    ? `${p.waypoints[1].leg.portsideXTD ?? '—'}/${p.waypoints[1].leg.starboardXTD ?? '—'} nm`
+                    : '—',
+            }));
+        },
+        coverage: () => enhancedMonitor.monitoringCoverage(),
+        states() {
+            return [...enhancedMonitor.states.values()].map(s => ({
+                mmsi: s.mmsi, state: s.state,
+                xtNm: s.crossTrackNm == null ? null : Number(s.crossTrackNm.toFixed(3)),
+                leg: s.legIndex,
+                alarms: [...s.alarms.keys()].filter(k => s.alarms.get(k).confirmed),
+            }));
+        },
+        // Named importRtz for continuity, but it takes ANY registered format —
+        // the registry sniffs the document and picks the codec.
+        importRtz(xml) {
+            const { plan, report, format } = parseAny(xml);
+            if (!plan) { console.warn('[STM] not a usable route plan document', report); return report; }
+            console.log(`[STM] parsed as ${format}`);
+            voyagePlanStore.add(plan);
+            if (report.warnings.length) console.warn('[STM] parse warnings', report.warnings);
+            return { plan, report };
+        },
+        store: voyagePlanStore,
+        monitor: enhancedMonitor,
+        layer: routeLayer,
+    };
+
     // ── RF Intelligence domain — REMOVED 2026-07-23 ───────────────────────────
     // The RF intel panel had no live detector wired to it (the only detector,
     // rfEmergencyBeaconManager, was never imported; gpsJammingManager is a separate
@@ -1439,6 +1625,14 @@ async function init(mapData) {
             controls.update();
         }
     });
+    // ── STM coverage readout + RTZ drag-and-drop ──────────────────────────────
+    // Self-injecting DOM (see stmPanel.js header for why it is not in
+    // index.html). The readout is the honesty surface: it states how many
+    // vessels can be spoken about and how many cannot, so bare water never
+    // reads as compliant. Drop a .rtz/.rtzp/.xml anywhere on the window to
+    // import a real route plan.
+    initStmPanel();
+
     // Altitude Watch — replaces the removed full-map altitude-deck grid.
     // Same fly-to pattern as Integrity/RF; reads entityStore.all() on its own
     // 2s interval, no flightManager reference needed.
@@ -1584,6 +1778,42 @@ async function init(mapData) {
     window.addEventListener('wheel',       _markInteracted, { once: true });
     window.addEventListener('keydown',     _markInteracted, { once: true });
 
+    // ── Camera-flight debug handles (2026-07-30) ──────────────────────────────
+    // Tier 3 per CLAUDE.md's dependency policy: DEBUG ONLY, never a data path.
+    //
+    // WHY THESE EXIST. `state` drives every programmatic camera flight —
+    // isFlyingToTarget, isPanningToTerrain, lockedShip — and animate() lerps
+    // toward them each frame. Three properties of that design make the camera
+    // impossible to hold still from DevTools, which makes any measurement or
+    // screenshot at close zoom unreliable:
+    //
+    //   1. A flight is a LATCHED FLAG, not a running task. Stopping whatever set
+    //      it (discoveryManager's "fly camera to" tool, an alert, a feed click)
+    //      does NOT stop the flight already in progress.
+    //   2. `state` had no window handle, so the flags could not be cleared.
+    //      Every other subsystem here has one — simClock, splatCloud, tileStream,
+    //      vg1Invariants — the camera did not.
+    //   3. `_userHasInteracted` is a ONE-WAY latch. It exists to stop a startup
+    //      AIS event auto-zooming to a vessel, and it does that well, but the
+    //      first pointerdown unblocks programmatic flying FOREVER. Note a
+    //      synthetic .click() does not trip it (no pointerdown) while a real
+    //      mouse click does — so the map behaves differently under automation
+    //      than under a human, which is its own trap.
+    //
+    // Diagnosed 2026-07-30 after the camera wandered out of three consecutive
+    // measurement runs.
+    window.vg1CamState = state;
+    window.vg1HoldCamera = (on = true) => {
+        _userHasInteracted = !on;          // re-arm (or release) the gate
+        if (on) {
+            state.isFlyingToTarget   = false;
+            state.isPanningToTerrain = false;
+            state.lockedShip         = null;
+        }
+        return { held: on, flying: state.isFlyingToTarget,
+                 panning: state.isPanningToTerrain, locked: !!state.lockedShip };
+    };
+
     // Resize is driven by viewport (ResizeObserver on #canvas-container), NOT by
     // window 'resize'. Opening or closing the selection dock changes the map size
     // without any window resize event firing at all — a window listener would
@@ -1593,6 +1823,7 @@ async function init(mapData) {
     // rather than ~17× across it (the post chain reallocates 7 passes each time).
     viewport.onChange((w, h) => {
         onWindowResize(camera, renderer, composer, vTiltShiftPass, hTiltShiftPass);
+        vesselView.resize(w, h);
         waveFieldLayer.onResize();   // reads viewport buffer dims itself
 
         // ── SAFETY NET: every LineMaterial.resolution in the scene ──────────
@@ -1877,6 +2108,7 @@ async function init(mapData) {
             case 'sea-state':    waveFieldLayer.setVisible(on);       break;  // global wave-height field
             case 'storm-history': ibtracsManager.setVisible(on);     break;
             case 'gps-jamming':  gpsJammingManager.setVisible(on);   break;
+            case 'routes':       routeLayer.setVisible(on);          break;  // STM declared routes + XTD corridors
             case 'fog':          window.vg1_fog_enabled   = on;       break;
             case 'ports':
                 if (portManager) portManager.setEnabled(on);
@@ -1936,7 +2168,14 @@ async function init(mapData) {
                 }
 
                 // Trail always follows the same visibility as the vessel
-                if (ud.trail) ud.trail.visible = passes;
+                // AND it must have something to draw. Following the filter alone is
+                // what kept 501 empty ship trails visible after entityBuilder started
+                // creating them hidden — a per-vessel draw call rendering nothing.
+                // Third site with this shape; see tests/emptyDrawCalls.test.mjs.
+                if (ud.trail) {
+                    ud.trail.visible = passes &&
+                        (ud.trail.geometry?.attributes?.position?.count ?? 0) > 1;
+                }
             });
 
             // Dead-reckoning line/marker: independent of the class filter, EXCEPT
@@ -1993,6 +2232,19 @@ async function init(mapData) {
     // Expose hit meshes so uiController.onClick can detect chokepoint clicks.
     window.chokepointHitMeshes = chokepointManager.getHitMeshes();
     window.chokepointManager   = chokepointManager;   // console access
+
+    // ── IMF PortWatch activity (2026-07-29) ───────────────────────────────────
+    // Fire and forget: this is a CONTEXT layer, not a dependency. It resolves
+    // false rather than rejecting, and every consumer treats "no data" as normal
+    // (see portActivityManager's fail-open note). Boot must not wait on a third-
+    // party service, so this is deliberately not awaited.
+    //
+    // NOTE ON TRUST LEVELS: what this returns is AGGREGATE and up to a week old.
+    // It must never be merged into the same field as portCallManager's own
+    // AIS-derived, per-hull port calls — same subject, completely different
+    // evidentiary weight. Show them as separate, labelled rows.
+    portActivity.init(PORTS, CHOKEPOINTS.map(cp => cp.name))
+        .then(ok => ok && console.info('[portActivity] ready —', portActivity.matchReport().summary));
 
     // ── Tile-streaming LOD terrain ────────────────────────────────────────────
     const tileStreamManager = new TileStreamManager(scene);
@@ -2760,6 +3012,13 @@ async function init(mapData) {
         // ── Chokepoint landmarks ──────────────────────────────────────────────
         chokepointManager.tick(delta, elapsed, entityStore.all());
 
+        // ── STM route corridors ───────────────────────────────────────────────
+        // Cheap by construction: rebuilds geometry only when a plan actually
+        // changed (event-driven), and otherwise writes ONE uniform per route to
+        // set the corridor's on-screen width. window.innerHeight matches the
+        // viewport-height convention used by pixelsPerSceneUnit elsewhere here.
+        routeLayer.update(camera, window.innerHeight);
+
         // ── Simulated (spline-driven) entities ────────────────────────────────
         entityStore.all().forEach(ship => {
             if (!ship.userData.curve) return; // skip real AIS / flights / sats
@@ -2796,6 +3055,9 @@ async function init(mapData) {
                     attr.setXYZ(j, hist[j].x, hist[j].y, hist[j].z);
                 }
                 attr.needsUpdate = true;
+                // It has points now, so it is worth drawing. Paired with the
+                // visible=false at creation in entityBuilder.js.
+                ship.userData.trail.visible = true;
                 geo.setDrawRange(0, cnt);
             }
 
@@ -3258,17 +3520,41 @@ async function init(mapData) {
         }
 
         // ── Dynamic water animation ───────────────────────────────────────────
-        updateDynamicWater(elapsed, camera.position.y);
+        // ctx (2026-07-31) feeds the shore-field clipmap: the sea plane's land mask
+        // is now sampled per fragment from a camera-anchored texture instead of the
+        // 156 km per-vertex attribute. Same anchor and radius the tile loader uses,
+        // so the plane and the tiles agree about what "here" means. Optional by
+        // design — drop the third argument and the plane falls back to the coarse
+        // attribute, which is the pre-shore-field behaviour.
+        updateDynamicWater(elapsed, camera.position.y, {
+            lookAtX: controls.target.x,
+            lookAtZ: controls.target.z,
+            radiusU: tileStreamManager.coveredRadiusU(camera, controls.target),
+            finestZoom: tileLandMask.finestZoom || 12,
+        });
 
         // ── Render ────────────────────────────────────────────────────────────
         // GPU timer query brackets the actual draw work, so a stall can be told
         // apart from JS blocking the loop — wall-clock frame deltas cannot do that.
         hitchRecorder.beginGpu();
-        composer.render();
-        hitchRecorder.endGpu();
-        // Sea-state contour overlay — after post-processing so the thin black isobands
-        // stay crisp. Pass `scene` so the overlay mirrors cinematic-orbit rotation.
-        waveFieldLayer.renderOverlay(renderer, camera, scene);
+        // The harbour view replaces the world render entirely — it is not drawn
+        // over it. Running the composer as well would cost a full world frame
+        // that is then painted over, and every pass in that chain is tuned for
+        // world units (fog in hundreds of km, tilt-shift framing the globe), so
+        // the result would be both slower and wrong. Same reason the sea-state
+        // contour overlay below is skipped.
+        if (vesselView.active) {
+            vesselView.sync([...aisManager.vessels.values()]);
+            vesselView.render(elapsed);
+            hitchRecorder.endGpu();
+        } else {
+            composer.render();
+            hitchRecorder.endGpu();
+            // Sea-state contour overlay — after post-processing so the thin black
+            // isobands stay crisp. Pass `scene` so the overlay mirrors
+            // cinematic-orbit rotation.
+            waveFieldLayer.renderOverlay(renderer, camera, scene);
+        }
 
         // Closes the in-frame timer. Anything in a stall NOT accounted for here
         // happened while animate() was not running.
